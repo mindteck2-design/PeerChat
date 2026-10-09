@@ -1,0 +1,20 @@
+[Unit]
+Description=LanMsg Server (HTTPS/WSS + PostgreSQL)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lanmsg
+Group=lanmsg
+WorkingDirectory=/opt/lanmsg-server
+ExecStart=/opt/lanmsg-server/lanmsg-server -config /opt/lanmsg-server/config.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/lanmsg-server/data
+
+[Install]
+WantedBy=multi-user.target
