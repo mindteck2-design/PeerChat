@@ -68,11 +68,22 @@ import { KEYS, getOrCreateIdentity, loadLocal, removeLocal, saveLocal } from "./
 
 type Screen = "login" | "chat" | "settings";
 
+/** TEMP: UI preview without server — remove before production. */
+const PREVIEW_USER: User = {
+  id: "00000000-0000-4000-8000-000000000001",
+  username: "preview",
+  display_name: "Preview User",
+  x25519_public: "",
+  ed25519_public: "",
+  online: true,
+};
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>("login");
   const [boot, setBoot] = useState(true);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [user, setUser] = useState<User | null>(null);
+  const [preview, setPreview] = useState(false);
   const [serverUrl, setServerUrl] = useState("");
   const [pinnedFp, setPinnedFp] = useState("");
   const [error, setError] = useState("");
@@ -128,6 +139,7 @@ export default function App() {
         setServerUrl={setServerUrl}
         setPinnedFp={setPinnedFp}
         onAuthed={async (u, tok, fp) => {
+          setPreview(false);
           setUser(u);
           setToken(tok);
           setPinnedFp(fp);
@@ -135,6 +147,13 @@ export default function App() {
           await saveLocal(KEYS.user, u);
           await saveLocal(KEYS.pinnedFp, fp);
           await saveLocal(KEYS.serverUrl, getBaseUrl());
+          setScreen("chat");
+        }}
+        onPreview={() => {
+          const pubs = exportPublic(identity);
+          setPreview(true);
+          setUser({ ...PREVIEW_USER, ...pubs });
+          setPinnedFp(pinnedFp || "preview-tls-fingerprint-not-a-real-pin");
           setScreen("chat");
         }}
       />
@@ -148,17 +167,21 @@ export default function App() {
         identity={identity}
         serverUrl={serverUrl}
         pinnedFp={pinnedFp}
+        preview={preview}
         onBack={() => setScreen("chat")}
         onLogout={async () => {
-          try {
-            await api.logout();
-          } catch {
-            /* ignore */
+          if (!preview) {
+            try {
+              await api.logout();
+            } catch {
+              /* ignore */
+            }
+            await removeLocal(KEYS.token);
+            await removeLocal(KEYS.user);
           }
           setToken("");
           setUser(null);
-          await removeLocal(KEYS.token);
-          await removeLocal(KEYS.user);
+          setPreview(false);
           setScreen("login");
         }}
         onUser={(u) => setUser(u)}
@@ -172,17 +195,21 @@ export default function App() {
     <ChatScreen
       user={user}
       identity={identity}
+      preview={preview}
       onSettings={() => setScreen("settings")}
       onLogout={async () => {
-        try {
-          await api.logout();
-        } catch {
-          /* ignore */
+        if (!preview) {
+          try {
+            await api.logout();
+          } catch {
+            /* ignore */
+          }
+          await removeLocal(KEYS.token);
+          await removeLocal(KEYS.user);
         }
         setToken("");
         setUser(null);
-        await removeLocal(KEYS.token);
-        await removeLocal(KEYS.user);
+        setPreview(false);
         setScreen("login");
       }}
     />
@@ -200,6 +227,7 @@ function LoginScreen(props: {
   setServerUrl: (s: string) => void;
   setPinnedFp: (s: string) => void;
   onAuthed: (u: User, tok: string, fp: string) => void;
+  onPreview: () => void;
 }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [username, setUsername] = useState("");
@@ -343,6 +371,9 @@ function LoginScreen(props: {
             <Button variant="contained" size="large" disabled={busy} onClick={connectAndAuth}>
               {busy ? "Working…" : mode === "signup" ? "Create account" : "Enter"}
             </Button>
+            <Button variant="text" color="secondary" onClick={props.onPreview}>
+              Preview UI (no server)
+            </Button>
             {props.pinnedFp && (
               <Chip size="small" label={`Pinned TLS ${props.pinnedFp.slice(0, 12)}…`} />
             )}
@@ -387,36 +418,96 @@ function LoginScreen(props: {
 function ChatScreen({
   user,
   identity,
+  preview,
   onSettings,
   onLogout,
 }: {
   user: User;
   identity: Identity;
+  preview?: boolean;
   onSettings: () => void;
   onLogout: () => void;
 }) {
-  const [users, setUsers] = useState<User[]>([]);
-  const [convs, setConvs] = useState<Conversation[]>([]);
-  const [active, setActive] = useState<Conversation | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const previewPeer: User = {
+    id: "00000000-0000-4000-8000-000000000002",
+    username: "alex",
+    display_name: "Alex (sample)",
+    x25519_public: "preview",
+    ed25519_public: "preview",
+    online: true,
+  };
+  const previewConv: Conversation = {
+    id: "preview-dm-1",
+    kind: "dm",
+    peer_id: previewPeer.id,
+    peer_name: previewPeer.display_name,
+    created_at: new Date().toISOString(),
+  };
+  const previewGroup: Conversation = {
+    id: "preview-group-1",
+    kind: "group",
+    title: "Desk squad (sample)",
+    created_at: new Date().toISOString(),
+  };
+
+  const [users, setUsers] = useState<User[]>(preview ? [user, previewPeer] : []);
+  const [convs, setConvs] = useState<Conversation[]>(preview ? [previewConv, previewGroup] : []);
+  const [active, setActive] = useState<Conversation | null>(preview ? previewConv : null);
+  const [messages, setMessages] = useState<Message[]>(
+    preview
+      ? [
+          {
+            id: "m1",
+            conversation_id: previewConv.id,
+            sender_id: previewPeer.id,
+            kind: "text",
+            ciphertext: "",
+            nonce: "",
+            wrapped_keys: {},
+            signature: "",
+            created_at: new Date().toISOString(),
+          },
+          {
+            id: "m2",
+            conversation_id: previewConv.id,
+            sender_id: user.id,
+            kind: "text",
+            ciphertext: "",
+            nonce: "",
+            wrapped_keys: {},
+            signature: "",
+            created_at: new Date().toISOString(),
+          },
+        ]
+      : []
+  );
   const [text, setText] = useState("");
-  const [plain, setPlain] = useState<Record<string, string>>({});
+  const [plain, setPlain] = useState<Record<string, string>>(
+    preview
+      ? {
+          m1: "Hey — this is a UI preview with sample messages.",
+          m2: "Server not required. Open Settings from the toolbar.",
+        }
+      : {}
+  );
   const [groupKeys, setGroupKeys] = useState<Record<string, Uint8Array>>({});
   const [tab, setTab] = useState(0);
   const [groupOpen, setGroupOpen] = useState(false);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPick, setGroupPick] = useState<string[]>([]);
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState(preview ? "Preview mode — no server" : "");
 
   const others = useMemo(() => users.filter((u) => u.id !== user.id), [users, user.id]);
 
   async function refresh() {
+    if (preview) return;
     const [u, c] = await Promise.all([api.users(), api.conversations()]);
     setUsers(u.users);
     setConvs(c.conversations);
   }
 
   useEffect(() => {
+    if (preview) return;
     refresh().catch(console.error);
     const t = setInterval(() => refresh().catch(() => {}), 8000);
     let ws: WebSocket | null = null;
@@ -437,10 +528,10 @@ function ChatScreen({
       clearInterval(t);
       ws?.close();
     };
-  }, [active?.id]);
+  }, [active?.id, preview]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || preview) return;
     (async () => {
       const { messages: msgs } = await api.messages(active.id);
       setMessages(msgs);
@@ -451,9 +542,10 @@ function ChatScreen({
         }
       }
     })().catch(console.error);
-  }, [active?.id]);
+  }, [active?.id, preview]);
 
   useEffect(() => {
+    if (preview) return;
     (async () => {
       const next: Record<string, string> = { ...plain };
       for (const m of messages) {
@@ -477,9 +569,23 @@ function ChatScreen({
       }
       setPlain(next);
     })();
-  }, [messages, groupKeys, active?.id]);
+  }, [messages, groupKeys, active?.id, preview]);
 
   async function openDm(peer: User) {
+    if (preview) {
+      const c: Conversation = {
+        id: `preview-dm-${peer.id}`,
+        kind: "dm",
+        peer_id: peer.id,
+        peer_name: peer.display_name,
+        created_at: new Date().toISOString(),
+      };
+      setActive(c);
+      setConvs((list) => (list.some((x) => x.id === c.id) ? list : [c, ...list]));
+      setMessages([]);
+      setPlain({});
+      return;
+    }
     const { conversation } = await api.openDm(peer.id);
     setActive(conversation);
     await refresh();
@@ -487,6 +593,27 @@ function ChatScreen({
 
   async function send() {
     if (!active || !text.trim()) return;
+    if (preview) {
+      const id = `local-${Date.now()}`;
+      const body = text.trim();
+      setMessages((m) => [
+        ...m,
+        {
+          id,
+          conversation_id: active.id,
+          sender_id: user.id,
+          kind: "text",
+          ciphertext: "",
+          nonce: "",
+          wrapped_keys: {},
+          signature: "",
+          created_at: new Date().toISOString(),
+        },
+      ]);
+      setPlain((p) => ({ ...p, [id]: body }));
+      setText("");
+      return;
+    }
     const memberPubs: Record<string, string> = {};
     if (active.kind === "dm" && active.peer_id) {
       const peer = users.find((u) => u.id === active.peer_id);
@@ -512,6 +639,10 @@ function ChatScreen({
 
   async function sendFile(file: File) {
     if (!active) return;
+    if (preview) {
+      setStatus(`Preview: would encrypt & upload ${file.name}`);
+      return;
+    }
     setStatus(`Encrypting ${file.name}…`);
     const { members } = await api.members(active.id);
     const pubs: Record<string, string> = {};
@@ -627,6 +758,7 @@ function ChatScreen({
             </Typography>
             <Typography variant="caption" color="text.secondary">
               @{user.username}
+              {preview ? " · preview" : ""}
             </Typography>
           </Box>
           <IconButton aria-label="Settings" onClick={onSettings}>
@@ -819,6 +951,20 @@ function ChatScreen({
           <Button
             variant="contained"
             onClick={async () => {
+              if (preview) {
+                const conversation: Conversation = {
+                  id: `preview-group-${Date.now()}`,
+                  kind: "group",
+                  title: groupTitle || "New group",
+                  created_at: new Date().toISOString(),
+                };
+                setConvs((c) => [conversation, ...c]);
+                setGroupOpen(false);
+                setActive(conversation);
+                setMessages([]);
+                setPlain({});
+                return;
+              }
               const gk = createGroupKey();
               const pubs: Record<string, string> = {
                 [user.id]: exportPublic(identity).x25519_public,
@@ -848,6 +994,7 @@ function SettingsScreen(props: {
   identity: Identity;
   serverUrl: string;
   pinnedFp: string;
+  preview?: boolean;
   onBack: () => void;
   onLogout: () => void;
   onUser: (u: User) => void;
@@ -858,7 +1005,7 @@ function SettingsScreen(props: {
   const [url, setUrl] = useState(props.serverUrl);
   const [oldP, setOldP] = useState("");
   const [newP, setNewP] = useState("");
-  const [msg, setMsg] = useState("");
+  const [msg, setMsg] = useState(props.preview ? "Preview mode — changes are local only" : "");
   const fp = fingerprintPublic(exportPublic(props.identity).x25519_public);
 
   return (
@@ -866,6 +1013,7 @@ function SettingsScreen(props: {
       <Stack direction="row" alignItems="center" spacing={1} mb={3}>
         <Button onClick={props.onBack}>Back</Button>
         <Typography variant="h5">Settings</Typography>
+        {props.preview && <Chip size="small" color="secondary" label="preview" />}
       </Stack>
 
       <Stack spacing={3}>
@@ -883,6 +1031,11 @@ function SettingsScreen(props: {
             <Button
               variant="contained"
               onClick={async () => {
+                if (props.preview) {
+                  props.onUser({ ...props.user, display_name: name });
+                  setMsg("Preview: display name updated locally");
+                  return;
+                }
                 const { user } = await api.patchMe(name);
                 props.onUser(user);
                 await saveLocal(KEYS.user, user);
@@ -967,6 +1120,10 @@ function SettingsScreen(props: {
             <Button
               variant="contained"
               onClick={async () => {
+                if (props.preview) {
+                  setMsg("Preview: password change skipped (no server)");
+                  return;
+                }
                 await api.changePassword(oldP, newP);
                 setMsg("Password changed — sessions revoked. Log in again.");
                 props.onLogout();

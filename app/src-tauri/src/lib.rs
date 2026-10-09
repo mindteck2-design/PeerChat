@@ -91,10 +91,9 @@ async fn tls_fingerprint(url: String) -> Result<String, String> {
         (hostport.to_string(), 8765u16)
     };
 
-    let mut addrs = tokio::net::lookup_host((host.as_str(), port))
+    let addr = tokio::net::lookup_host((host.as_str(), port))
         .await
-        .map_err(|e| e.to_string())?;
-    let addr = addrs
+        .map_err(|e| e.to_string())?
         .next()
         .ok_or_else(|| "could not resolve server host".to_string())?;
 
