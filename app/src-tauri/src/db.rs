@@ -49,6 +49,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             conversation_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             wrapped_group_key TEXT,
+            display_name TEXT,
             PRIMARY KEY (conversation_id, user_id)
         );
 
@@ -64,6 +65,13 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             file_id TEXT,
             created_at TEXT NOT NULL,
             delivered INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS message_reads (
+            message_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            read_at TEXT NOT NULL,
+            PRIMARY KEY (message_id, user_id)
         );
 
         CREATE TABLE IF NOT EXISTS outbox (
@@ -87,6 +95,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             chunk_count INTEGER NOT NULL,
             wrapped_keys TEXT NOT NULL DEFAULT '{}',
             staging_dir TEXT,
+            local_path TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -99,6 +108,12 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| e.to_string())?;
+    // Existing databases created before display_name was added.
+    let _ = conn.execute(
+        "ALTER TABLE conversation_members ADD COLUMN display_name TEXT",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE files ADD COLUMN local_path TEXT", []);
     Ok(())
 }
 
@@ -285,9 +300,10 @@ pub fn create_group(
     )
     .map_err(|e| e.to_string())?;
     for (uid, wrap) in members {
+        let name = display_name_for(conn, uid);
         conn.execute(
-            "INSERT INTO conversation_members(conversation_id, user_id, wrapped_group_key) VALUES (?1,?2,?3)",
-            params![id, uid, wrap],
+            "INSERT INTO conversation_members(conversation_id, user_id, wrapped_group_key, display_name) VALUES (?1,?2,?3,?4)",
+            params![id, uid, wrap, name],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -358,7 +374,21 @@ pub fn insert_message(conn: &Connection, msg: &Value) -> Result<(), String> {
 pub fn list_messages(conn: &Connection, conversation_id: &str) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, conversation_id, sender_id, kind, ciphertext, nonce, wrapped_keys, signature, file_id, created_at, delivered FROM messages WHERE conversation_id=?1 ORDER BY created_at ASC",
+            r#"SELECT m.id, m.conversation_id, m.sender_id, m.kind, m.ciphertext,
+                      m.nonce, m.wrapped_keys, m.signature, m.file_id, m.created_at,
+                      m.delivered,
+                      CASE
+                        WHEN (SELECT COUNT(*) FROM outbox o
+                              WHERE o.id LIKE m.id || ':%') > 0
+                         AND (SELECT COUNT(*) FROM message_reads mr
+                              WHERE mr.message_id=m.id) >=
+                             (SELECT COUNT(*) FROM outbox o
+                              WHERE o.id LIKE m.id || ':%')
+                        THEN 1 ELSE 0
+                      END AS is_read
+               FROM messages m
+               WHERE m.conversation_id=?1
+               ORDER BY m.created_at ASC"#,
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -377,6 +407,7 @@ pub fn list_messages(conn: &Connection, conversation_id: &str) -> Result<Vec<Val
                 "file_id": r.get::<_, Option<String>>(8)?,
                 "created_at": r.get::<_, String>(9)?,
                 "delivered": r.get::<_, i64>(10)? == 1,
+                "read": r.get::<_, i64>(11)? == 1,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -435,11 +466,20 @@ pub fn mark_outbox_delivered(conn: &Connection, id: &str) -> Result<(), String> 
         params![id, now],
     )
     .map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE messages SET delivered=1 WHERE id=?1",
-        params![id],
-    )
-    .ok();
+    // Outbox ids are "{message_id}:{recipient}". Mark the chat row delivered
+    // only after every recipient copy has gone out.
+    let msg_id = id.split(':').next().unwrap_or(id);
+    let still: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM outbox WHERE delivered_at IS NULL AND (id=?1 OR id LIKE ?2)",
+            params![msg_id, format!("{msg_id}:%")],
+            |r| r.get(0),
+        )
+        .unwrap_or(1);
+    if still == 0 {
+        conn.execute("UPDATE messages SET delivered=1 WHERE id=?1", params![msg_id])
+            .ok();
+    }
     Ok(())
 }
 
@@ -454,8 +494,8 @@ pub fn bump_outbox_error(conn: &Connection, id: &str, err: &str) -> Result<(), S
 
 pub fn insert_file(conn: &Connection, file: &Value) -> Result<(), String> {
     conn.execute(
-        r#"INSERT INTO files(id, conversation_id, uploader_id, enc_filename, filename_nonce, size_bytes, chunk_count, wrapped_keys, staging_dir, created_at)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"#,
+        r#"INSERT INTO files(id, conversation_id, uploader_id, enc_filename, filename_nonce, size_bytes, chunk_count, wrapped_keys, staging_dir, local_path, created_at)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"#,
         params![
             file["id"].as_str().unwrap_or(""),
             file["conversation_id"].as_str().unwrap_or(""),
@@ -466,6 +506,7 @@ pub fn insert_file(conn: &Connection, file: &Value) -> Result<(), String> {
             file["chunk_count"].as_i64().unwrap_or(0),
             file.get("wrapped_keys").map(|v| v.to_string()).unwrap_or_else(|| "{}".into()),
             file.get("staging_dir").and_then(|v| v.as_str()),
+            file.get("local_path").and_then(|v| v.as_str()),
             file["created_at"].as_str().unwrap_or(""),
         ],
     )
@@ -475,7 +516,7 @@ pub fn insert_file(conn: &Connection, file: &Value) -> Result<(), String> {
 
 pub fn get_file(conn: &Connection, file_id: &str) -> Result<Option<Value>, String> {
     conn.query_row(
-        "SELECT id, conversation_id, uploader_id, enc_filename, filename_nonce, size_bytes, chunk_count, wrapped_keys, staging_dir, created_at FROM files WHERE id=?1",
+        "SELECT id, conversation_id, uploader_id, enc_filename, filename_nonce, size_bytes, chunk_count, wrapped_keys, staging_dir, local_path, created_at FROM files WHERE id=?1",
         params![file_id],
         |r| {
             let wraps: String = r.get(7)?;
@@ -490,12 +531,59 @@ pub fn get_file(conn: &Connection, file_id: &str) -> Result<Option<Value>, Strin
                 "chunk_count": r.get::<_, i64>(6)?,
                 "wrapped_keys": wrapped_keys,
                 "staging_dir": r.get::<_, Option<String>>(8)?,
-                "created_at": r.get::<_, String>(9)?,
+                "local_path": r.get::<_, Option<String>>(9)?,
+                "created_at": r.get::<_, String>(10)?,
             }))
         },
     )
     .optional()
     .map_err(|e| e.to_string())
+}
+
+pub fn set_file_local_path(conn: &Connection, file_id: &str, path: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE files SET local_path=?2 WHERE id=?1",
+        params![file_id, path],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn mark_message_read(conn: &Connection, message_id: &str, user_id: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO message_reads(message_id, user_id, read_at) VALUES (?1,?2,?3)",
+        params![message_id, user_id, chrono::Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn unread_incoming(
+    conn: &Connection,
+    conversation_id: &str,
+    my_user_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"SELECT m.id, m.sender_id
+               FROM messages m
+               LEFT JOIN message_reads r
+                 ON r.message_id=m.id AND r.user_id=?2
+               WHERE m.conversation_id=?1
+                 AND m.sender_id<>?2
+                 AND r.message_id IS NULL"#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![conversation_id, my_user_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
 
 pub fn ack_file(conn: &Connection, file_id: &str, user_id: &str) -> Result<(), String> {
@@ -535,6 +623,101 @@ pub fn get_wrapped_group_key(conn: &Connection, conversation_id: &str, user_id: 
     conn.query_row(
         "SELECT wrapped_group_key FROM conversation_members WHERE conversation_id=?1 AND user_id=?2",
         params![conversation_id, user_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(|o| o.flatten())
+    .map_err(|e| e.to_string())
+}
+
+pub fn display_name_for(conn: &Connection, user_id: &str) -> String {
+    if let Ok(Some(profile)) = get_profile(conn) {
+        if profile["id"].as_str() == Some(user_id) {
+            return profile["display_name"]
+                .as_str()
+                .unwrap_or("Me")
+                .to_string();
+        }
+    }
+    conn.query_row(
+        "SELECT display_name FROM peers WHERE user_id=?1",
+        params![user_id],
+        |r| r.get::<_, String>(0),
+    )
+    .unwrap_or_else(|_| "Member".into())
+}
+
+pub fn upsert_member(
+    conn: &Connection,
+    conversation_id: &str,
+    user_id: &str,
+    wrapped_group_key: Option<&str>,
+    display_name: Option<&str>,
+) -> Result<(), String> {
+    conn.execute(
+        r#"INSERT INTO conversation_members(conversation_id, user_id, wrapped_group_key, display_name)
+           VALUES (?1,?2,?3,?4)
+           ON CONFLICT(conversation_id, user_id) DO UPDATE SET
+             wrapped_group_key=COALESCE(excluded.wrapped_group_key, conversation_members.wrapped_group_key),
+             display_name=COALESCE(excluded.display_name, conversation_members.display_name)"#,
+        params![conversation_id, user_id, wrapped_group_key, display_name],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_member(conn: &Connection, conversation_id: &str, user_id: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM conversation_members WHERE conversation_id=?1 AND user_id=?2",
+        params![conversation_id, user_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn list_members(conn: &Connection, conversation_id: &str) -> Result<Vec<Value>, String> {
+    let me = get_profile(conn)?
+        .and_then(|p| p.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()));
+    let my_name = get_profile(conn)?
+        .and_then(|p| p.get("display_name").and_then(|v| v.as_str()).map(|s| s.to_string()));
+    let mut stmt = conn
+        .prepare(
+            r#"SELECT m.user_id,
+                      COALESCE(NULLIF(m.display_name, ''), p.display_name, '')
+               FROM conversation_members m
+               LEFT JOIN peers p ON p.user_id = m.user_id
+               WHERE m.conversation_id=?1
+               ORDER BY 2"#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![conversation_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (uid, mut name) = row.map_err(|e| e.to_string())?;
+        if me.as_deref() == Some(uid.as_str()) {
+            if let Some(ref n) = my_name {
+                name = n.clone();
+            }
+        }
+        if name.trim().is_empty() {
+            name = "Member".into();
+        }
+        out.push(serde_json::json!({
+            "user_id": uid,
+            "display_name": name,
+        }));
+    }
+    Ok(out)
+}
+
+pub fn conversation_title(conn: &Connection, conversation_id: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT title FROM conversations WHERE id=?1",
+        params![conversation_id],
         |r| r.get::<_, Option<String>>(0),
     )
     .optional()

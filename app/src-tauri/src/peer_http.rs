@@ -89,6 +89,16 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str) -> String {
             if let Some(file) = payload.get("file") {
                 let _ = db::insert_file(&conn, file);
             }
+            if let (Some(reader), Some(ids)) = (
+                payload.get("reader_id").and_then(|v| v.as_str()),
+                payload.get("read_receipts").and_then(|v| v.as_array()),
+            ) {
+                for id in ids {
+                    if let Some(message_id) = id.as_str() {
+                        let _ = db::mark_message_read(&conn, message_id, reader);
+                    }
+                }
+            }
             if let Some(peer) = payload.get("from_peer") {
                 let _ = db::upsert_peer(
                     &conn,
@@ -129,6 +139,44 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str) -> String {
                         "INSERT OR IGNORE INTO conversation_members(conversation_id, user_id, wrapped_group_key) VALUES (?1,?2,?3)",
                         rusqlite::params![cid, my_id, wrap],
                     );
+                }
+            }
+            if let Some(ev) = payload.get("group_event") {
+                let cid = payload
+                    .get("conversation_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| ev.get("conversation_id").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let op = ev.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                if !cid.is_empty() && (op == "sync" || op == "add") {
+                    let title = payload
+                        .get("group_title")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| ev.get("title").and_then(|v| v.as_str()))
+                        .unwrap_or("Group");
+                    let _ = conn.execute(
+                        "INSERT OR IGNORE INTO conversations(id, kind, title, created_at) VALUES (?1,'group',?2,?3)",
+                        rusqlite::params![cid, title, chrono::Utc::now().to_rfc3339()],
+                    );
+                    if let Some(arr) = payload.get("members").and_then(|v| v.as_array()) {
+                        for m in arr {
+                            let uid = m.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                            if uid.is_empty() {
+                                continue;
+                            }
+                            let name = m.get("display_name").and_then(|v| v.as_str());
+                            let _ = db::upsert_member(&conn, cid, uid, None, name);
+                        }
+                    }
+                    if let Some(wrap) = payload.get("wrapped_group_key").and_then(|v| v.as_str()) {
+                        let _ = db::upsert_member(&conn, cid, my_id, Some(wrap), None);
+                    }
+                }
+                if op == "remove" && !cid.is_empty() {
+                    let uid = ev.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if !uid.is_empty() {
+                        let _ = db::delete_member(&conn, cid, uid);
+                    }
                 }
             }
             http_json(200, json!({"ok": true}))
@@ -173,11 +221,9 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str) -> String {
                     let members = db::member_ids(&conn, meta["conversation_id"].as_str().unwrap_or(""))
                         .unwrap_or_default();
                     let acks = db::file_ack_count(&conn, file_id).unwrap_or(0) as usize;
-                    if !members.is_empty() && acks >= members.len() {
-                        if let Some(dir) = meta["staging_dir"].as_str() {
-                            let _ = std::fs::remove_dir_all(dir);
-                        }
-                    }
+                    // Keep encrypted sender staging available for in-chat preview.
+                    // The original file path is not exposed by every WebView file picker.
+                    let _ = (members, acks);
                 }
             }
             http_json(200, json!({"ok": true}))

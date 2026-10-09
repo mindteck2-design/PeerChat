@@ -30,6 +30,11 @@ export type Conversation = {
   created_at: string;
 };
 
+export type Member = {
+  user_id: string;
+  display_name: string;
+};
+
 export type Message = {
   id: string;
   conversation_id: string;
@@ -42,6 +47,7 @@ export type Message = {
   file_id?: string | null;
   created_at: string;
   delivered?: boolean;
+  read?: boolean;
 };
 
 async function inv<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -75,11 +81,20 @@ export const peerApi = {
     inv<Conversation>("create_group", { title, memberIds, wrappedGroupKeys }),
   listMessages: (conversationId: string) =>
     inv<Message[]>("list_messages", { conversationId }),
+  markConversationRead: (conversationId: string) =>
+    inv<void>("mark_conversation_read", { conversationId }),
   sendMessage: (conversationId: string, message: any, recipientIds: string[]) =>
     inv<Message>("send_message", { conversationId, message, recipientIds }),
   getGroupKey: (conversationId: string) =>
     inv<string | null>("get_group_key", { conversationId }),
   memberIds: (conversationId: string) => inv<string[]>("member_ids", { conversationId }),
+  listMembers: (conversationId: string) =>
+    inv<Member[]>("list_group_members", { conversationId }),
+  addGroupMembers: (conversationId: string, wrappedGroupKeys: Record<string, string>) =>
+    inv<void>("add_group_members", { conversationId, wrappedGroupKeys }),
+  removeGroupMember: (conversationId: string, userId: string) =>
+    inv<void>("remove_group_member", { conversationId, userId }),
+  leaveGroup: (conversationId: string) => inv<void>("leave_group", { conversationId }),
   createOutgoingFile: (body: {
     conversationId: string;
     encFilename: string;
@@ -87,6 +102,7 @@ export const peerApi = {
     sizeBytes: number;
     chunkCount: number;
     wrappedKeys: any;
+    originalPath?: string | null;
   }) =>
     inv<{ file_id: string; staging_dir: string }>("create_outgoing_file", {
       conversationId: body.conversationId,
@@ -95,6 +111,7 @@ export const peerApi = {
       sizeBytes: body.sizeBytes,
       chunkCount: body.chunkCount,
       wrappedKeys: body.wrappedKeys,
+      originalPath: body.originalPath ?? null,
     }),
   writeFileChunk: (stagingDir: string, index: number, data: number[], nonce: string) =>
     inv<void>("write_file_chunk", { stagingDir, index, data, nonce }),
@@ -109,6 +126,8 @@ export const peerApi = {
   ackFileDownload: (fileId: string, uploaderId: string) =>
     inv<void>("ack_file_download", { fileId, uploaderId }),
   getFile: (fileId: string) => inv<any>("get_file", { fileId }),
-  saveDownloadedFile: (filename: string, data: number[]) =>
-    inv<string>("save_downloaded_file", { filename, data }),
+  saveDownloadedFile: (filename: string, data: number[], fileId?: string) =>
+    inv<string>("save_downloaded_file", { filename, data, fileId: fileId ?? null }),
+  openLocalFile: (fileId: string) => inv<void>("open_local_file", { fileId }),
+  readLocalFile: (fileId: string) => inv<string>("read_local_file", { fileId }),
 };
