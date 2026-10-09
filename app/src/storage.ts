@@ -6,11 +6,8 @@ import {
 } from "./crypto";
 
 const KEYS = {
-  serverUrl: "lanmsg.serverUrl",
-  pinnedFp: "lanmsg.pinnedFp",
-  token: "lanmsg.token",
-  user: "lanmsg.user",
   identity: "lanmsg.identity",
+  pinnedPeers: "lanmsg.pinnedPeers",
 };
 
 async function tauriStore() {

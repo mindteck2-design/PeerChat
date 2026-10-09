@@ -34,25 +34,21 @@ import AttachFileIcon from "@mui/icons-material/AttachFileRounded";
 import GroupAddIcon from "@mui/icons-material/GroupAddRounded";
 import RefreshIcon from "@mui/icons-material/RefreshRounded";
 import {
-  api,
-  discoverServers,
-  fetchTlsFingerprint,
-  getBaseUrl,
-  getToken,
-  setBaseUrl,
-  setToken,
+  peerApi,
   type Conversation,
   type Message,
-  type User,
-} from "./api";
+  type Peer,
+  type Profile,
+} from "./peer";
 import {
   CHUNK_SIZE,
   createGroupKey,
+  decryptChunk,
+  decryptFilename,
   decryptMessage,
   decryptWithGroupKey,
   encryptChunk,
   encryptFilename,
-  decryptFilename,
   encryptMessage,
   encryptWithGroupKey,
   exportPublic,
@@ -62,57 +58,42 @@ import {
   unwrapGroupKey,
   wrapGroupKeyForMembers,
   type Identity,
-  decryptChunk,
 } from "./crypto";
-import { KEYS, getOrCreateIdentity, loadLocal, removeLocal, saveLocal } from "./storage";
+import { getOrCreateIdentity } from "./storage";
 
-type Screen = "login" | "chat" | "settings";
+type Screen = "setup" | "chat" | "settings";
 
-/** TEMP: UI preview without server — remove before production. */
-const PREVIEW_USER: User = {
-  id: "00000000-0000-4000-8000-000000000001",
-  username: "preview",
-  display_name: "Preview User",
-  x25519_public: "",
-  ed25519_public: "",
-  online: true,
-};
+function newUserId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return `u-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function fromB64(s: string): Uint8Array {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("login");
+  const [screen, setScreen] = useState<Screen>("setup");
   const [boot, setBoot] = useState(true);
   const [identity, setIdentity] = useState<Identity | null>(null);
-  const [user, setUser] = useState<User | null>(null);
-  const [preview, setPreview] = useState(false);
-  const [serverUrl, setServerUrl] = useState("");
-  const [pinnedFp, setPinnedFp] = useState("");
+  const [profile, setProfile] = useState<Profile | null>(null);
   const [error, setError] = useState("");
-  const [info, setInfo] = useState<{ invite_required?: boolean; fingerprint?: string; profile?: string }>({});
 
   useEffect(() => {
     (async () => {
       const id = await getOrCreateIdentity();
       setIdentity(id);
-      const url = (await loadLocal<string>(KEYS.serverUrl)) || "https://127.0.0.1:8765";
-      const fp = (await loadLocal<string>(KEYS.pinnedFp)) || "";
-      const tok = (await loadLocal<string>(KEYS.token)) || "";
-      const u = await loadLocal<User>(KEYS.user);
-      setServerUrl(url);
-      setPinnedFp(fp);
-      setBaseUrl(url);
-      if (tok && u) {
-        setToken(tok);
-        try {
-          const me = await api.me();
-          if (fp && me.server_fingerprint && fp !== me.server_fingerprint) {
-            setError("Server TLS fingerprint changed. Re-pin in Settings.");
-          } else {
-            setUser(me.user);
-            setScreen("chat");
-          }
-        } catch {
-          await removeLocal(KEYS.token);
+      try {
+        const p = await peerApi.getProfile();
+        if (p) {
+          setProfile(p);
+          setScreen("chat");
         }
+      } catch {
+        /* browser preview without tauri */
       }
       setBoot(false);
     })();
@@ -126,34 +107,14 @@ export default function App() {
     );
   }
 
-  if (screen === "login" || !user) {
+  if (screen === "setup" || !profile) {
     return (
-      <LoginScreen
+      <SetupScreen
         identity={identity}
-        serverUrl={serverUrl}
-        pinnedFp={pinnedFp}
-        info={info}
         error={error}
         setError={setError}
-        setInfo={setInfo}
-        setServerUrl={setServerUrl}
-        setPinnedFp={setPinnedFp}
-        onAuthed={async (u, tok, fp) => {
-          setPreview(false);
-          setUser(u);
-          setToken(tok);
-          setPinnedFp(fp);
-          await saveLocal(KEYS.token, tok);
-          await saveLocal(KEYS.user, u);
-          await saveLocal(KEYS.pinnedFp, fp);
-          await saveLocal(KEYS.serverUrl, getBaseUrl());
-          setScreen("chat");
-        }}
-        onPreview={() => {
-          const pubs = exportPublic(identity);
-          setPreview(true);
-          setUser({ ...PREVIEW_USER, ...pubs });
-          setPinnedFp(pinnedFp || "preview-tls-fingerprint-not-a-real-pin");
+        onReady={(p) => {
+          setProfile(p);
           setScreen("chat");
         }}
       />
@@ -163,138 +124,54 @@ export default function App() {
   if (screen === "settings") {
     return (
       <SettingsScreen
-        user={user}
+        profile={profile}
         identity={identity}
-        serverUrl={serverUrl}
-        pinnedFp={pinnedFp}
-        preview={preview}
         onBack={() => setScreen("chat")}
-        onLogout={async () => {
-          if (!preview) {
-            try {
-              await api.logout();
-            } catch {
-              /* ignore */
-            }
-            await removeLocal(KEYS.token);
-            await removeLocal(KEYS.user);
-          }
-          setToken("");
-          setUser(null);
-          setPreview(false);
-          setScreen("login");
+        onReset={() => {
+          setProfile(null);
+          setScreen("setup");
         }}
-        onUser={(u) => setUser(u)}
-        setServerUrl={setServerUrl}
-        setPinnedFp={setPinnedFp}
       />
     );
   }
 
   return (
     <ChatScreen
-      user={user}
+      profile={profile}
       identity={identity}
-      preview={preview}
       onSettings={() => setScreen("settings")}
-      onLogout={async () => {
-        if (!preview) {
-          try {
-            await api.logout();
-          } catch {
-            /* ignore */
-          }
-          await removeLocal(KEYS.token);
-          await removeLocal(KEYS.user);
-        }
-        setToken("");
-        setUser(null);
-        setPreview(false);
-        setScreen("login");
-      }}
     />
   );
 }
 
-function LoginScreen(props: {
+function SetupScreen(props: {
   identity: Identity;
-  serverUrl: string;
-  pinnedFp: string;
-  info: any;
   error: string;
   setError: (s: string) => void;
-  setInfo: (v: any) => void;
-  setServerUrl: (s: string) => void;
-  setPinnedFp: (s: string) => void;
-  onAuthed: (u: User, tok: string, fp: string) => void;
-  onPreview: () => void;
+  onReady: (p: Profile) => void;
 }) {
-  const [mode, setMode] = useState<"login" | "signup">("login");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [invite, setInvite] = useState("");
-  const [url, setUrl] = useState(props.serverUrl);
-  const [pendingFp, setPendingFp] = useState("");
-  const [tofuOpen, setTofuOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [port, setPort] = useState(9876);
   const [busy, setBusy] = useState(false);
   const pubs = exportPublic(props.identity);
 
-  async function connectAndAuth() {
+  async function create() {
     props.setError("");
     setBusy(true);
     try {
-      setBaseUrl(url);
-      await saveLocal(KEYS.serverUrl, url);
-      const inf = await api.info();
-      props.setInfo(inf);
-      const fp = inf.fingerprint || (await fetchTlsFingerprint(url));
-      if (props.pinnedFp && fp && props.pinnedFp !== fp) {
-        props.setError("TLS fingerprint mismatch. Clear pin in Settings or accept new cert.");
-        setPendingFp(fp);
-        setTofuOpen(true);
-        return;
-      }
-      if (!props.pinnedFp && fp) {
-        setPendingFp(fp);
-        setTofuOpen(true);
-        return;
-      }
-      await doAuth(fp || props.pinnedFp);
+      const p = await peerApi.setupProfile({
+        displayName: name.trim() || "LanMsg User",
+        userId: newUserId(),
+        x25519Public: pubs.x25519_public,
+        ed25519Public: pubs.ed25519_public,
+        listenPort: port,
+      });
+      props.onReady(p);
     } catch (e: any) {
-      props.setError(e.message || String(e));
+      props.setError(e?.message || String(e));
     } finally {
       setBusy(false);
     }
-  }
-
-  async function doAuth(fp: string) {
-    const body =
-      mode === "signup"
-        ? {
-            username,
-            password,
-            display_name: displayName || username,
-            invite,
-            ...pubs,
-          }
-        : { username, password };
-    const res = mode === "signup" ? await api.signup(body) : await api.login(body);
-    const serverFp = res.server_fingerprint || fp;
-    props.setPinnedFp(serverFp);
-    props.onAuthed(res.user, res.token, serverFp);
-  }
-
-  async function scan() {
-    props.setError("");
-    const found = await discoverServers();
-    if (!found.length) {
-      props.setError("No LanMsg server discovered on UDP 41234. Enter URL manually.");
-      return;
-    }
-    const s = found[0];
-    setUrl(`https://${s.ip}:${s.port}`);
-    props.setInfo({ fingerprint: s.fingerprint, profile: s.profile });
   }
 
   return (
@@ -314,252 +191,114 @@ function LoginScreen(props: {
             LanMsg
           </Typography>
           <Typography variant="h4" sx={{ mt: 0.5, mb: 1 }}>
-            Private desk chat
+            Your desk identity
           </Typography>
           <Typography color="text.secondary" sx={{ mb: 3 }}>
-            End-to-end encrypted. Your server never sees message plaintext.
+            Peer-to-peer on your LAN. No central server — chats live on your PC (SQLite) and deliver
+            when peers are online.
           </Typography>
-
           <Stack spacing={2}>
-            <Stack direction="row" spacing={1}>
-              <TextField
-                label="Server URL"
-                fullWidth
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-              />
-              <IconButton aria-label="Discover server" onClick={scan}>
-                <RefreshIcon />
-              </IconButton>
-            </Stack>
-            <Tabs value={mode} onChange={(_, v) => setMode(v)}>
-              <Tab value="login" label="Log in" />
-              <Tab value="signup" label="Sign up" />
-            </Tabs>
-            {mode === "signup" && (
-              <TextField
-                label="Display name"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                fullWidth
-              />
-            )}
             <TextField
-              label="Username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              label="Display name"
               fullWidth
-              autoComplete="username"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoFocus
             />
             <TextField
-              label="Password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              label="Listen port"
+              type="number"
               fullWidth
-              autoComplete={mode === "signup" ? "new-password" : "current-password"}
+              value={port}
+              onChange={(e) => setPort(Number(e.target.value) || 9876)}
+              helperText="TCP HTTPS peer port (default 9876). UDP discovery uses 41234."
             />
-            {mode === "signup" && props.info.invite_required && (
-              <TextField
-                label="Invite code"
-                value={invite}
-                onChange={(e) => setInvite(e.target.value)}
-                fullWidth
-              />
-            )}
             {props.error && <Alert severity="error">{props.error}</Alert>}
-            <Button variant="contained" size="large" disabled={busy} onClick={connectAndAuth}>
-              {busy ? "Working…" : mode === "signup" ? "Create account" : "Enter"}
+            <Button variant="contained" size="large" disabled={busy} onClick={create}>
+              {busy ? "Starting…" : "Start LanMsg"}
             </Button>
-            <Button variant="text" color="secondary" onClick={props.onPreview}>
-              Preview UI (no server)
-            </Button>
-            {props.pinnedFp && (
-              <Chip size="small" label={`Pinned TLS ${props.pinnedFp.slice(0, 12)}…`} />
-            )}
           </Stack>
         </Paper>
       </Fade>
-
-      <Dialog open={tofuOpen} onClose={() => setTofuOpen(false)}>
-        <DialogTitle>Trust this server?</DialogTitle>
-        <DialogContent>
-          <Typography gutterBottom>
-            First connection — verify this TLS fingerprint out-of-band, then accept to pin it.
-          </Typography>
-          <Typography fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
-            {pendingFp}
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setTofuOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={async () => {
-              setTofuOpen(false);
-              setBusy(true);
-              try {
-                await doAuth(pendingFp);
-              } catch (e: any) {
-                props.setError(e.message || String(e));
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            Accept & continue
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }
 
 function ChatScreen({
-  user,
+  profile,
   identity,
-  preview,
   onSettings,
-  onLogout,
 }: {
-  user: User;
+  profile: Profile;
   identity: Identity;
-  preview?: boolean;
   onSettings: () => void;
-  onLogout: () => void;
 }) {
-  const previewPeer: User = {
-    id: "00000000-0000-4000-8000-000000000002",
-    username: "alex",
-    display_name: "Alex (sample)",
-    x25519_public: "preview",
-    ed25519_public: "preview",
-    online: true,
-  };
-  const previewConv: Conversation = {
-    id: "preview-dm-1",
-    kind: "dm",
-    peer_id: previewPeer.id,
-    peer_name: previewPeer.display_name,
-    created_at: new Date().toISOString(),
-  };
-  const previewGroup: Conversation = {
-    id: "preview-group-1",
-    kind: "group",
-    title: "Desk squad (sample)",
-    created_at: new Date().toISOString(),
-  };
-
-  const [users, setUsers] = useState<User[]>(preview ? [user, previewPeer] : []);
-  const [convs, setConvs] = useState<Conversation[]>(preview ? [previewConv, previewGroup] : []);
-  const [active, setActive] = useState<Conversation | null>(preview ? previewConv : null);
-  const [messages, setMessages] = useState<Message[]>(
-    preview
-      ? [
-          {
-            id: "m1",
-            conversation_id: previewConv.id,
-            sender_id: previewPeer.id,
-            kind: "text",
-            ciphertext: "",
-            nonce: "",
-            wrapped_keys: {},
-            signature: "",
-            created_at: new Date().toISOString(),
-          },
-          {
-            id: "m2",
-            conversation_id: previewConv.id,
-            sender_id: user.id,
-            kind: "text",
-            ciphertext: "",
-            nonce: "",
-            wrapped_keys: {},
-            signature: "",
-            created_at: new Date().toISOString(),
-          },
-        ]
-      : []
-  );
+  const [peers, setPeers] = useState<Peer[]>([]);
+  const [convs, setConvs] = useState<Conversation[]>([]);
+  const [active, setActive] = useState<Conversation | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState("");
-  const [plain, setPlain] = useState<Record<string, string>>(
-    preview
-      ? {
-          m1: "Hey — this is a UI preview with sample messages.",
-          m2: "Server not required. Open Settings from the toolbar.",
-        }
-      : {}
-  );
+  const [plain, setPlain] = useState<Record<string, string>>({});
   const [groupKeys, setGroupKeys] = useState<Record<string, Uint8Array>>({});
   const [tab, setTab] = useState(0);
   const [groupOpen, setGroupOpen] = useState(false);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPick, setGroupPick] = useState<string[]>([]);
-  const [status, setStatus] = useState(preview ? "Preview mode — no server" : "");
+  const [status, setStatus] = useState("");
+  const [pinOpen, setPinOpen] = useState<Peer | null>(null);
 
-  const others = useMemo(() => users.filter((u) => u.id !== user.id), [users, user.id]);
+  const others = useMemo(
+    () => peers.filter((p) => p.user_id !== profile.id),
+    [peers, profile.id]
+  );
 
   async function refresh() {
-    if (preview) return;
-    const [u, c] = await Promise.all([api.users(), api.conversations()]);
-    setUsers(u.users);
-    setConvs(c.conversations);
+    try {
+      await peerApi.discoverPeers();
+    } catch {
+      /* ignore */
+    }
+    const [p, c] = await Promise.all([peerApi.listPeers(), peerApi.listConversations()]);
+    setPeers(p);
+    setConvs(c);
   }
 
   useEffect(() => {
-    if (preview) return;
     refresh().catch(console.error);
-    const t = setInterval(() => refresh().catch(() => {}), 8000);
-    let ws: WebSocket | null = null;
-    try {
-      const base = getBaseUrl().replace("https://", "wss://").replace("http://", "ws://");
-      ws = new WebSocket(`${base}/ws?token=${encodeURIComponent(getToken())}`);
-      ws.onmessage = async (ev) => {
-        const data = JSON.parse(ev.data);
-        if (data.type === "presence") refresh();
-        if (data.type === "message" && active && data.message.conversation_id === active.id) {
-          setMessages((m) => [...m, data.message]);
-        }
-      };
-    } catch {
-      /* web may block */
-    }
-    return () => {
-      clearInterval(t);
-      ws?.close();
-    };
-  }, [active?.id, preview]);
+    const t = setInterval(() => refresh().catch(() => {}), 5000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
-    if (!active || preview) return;
+    if (!active) return;
     (async () => {
-      const { messages: msgs } = await api.messages(active.id);
+      const msgs = await peerApi.listMessages(active.id);
       setMessages(msgs);
       if (active.kind === "group" && !groupKeys[active.id]) {
-        const { wrapped_group_key } = await api.groupKey(active.id);
-        if (wrapped_group_key) {
-          setGroupKeys((g) => ({ ...g, [active.id]: unwrapGroupKey(wrapped_group_key, identity) }));
+        const wrap = await peerApi.getGroupKey(active.id);
+        if (wrap) {
+          setGroupKeys((g) => ({ ...g, [active.id]: unwrapGroupKey(wrap, identity) }));
         }
       }
     })().catch(console.error);
-  }, [active?.id, preview]);
+    const t = setInterval(() => {
+      peerApi.listMessages(active.id).then(setMessages).catch(() => {});
+    }, 2000);
+    return () => clearInterval(t);
+  }, [active?.id]);
 
   useEffect(() => {
-    if (preview) return;
     (async () => {
       const next: Record<string, string> = { ...plain };
       for (const m of messages) {
         if (next[m.id] || m.kind === "file_notice") continue;
         try {
           if (active?.kind === "group" && groupKeys[active.id]) {
-            next[m.id] = await decryptWithGroupKey(
-              { ...m, conversation_id: m.conversation_id },
-              groupKeys[active.id]
-            );
+            next[m.id] = await decryptWithGroupKey(m, groupKeys[active.id]);
           } else {
             next[m.id] = await decryptMessage(
               { ...m, wrapped_keys: m.wrapped_keys || {} },
-              user.id,
+              profile.id,
               identity
             );
           }
@@ -569,136 +308,114 @@ function ChatScreen({
       }
       setPlain(next);
     })();
-  }, [messages, groupKeys, active?.id, preview]);
+  }, [messages, groupKeys, active?.id]);
 
-  async function openDm(peer: User) {
-    if (preview) {
-      const c: Conversation = {
-        id: `preview-dm-${peer.id}`,
-        kind: "dm",
-        peer_id: peer.id,
-        peer_name: peer.display_name,
-        created_at: new Date().toISOString(),
-      };
-      setActive(c);
-      setConvs((list) => (list.some((x) => x.id === c.id) ? list : [c, ...list]));
-      setMessages([]);
-      setPlain({});
+  async function openDm(peer: Peer) {
+    if (!peer.pinned && peer.tls_fingerprint) {
+      setPinOpen(peer);
       return;
     }
-    const { conversation } = await api.openDm(peer.id);
-    setActive(conversation);
+    const c = await peerApi.openDm(peer.user_id);
+    setActive(c);
     await refresh();
   }
 
   async function send() {
     if (!active || !text.trim()) return;
-    if (preview) {
-      const id = `local-${Date.now()}`;
-      const body = text.trim();
-      setMessages((m) => [
-        ...m,
-        {
-          id,
-          conversation_id: active.id,
-          sender_id: user.id,
-          kind: "text",
-          ciphertext: "",
-          nonce: "",
-          wrapped_keys: {},
-          signature: "",
-          created_at: new Date().toISOString(),
-        },
-      ]);
-      setPlain((p) => ({ ...p, [id]: body }));
-      setText("");
-      return;
-    }
-    const memberPubs: Record<string, string> = {};
+    const memberIds =
+      active.kind === "dm" && active.peer_id
+        ? [active.peer_id, profile.id]
+        : await peerApi.memberIds(active.id);
+
+    let message: any;
     if (active.kind === "dm" && active.peer_id) {
-      const peer = users.find((u) => u.id === active.peer_id);
+      const peer = peers.find((p) => p.user_id === active.peer_id);
       if (!peer) return;
-      memberPubs[peer.id] = peer.x25519_public;
-      memberPubs[user.id] = exportPublic(identity).x25519_public;
-      const enc = await encryptMessage(text.trim(), active.id, user.id, identity, memberPubs);
-      await api.sendMessage(active.id, { kind: "text", ...enc });
+      const pubs: Record<string, string> = {
+        [peer.user_id]: peer.x25519_public,
+        [profile.id]: exportPublic(identity).x25519_public,
+      };
+      const enc = await encryptMessage(text.trim(), active.id, profile.id, identity, pubs);
+      message = { kind: "text", sender_id: profile.id, ...enc };
     } else {
       let gk = groupKeys[active.id];
       if (!gk) {
-        const { wrapped_group_key } = await api.groupKey(active.id);
-        gk = unwrapGroupKey(wrapped_group_key, identity);
+        const wrap = await peerApi.getGroupKey(active.id);
+        if (!wrap) return;
+        gk = unwrapGroupKey(wrap, identity);
         setGroupKeys((g) => ({ ...g, [active.id]: gk! }));
       }
-      const enc = await encryptWithGroupKey(text.trim(), active.id, user.id, gk, identity);
-      await api.sendMessage(active.id, { kind: "text", ...enc });
+      const enc = await encryptWithGroupKey(text.trim(), active.id, profile.id, gk, identity);
+      message = { kind: "text", sender_id: profile.id, ...enc };
     }
+    await peerApi.sendMessage(
+      active.id,
+      message,
+      memberIds.filter((id) => id !== profile.id)
+    );
     setText("");
-    const { messages: msgs } = await api.messages(active.id);
-    setMessages(msgs);
+    setMessages(await peerApi.listMessages(active.id));
   }
 
   async function sendFile(file: File) {
     if (!active) return;
-    if (preview) {
-      setStatus(`Preview: would encrypt & upload ${file.name}`);
-      return;
-    }
     setStatus(`Encrypting ${file.name}…`);
-    const { members } = await api.members(active.id);
-    const pubs: Record<string, string> = {};
-    for (const m of members) pubs[m.id] = m.x25519_public;
+    const memberIds = await peerApi.memberIds(active.id);
+    const pubs: Record<string, string> = {
+      [profile.id]: exportPublic(identity).x25519_public,
+    };
+    for (const mid of memberIds) {
+      const p = peers.find((x) => x.user_id === mid);
+      if (p) pubs[mid] = p.x25519_public;
+    }
     const { contentKey, wrapped_keys } = await prepareFileEncryption(identity, pubs);
     const nameEnc = encryptFilename(contentKey, file.name);
     const chunkCount = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-    const { file_id } = await api.createFile({
-      conversation_id: active.id,
-      enc_filename: nameEnc.ciphertext,
-      filename_nonce: nameEnc.nonce,
-      size_bytes: file.size,
-      chunk_count: chunkCount,
-      wrapped_keys,
+    const { file_id, staging_dir } = await peerApi.createOutgoingFile({
+      conversationId: active.id,
+      encFilename: nameEnc.ciphertext,
+      filenameNonce: nameEnc.nonce,
+      sizeBytes: file.size,
+      chunkCount,
+      wrappedKeys: wrapped_keys,
     });
     for (let i = 0; i < chunkCount; i++) {
       const slice = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
       const buf = new Uint8Array(await slice.arrayBuffer());
       const { nonce, ciphertext } = encryptChunk(contentKey, buf);
-      await api.putChunk(file_id, i, ciphertext, nonce);
-      setStatus(`Uploading ${i + 1}/${chunkCount}`);
+      await peerApi.writeFileChunk(staging_dir, i, Array.from(ciphertext), nonce);
+      setStatus(`Staging ${i + 1}/${chunkCount}`);
     }
-    // Keep a local copy for the sender
+    // keep local plaintext copy
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const buf = new Uint8Array(await file.arrayBuffer());
-      await invoke("save_downloaded_file", { filename: file.name, data: Array.from(buf) });
-      await api.fileDownloaded(file_id);
+      await peerApi.saveDownloadedFile(file.name, Array.from(new Uint8Array(await file.arrayBuffer())));
     } catch {
-      /* browser: skip local staging path */
+      /* ignore */
     }
-    await api.sendMessage(active.id, {
-      kind: "file_notice",
-      ciphertext: "",
-      nonce: "",
-      wrapped_keys: {},
-      signature: "",
+    await peerApi.sendFileNotice(
+      active.id,
       file_id,
-    });
+      memberIds.filter((id) => id !== profile.id)
+    );
     setStatus("");
-    const { messages: msgs } = await api.messages(active.id);
-    setMessages(msgs);
+    setMessages(await peerApi.listMessages(active.id));
   }
 
-  async function downloadFile(fileId: string) {
+  async function downloadFile(fileId: string, uploaderId: string) {
     setStatus("Downloading…");
-    const { file } = await api.getFile(fileId);
-    if (file.purged) {
-      setStatus("File no longer on server — ask sender to re-share");
+    const file = await peerApi.getFile(fileId);
+    if (!file) {
+      setStatus("File metadata missing");
       return;
     }
-    const key = unwrapContentKey(file.wrapped_keys, user.id, identity);
+    const key = unwrapContentKey(file.wrapped_keys, profile.id, identity);
     const parts: Uint8Array[] = [];
     for (let i = 0; i < file.chunk_count; i++) {
-      const { nonce, buf } = await api.getChunk(fileId, i);
-      parts.push(decryptChunk(key, nonce, buf));
+      if (uploaderId === profile.id && file.staging_dir) {
+        // local staging — not exposed via fetch; ask peer API only for remote
+      }
+      const chunk = await peerApi.fetchFileChunk(fileId, i, uploaderId);
+      parts.push(decryptChunk(key, chunk.nonce, fromB64(chunk.data_b64)));
       setStatus(`Decrypting ${i + 1}/${file.chunk_count}`);
     }
     let name = "file.bin";
@@ -714,27 +431,9 @@ function ChatScreen({
       merged.set(p, off);
       off += p.length;
     }
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const path = await invoke<string>("save_downloaded_file", {
-        filename: name,
-        data: Array.from(merged),
-      });
-      await api.fileDownloaded(fileId);
-      setStatus(`Saved to ${path}`);
-    } catch {
-      const blob = new Blob([merged]);
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = name;
-      a.click();
-      try {
-        await api.fileDownloaded(fileId);
-      } catch {
-        /* ignore */
-      }
-      setStatus("Saved locally");
-    }
+    const path = await peerApi.saveDownloadedFile(name, Array.from(merged));
+    await peerApi.ackFileDownload(fileId, uploaderId);
+    setStatus(`Saved to ${path}`);
   }
 
   return (
@@ -754,18 +453,17 @@ function ChatScreen({
           <ChatIcon color="primary" />
           <Box flex={1}>
             <Typography variant="subtitle1" fontWeight={700}>
-              {user.display_name}
+              {profile.display_name}
             </Typography>
             <Typography variant="caption" color="text.secondary">
-              @{user.username}
-              {preview ? " · preview" : ""}
+              P2P · port {profile.listen_port}
             </Typography>
           </Box>
+          <IconButton aria-label="Refresh peers" onClick={() => refresh()}>
+            <RefreshIcon />
+          </IconButton>
           <IconButton aria-label="Settings" onClick={onSettings}>
             <SettingsIcon />
-          </IconButton>
-          <IconButton aria-label="Log out" onClick={onLogout}>
-            <LogoutIcon />
           </IconButton>
         </Toolbar>
         <Divider />
@@ -776,13 +474,13 @@ function ChatScreen({
         {tab === 0 && (
           <List dense sx={{ overflow: "auto" }}>
             {others.map((p) => (
-              <ListItemButton key={p.id} onClick={() => openDm(p)}>
+              <ListItemButton key={p.user_id} onClick={() => openDm(p)}>
                 <Avatar sx={{ width: 36, height: 36, mr: 1.5, bgcolor: "primary.main" }}>
                   {p.display_name.slice(0, 1).toUpperCase()}
                 </Avatar>
                 <ListItemText
                   primary={p.display_name}
-                  secondary={p.online ? "Online" : "Offline"}
+                  secondary={p.online ? `${p.last_ip || "?"}:${p.last_port || ""}` : "Offline"}
                 />
                 <Box
                   sx={{
@@ -796,7 +494,7 @@ function ChatScreen({
             ))}
             {!others.length && (
               <Typography sx={{ p: 2 }} color="text.secondary">
-                No other users yet. Ask teammates to sign up on this server.
+                No peers yet. Start LanMsg on another PC on this LAN and hit refresh.
               </Typography>
             )}
           </List>
@@ -832,7 +530,12 @@ function ChatScreen({
       </Drawer>
 
       <Box flex={1} display="flex" flexDirection="column">
-        <AppBar position="sticky" color="transparent" elevation={0} sx={{ borderBottom: "1px solid #D5E3DD" }}>
+        <AppBar
+          position="sticky"
+          color="transparent"
+          elevation={0}
+          sx={{ borderBottom: "1px solid #D5E3DD" }}
+        >
           <Toolbar>
             <Typography variant="h6">
               {active
@@ -850,10 +553,11 @@ function ChatScreen({
           {!active && (
             <Box m="auto" textAlign="center" maxWidth={360}>
               <Typography variant="h5" gutterBottom>
-                Start a private chat
+                Peer chat on your LAN
               </Typography>
               <Typography color="text.secondary">
-                Pick someone from People, or create a group. Messages are E2E encrypted on this device.
+                Messages wait in your outbox if the other PC is offline, then deliver when they
+                return.
               </Typography>
             </Box>
           )}
@@ -862,15 +566,18 @@ function ChatScreen({
               <Paper
                 elevation={0}
                 sx={{
-                  alignSelf: m.sender_id === user.id ? "flex-end" : "flex-start",
+                  alignSelf: m.sender_id === profile.id ? "flex-end" : "flex-start",
                   maxWidth: "70%",
                   p: 1.5,
-                  bgcolor: m.sender_id === user.id ? "#DCEFE9" : "#FFFFFF",
+                  bgcolor: m.sender_id === profile.id ? "#DCEFE9" : "#FFFFFF",
                   border: "1px solid #D5E3DD",
                 }}
               >
                 {m.kind === "file_notice" ? (
-                  <Button size="small" onClick={() => m.file_id && downloadFile(m.file_id)}>
+                  <Button
+                    size="small"
+                    onClick={() => m.file_id && downloadFile(m.file_id, m.sender_id)}
+                  >
                     Download & save locally
                   </Button>
                 ) : (
@@ -878,6 +585,11 @@ function ChatScreen({
                 )}
                 <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
                   {new Date(m.created_at).toLocaleString()}
+                  {m.sender_id === profile.id
+                    ? m.delivered
+                      ? " · delivered"
+                      : " · queued"
+                    : ""}
                 </Typography>
               </Paper>
             </Grow>
@@ -917,6 +629,35 @@ function ChatScreen({
         )}
       </Box>
 
+      <Dialog open={!!pinOpen} onClose={() => setPinOpen(null)}>
+        <DialogTitle>Trust this peer?</DialogTitle>
+        <DialogContent>
+          <Typography gutterBottom>
+            First contact with <strong>{pinOpen?.display_name}</strong>. Verify TLS fingerprint
+            out-of-band, then pin.
+          </Typography>
+          <Typography fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
+            {pinOpen?.tls_fingerprint}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPinOpen(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={async () => {
+              if (!pinOpen?.tls_fingerprint) return;
+              await peerApi.pinPeer(pinOpen.user_id, pinOpen.tls_fingerprint);
+              const c = await peerApi.openDm(pinOpen.user_id);
+              setPinOpen(null);
+              setActive(c);
+              await refresh();
+            }}
+          >
+            Accept & chat
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={groupOpen} onClose={() => setGroupOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Create group</DialogTitle>
         <DialogContent>
@@ -927,21 +668,18 @@ function ChatScreen({
             value={groupTitle}
             onChange={(e) => setGroupTitle(e.target.value)}
           />
-          <Typography variant="subtitle2" gutterBottom>
-            Members
-          </Typography>
           <List dense>
             {others.map((p) => (
               <ListItemButton
-                key={p.id}
-                selected={groupPick.includes(p.id)}
+                key={p.user_id}
+                selected={groupPick.includes(p.user_id)}
                 onClick={() =>
                   setGroupPick((g) =>
-                    g.includes(p.id) ? g.filter((x) => x !== p.id) : [...g, p.id]
+                    g.includes(p.user_id) ? g.filter((x) => x !== p.user_id) : [...g, p.user_id]
                   )
                 }
               >
-                <ListItemText primary={p.display_name} secondary={p.username} />
+                <ListItemText primary={p.display_name} />
               </ListItemButton>
             ))}
           </List>
@@ -951,31 +689,35 @@ function ChatScreen({
           <Button
             variant="contained"
             onClick={async () => {
-              if (preview) {
-                const conversation: Conversation = {
-                  id: `preview-group-${Date.now()}`,
-                  kind: "group",
-                  title: groupTitle || "New group",
-                  created_at: new Date().toISOString(),
-                };
-                setConvs((c) => [conversation, ...c]);
-                setGroupOpen(false);
-                setActive(conversation);
-                setMessages([]);
-                setPlain({});
-                return;
-              }
               const gk = createGroupKey();
               const pubs: Record<string, string> = {
-                [user.id]: exportPublic(identity).x25519_public,
+                [profile.id]: exportPublic(identity).x25519_public,
               };
               for (const id of groupPick) {
-                const u = users.find((x) => x.id === id)!;
+                const u = peers.find((x) => x.user_id === id)!;
                 pubs[id] = u.x25519_public;
               }
               const wraps = wrapGroupKeyForMembers(gk, identity, pubs);
-              const { conversation } = await api.createGroup(groupTitle, groupPick, wraps);
+              const conversation = await peerApi.createGroup(groupTitle, groupPick, wraps);
               setGroupKeys((g) => ({ ...g, [conversation.id]: gk }));
+              // notify members with wrap via a lightweight deliver (group announce as empty msg optional)
+              for (const rid of groupPick) {
+                await peerApi.sendMessage(
+                  conversation.id,
+                  {
+                    kind: "text",
+                    sender_id: profile.id,
+                    ...(await encryptWithGroupKey(
+                      `Joined group “${groupTitle}”`,
+                      conversation.id,
+                      profile.id,
+                      gk,
+                      identity
+                    )),
+                  },
+                  [rid]
+                );
+              }
               setGroupOpen(false);
               setActive(conversation);
               await refresh();
@@ -990,63 +732,36 @@ function ChatScreen({
 }
 
 function SettingsScreen(props: {
-  user: User;
+  profile: Profile;
   identity: Identity;
-  serverUrl: string;
-  pinnedFp: string;
-  preview?: boolean;
   onBack: () => void;
-  onLogout: () => void;
-  onUser: (u: User) => void;
-  setServerUrl: (s: string) => void;
-  setPinnedFp: (s: string) => void;
+  onReset: () => void;
 }) {
-  const [name, setName] = useState(props.user.display_name);
-  const [url, setUrl] = useState(props.serverUrl);
-  const [oldP, setOldP] = useState("");
-  const [newP, setNewP] = useState("");
-  const [msg, setMsg] = useState(props.preview ? "Preview mode — changes are local only" : "");
-  const fp = fingerprintPublic(exportPublic(props.identity).x25519_public);
+  const [fp, setFp] = useState("");
+  const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
+
+  useEffect(() => {
+    peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
+  }, []);
 
   return (
     <Box minHeight="100vh" p={3} maxWidth={720} mx="auto">
       <Stack direction="row" alignItems="center" spacing={1} mb={3}>
         <Button onClick={props.onBack}>Back</Button>
         <Typography variant="h5">Settings</Typography>
-        {props.preview && <Chip size="small" color="secondary" label="preview" />}
       </Stack>
-
       <Stack spacing={3}>
         <Paper sx={{ p: 2.5 }} variant="outlined">
           <Typography variant="h6" gutterBottom>
             Profile
           </Typography>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-            <TextField
-              label="Display name"
-              fullWidth
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-            <Button
-              variant="contained"
-              onClick={async () => {
-                if (props.preview) {
-                  props.onUser({ ...props.user, display_name: name });
-                  setMsg("Preview: display name updated locally");
-                  return;
-                }
-                const { user } = await api.patchMe(name);
-                props.onUser(user);
-                await saveLocal(KEYS.user, user);
-                setMsg("Display name updated");
-              }}
-            >
-              Save
-            </Button>
-          </Stack>
+          <Typography>
+            {props.profile.display_name} · port {props.profile.listen_port}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" fontFamily="monospace">
+            {props.profile.id}
+          </Typography>
         </Paper>
-
         <Paper sx={{ p: 2.5 }} variant="outlined">
           <Typography variant="h6" gutterBottom>
             Security fingerprints
@@ -1055,88 +770,26 @@ function SettingsScreen(props: {
             Your key fingerprint
           </Typography>
           <Typography fontFamily="monospace" sx={{ mb: 2, wordBreak: "break-all" }}>
-            {fp}
+            {keyFp}
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Pinned server TLS fingerprint
+            Your peer TLS fingerprint
           </Typography>
           <Typography fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
-            {props.pinnedFp || "(none)"}
+            {fp || "…"}
           </Typography>
-          <Button
-            sx={{ mt: 1 }}
-            onClick={async () => {
-              await removeLocal(KEYS.pinnedFp);
-              props.setPinnedFp("");
-              setMsg("TLS pin cleared — you will re-verify on next login");
-            }}
-          >
-            Clear TLS pin
-          </Button>
         </Paper>
-
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Server
-          </Typography>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-            <TextField
-              label="Server URL"
-              fullWidth
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-            />
-            <Button
-              variant="outlined"
-              onClick={async () => {
-                setBaseUrl(url);
-                props.setServerUrl(url);
-                await saveLocal(KEYS.serverUrl, url);
-                setMsg("Server URL saved");
-              }}
-            >
-              Save URL
-            </Button>
-          </Stack>
-        </Paper>
-
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Change password
-          </Typography>
-          <Stack spacing={1}>
-            <TextField
-              type="password"
-              label="Current password"
-              value={oldP}
-              onChange={(e) => setOldP(e.target.value)}
-            />
-            <TextField
-              type="password"
-              label="New password"
-              value={newP}
-              onChange={(e) => setNewP(e.target.value)}
-            />
-            <Button
-              variant="contained"
-              onClick={async () => {
-                if (props.preview) {
-                  setMsg("Preview: password change skipped (no server)");
-                  return;
-                }
-                await api.changePassword(oldP, newP);
-                setMsg("Password changed — sessions revoked. Log in again.");
-                props.onLogout();
-              }}
-            >
-              Update password
-            </Button>
-          </Stack>
-        </Paper>
-
-        {msg && <Alert severity="info">{msg}</Alert>}
-        <Button color="error" variant="outlined" onClick={props.onLogout}>
-          Log out
+        <Alert severity="info">
+          No central server. Data is in local SQLite under the app data folder. Outbox delivers when
+          peers are reachable. Open UDP 41234 and TCP {props.profile.listen_port} on the firewall.
+        </Alert>
+        <Button
+          color="error"
+          variant="outlined"
+          startIcon={<LogoutIcon />}
+          onClick={props.onReset}
+        >
+          Back to setup screen
         </Button>
       </Stack>
     </Box>

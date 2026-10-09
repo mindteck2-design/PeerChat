@@ -1,19 +1,19 @@
 # Packaging
 
-## LanMsg Server
+## Client only (P2P)
 
 | Platform | Script | Output |
 |----------|--------|--------|
-| Windows | `server/build_windows.bat` | `server/dist/lanmsg-server.exe` (+ NSSM notes for service) |
-| Linux | `server/build_linux.sh` + `server/install_systemd.sh` | binary + systemd unit |
+| Windows | `client/build_windows.bat` | NSIS under `bundle/nsis/` + portable `dist/windows/LanMsg.exe` |
+| Linux | `client/build_linux.sh` | `.deb` → `dist/linux/` |
 
-Requires Go 1.22+ and PostgreSQL 18 on the host. Copy `config.example.json` → `config.json` and set `database_url` / `profile`.
+Targets in `app/src-tauri/tauri.conf.json`: `nsis` + `deb`.
 
-## LanMsg Client
+- **NSIS** needs download of the NSIS toolchain (GitHub) — use an open network / laptop.
+- **`.deb`** must be built on **Linux/WSL**, not on native Windows.
 
-| Platform | Script | Output |
-|----------|--------|--------|
-| Windows | `client/build_windows.bat` | NSIS/MSI under `app/src-tauri/target/release/bundle/` |
-| Linux | `client/build_linux.sh` | `.deb` under the same bundle path |
+Ready-to-copy notes: [`../dist/README.md`](../dist/README.md)
 
-Requires Node 20+, Rust stable, and platform webview dependencies (WebView2 on Windows).
+## Legacy
+
+`packaging/server/` is for the archived Go server — not used.

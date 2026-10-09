@@ -1,84 +1,55 @@
-# LanMsg deployment (Mindteck)
+# LanMsg P2P deploy (Mindteck)
 
-Two **isolated** environments — separate Postgres, separate LanMsg Server processes. Same client binary; different server URL.
+No Postgres / no LanMsg Server. Install the **same client** on every PC.
 
-| Environment | Example server IP | Client network | Signup |
-|-------------|-------------------|----------------|--------|
-| **Intranet** | `172.195.120.180` (last two octets may vary; prefix `172.195` is fixed on your LAN) | Same `172.195.x.x` users | Open self-signup |
-| **Internet** | `172.16.69.164` | Clients that can reach that host | Invite code required |
+## Network
 
-There is **no** federation between the two databases.
+| Traffic | Port | Notes |
+|---------|------|--------|
+| Peer API (HTTPS) | TCP **9876** (default, per user) | Change in setup if needed |
+| Discovery | UDP **41234** | Broadcast on LAN |
 
-## 1. PostgreSQL 18 on each server PC
+### Example environments
 
-On the **intranet** host:
+Peers only see each other on the same L3 network:
 
-```bash
-psql -U postgres -f server/deploy/postgres_intranet.sql
-```
+- **Intranet** `172.195.x.x` (e.g. host was `172.195.120.180`) — run clients on those PCs.
+- **Internet segment** `172.16.69.164` area — separate LAN; no automatic bridge to intranet.
 
-On the **internet** host:
+## Client install
 
-```bash
-psql -U postgres -f server/deploy/postgres_internet.sql
-```
+### Windows (quick)
 
-Change `CHANGE_ME_*` passwords before production.
+Portable binary (already produced on build): `dist/windows/LanMsg.exe`
 
-## 2. LanMsg Server on each host
+1. Copy `LanMsg.exe` to each Windows PC
+2. Run it → enter **display name** → Start
+3. Allow firewall for UDP **41234** and TCP **9876** (or your listen port)
+4. Refresh People → **Accept** peer TLS fingerprint → chat
 
-```bash
-cd server
-# Intranet host:
-copy deploy\config.intranet.example.json config.json
-# Internet host:
-copy deploy\config.internet.example.json config.json
+Full NSIS setup wizard: build with network (`npm run tauri:build`) → `app/src-tauri/target/release/bundle/nsis/`
 
-# Edit database_url password, then:
-go build -o dist\lanmsg-server.exe .\cmd\lanmsg-server
-.\dist\lanmsg-server.exe -config config.json
-```
+### Linux
 
-Server binds `0.0.0.0:8765` (HTTPS) and UDP discovery `41234`.  
-Note the **TLS fingerprint** printed at startup.
-
-Open firewall:
-
-- TCP **8765** (API / WSS)
-- UDP **41234** (optional auto-discovery on LAN)
-
-## 3. Client URLs
-
-| Environment | Typical server URL in Settings / Login |
-|-------------|----------------------------------------|
-| Intranet | `https://172.195.120.180:8765` (use the actual host IP) |
-| Internet | `https://172.16.69.164:8765` |
-
-On first connect: accept TLS fingerprint (TOFU). Intranet clients on `172.195.*` can also use **Discover** if UDP is allowed.
-
-## 4. Laptop workflow (download deps, build)
+Build `.deb` **on Linux/WSL** (not on Windows):
 
 ```bash
-git clone https://github.com/mindteck2-design/LanMsg.git
-cd LanMsg
-
-# Server
-cd server
-go mod tidy
-go mod vendor   # optional: for offline builds later
-go build -o dist/lanmsg-server.exe ./cmd/lanmsg-server
-
-# Client
-cd ../app
-npm install
-npm run tauri:build
+packaging/client/build_linux.sh
+# or: cd app && npm run tauri:build
+sudo apt install ./dist/linux/lanmsg_*.deb
 ```
 
-Copy `server/dist/lanmsg-server.exe` and client installers (under `app/src-tauri/target/release/bundle/`) to the office PCs.  
-Postgres must already be installed on each server PC.
+Same firewall ports as Windows.
 
-## 5. Security notes
+## Data location
 
-- Never reuse the same Postgres DB or invite code across intranet and internet.
-- Distribute client installers from a trusted channel.
-- See `SECURITY.md` for the full checklist.
+- SQLite + TLS certs + file staging: Tauri **app data** directory
+- Decrypted downloads: `Downloads/LanMsg`
+
+## Offline delivery
+
+Messages/files to an offline peer stay in the **sender outbox** until that peer is discovered again and accepts delivery. If the sender is offline, nothing is delivered.
+
+## Legacy
+
+The old Go+Postgres stack is under `archive/server/` for reference only.

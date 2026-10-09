@@ -1,84 +1,43 @@
-# LanMsg
+# LanMsg (P2P)
 
-Equal desktop clients (login, DM/group chat, settings) against an isolated **Go + PostgreSQL 18** server per environment. Messages and files are **end-to-end encrypted**; the server relays ciphertext only.
+Desktop messenger for the LAN — **no central server**. Each PC runs the Tauri app, stores data in **local SQLite**, discovers peers over **UDP**, and delivers **E2E-encrypted** messages/files directly. If a peer is offline, ciphertext stays in the **sender outbox** until they return.
 
 ```
 D:\LanMsg\
-  server\     # Go HTTPS/WSS API + UDP discovery
-  app\        # Tauri 2 + React + MUI client
-  DEPLOY.md   # Mindteck dual-environment deploy (IPs, Postgres, clients)
+  app\                 # Tauri 2 + React + MUI client (the product)
+  archive\server\      # Old Go+Postgres design (not required)
+  packaging\client\    # Win/Linux client installers
+  DEPLOY.md
   SECURITY.md
 ```
 
 **Remote:** https://github.com/mindteck2-design/LanMsg.git
 
-## Environments (Mindteck)
+## How it works
 
-| Environment | Example server | Signup | Client URL |
-|-------------|----------------|--------|------------|
-| Intranet | `172.195.120.180` (`172.195.*` LAN; last octets may vary) | Open | `https://172.195.x.x:8765` |
-| Internet | `172.16.69.164` | Invite required | `https://172.16.69.164:8765` |
+1. Install/run LanMsg on each PC; create a **local profile** (display name + listen port).
+2. Peers announce on UDP **41234**; HTTPS peer API on TCP **9876** (configurable).
+3. First chat with a peer: **TOFU** — accept their TLS fingerprint.
+4. DMs/groups/files use the same E2E crypto as before; staging files live on the **sender** until ACKs.
 
-Same client binary; **no federation** between the two Postgres databases. Full steps: [DEPLOY.md](DEPLOY.md).
+## Limits
 
-## File transfer model
+- No delivery if the **sender** PC is offline (outbox is local).
+- No global directory — only peers discovered on the current network.
+- New device = new keys unless you add a backup feature later.
+- Firewall must allow UDP 41234 and each peer’s TCP listen port.
 
-1. Sender encrypts the file and uploads **ciphertext chunks** to the server (staging).
-2. Recipients download, decrypt, and save under local `Downloads/LanMsg` (or app data).
-3. Server **deletes staging blobs** after every conversation member has downloaded, or when `file_retention_hours` elapses (default 168h). Metadata remains; plaintext never lives on the server.
-
-## Server setup
-
-Requirements: Go 1.22+, PostgreSQL 18, create a database and role:
-
-```sql
-CREATE USER lanmsg WITH PASSWORD 'CHANGE_ME';
-CREATE DATABASE lanmsg OWNER lanmsg;
-```
-
-```bash
-cd server
-cp config.example.json config.json
-# edit database_url, profile (intranet|internet), invite_code for internet
-go mod tidy
-go run ./cmd/lanmsg-server -config config.json
-```
-
-Listen: `https://0.0.0.0:8765`. UDP discovery: `41234`. TLS cert auto-generated under `data/certs/` (fingerprint logged at start).
-
-### Windows service / Linux systemd
-
-See `packaging/server/`.
-
-```bash
-# Windows (build + optional NSSM service)
-packaging/server/build_windows.bat
-
-# Linux
-packaging/server/build_linux.sh
-sudo packaging/server/install_systemd.sh
-```
-
-## Client setup
-
-Requirements: Node 20+, Rust (for Tauri), platform WebView2 (Windows) / WebKit (Linux).
+## Build (laptop / open network)
 
 ```bash
 cd app
 npm install
-npm run tauri:dev          # development
-npm run tauri:build        # NSIS/MSI + deb installers
+npm run tauri:dev      # development
+npm run tauri:build    # NSIS/MSI/deb under src-tauri/target/release/bundle/
 ```
 
-On first launch: discover server (UDP) or enter URL; **accept TLS fingerprint** (TOFU). Sign up / log in. Private keys stay in Tauri store (not uploaded).
+Requires Node 20+, Rust stable (MSVC on Windows), WebView2.
 
-## Security
+## Deploy notes
 
-See [SECURITY.md](SECURITY.md) for the checklist, threat model, and limits.
-
-## Config profiles
-
-- `intranet`: open signup, standard rate limits  
-- `internet`: `invite_required` defaults true; stricter login failure threshold  
-
-Set `"profile": "internet"` and `"invite_code": "..."` in `config.json`.
+See [DEPLOY.md](DEPLOY.md). Postgres is **not** used.
