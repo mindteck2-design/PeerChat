@@ -81,6 +81,11 @@ export const peerApi = {
     inv<Conversation>("create_group", { title, memberIds, wrappedGroupKeys }),
   listMessages: (conversationId: string) =>
     inv<Message[]>("list_messages", { conversationId }),
+  deleteMessageForMe: (messageId: string) =>
+    inv<void>("delete_message_for_me", { messageId }),
+  deleteMessageForEveryone: (messageId: string) =>
+    inv<Message>("delete_message_for_everyone", { messageId }),
+  abortOutgoingFile: (fileId: string) => inv<void>("abort_outgoing_file", { fileId }),
   markConversationRead: (conversationId: string) =>
     inv<void>("mark_conversation_read", { conversationId }),
   sendMessage: (conversationId: string, message: any, recipientIds: string[]) =>
@@ -113,8 +118,8 @@ export const peerApi = {
       wrappedKeys: body.wrappedKeys,
       originalPath: body.originalPath ?? null,
     }),
-  writeFileChunk: (stagingDir: string, index: number, data: number[], nonce: string) =>
-    inv<void>("write_file_chunk", { stagingDir, index, data, nonce }),
+  writeFileChunk: (stagingDir: string, index: number, dataB64: string, nonce: string) =>
+    inv<void>("write_file_chunk", { stagingDir, index, dataB64, nonce }),
   sendFileNotice: (conversationId: string, fileId: string, recipientIds: string[]) =>
     inv<Message>("send_file_notice", { conversationId, fileId, recipientIds }),
   fetchFileChunk: (fileId: string, index: number, uploaderId: string) =>
@@ -126,8 +131,12 @@ export const peerApi = {
   ackFileDownload: (fileId: string, uploaderId: string) =>
     inv<void>("ack_file_download", { fileId, uploaderId }),
   getFile: (fileId: string) => inv<any>("get_file", { fileId }),
-  saveDownloadedFile: (filename: string, data: number[], fileId?: string) =>
-    inv<string>("save_downloaded_file", { filename, data, fileId: fileId ?? null }),
+  saveDownloadedFile: (filename: string, dataB64: string, fileId?: string) =>
+    inv<string>("save_downloaded_file", {
+      filename,
+      dataB64,
+      fileId: fileId ?? null,
+    }),
   openLocalFile: (fileId: string) => inv<void>("open_local_file", { fileId }),
   readLocalFile: (fileId: string) => inv<string>("read_local_file", { fileId }),
 };

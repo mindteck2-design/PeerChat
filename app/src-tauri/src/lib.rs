@@ -346,7 +346,98 @@ fn create_group(
 #[tauri::command]
 fn list_messages(state: State<AppState>, conversation_id: String) -> Result<Vec<Value>, String> {
     let conn = state.db.lock();
-    db::list_messages(&conn, &conversation_id)
+    let me = db::get_profile(&conn)?
+        .ok_or("no profile")?
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    db::list_messages(&conn, &conversation_id, &me)
+}
+
+#[tauri::command]
+fn delete_message_for_me(state: State<AppState>, message_id: String) -> Result<(), String> {
+    let conn = state.db.lock();
+    let me = db::get_profile(&conn)?
+        .ok_or("no profile")?
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    db::hide_message(&conn, &me, &message_id)
+}
+
+#[tauri::command]
+fn delete_message_for_everyone(
+    state: State<AppState>,
+    message_id: String,
+) -> Result<Value, String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    let msg = db::get_message(&conn, &message_id)?.ok_or("message missing")?;
+    if msg["sender_id"].as_str() != Some(me.as_str()) {
+        return Err("Only the sender can delete for everyone".into());
+    }
+    if msg["kind"].as_str() == Some("deleted") {
+        return Ok(msg);
+    }
+    let conversation_id = msg["conversation_id"].as_str().unwrap_or("").to_string();
+    let created_at = msg["created_at"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    db::cancel_outbox_for_message(&conn, &message_id)?;
+    db::tombstone_message(&conn, &message_id)?;
+    let tombstone = json!({
+        "id": message_id,
+        "conversation_id": conversation_id,
+        "sender_id": me,
+        "kind": "deleted",
+        "ciphertext": "",
+        "nonce": "",
+        "wrapped_keys": {},
+        "signature": "",
+        "file_id": Value::Null,
+        "created_at": created_at,
+        "delivered": false,
+    });
+    let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+    let members = db::member_ids(&conn, &conversation_id)?;
+    for rid in members {
+        if rid == me {
+            continue;
+        }
+        let oid = format!("del-{}:{}", uuid::Uuid::new_v4(), rid);
+        let payload = json!({
+            "message": tombstone,
+            "from_peer": from_peer,
+            "conversation_id": conversation_id,
+            "delete_for_everyone": true,
+        });
+        db::enqueue_outbox(
+            &conn,
+            &oid,
+            &rid,
+            &conversation_id,
+            &payload.to_string(),
+        )?;
+    }
+    drop(conn);
+    kick_flush(&state);
+    Ok(tombstone)
+}
+
+#[tauri::command]
+fn abort_outgoing_file(state: State<AppState>, file_id: String) -> Result<(), String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("");
+    let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
+    if file["uploader_id"].as_str() != Some(me) {
+        return Err("Only the uploader can abort this file".into());
+    }
+    db::delete_file_record(&conn, &file_id)
 }
 
 #[tauri::command]
@@ -653,7 +744,15 @@ fn create_outgoing_file(
 }
 
 #[tauri::command]
-fn write_file_chunk(staging_dir: String, index: u32, data: Vec<u8>, nonce: String) -> Result<(), String> {
+fn write_file_chunk(
+    staging_dir: String,
+    index: u32,
+    data_b64: String,
+    nonce: String,
+) -> Result<(), String> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|e| e.to_string())?;
     let dir = PathBuf::from(staging_dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(format!("{index}.chunk")), data).map_err(|e| e.to_string())?;
@@ -806,8 +905,11 @@ async fn save_downloaded_file(
     state: State<'_, AppState>,
     file_id: Option<String>,
     filename: String,
-    data: Vec<u8>,
+    data_b64: String,
 ) -> Result<String, String> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|e| e.to_string())?;
     let safe: String = filename
         .chars()
         .map(|c| {
@@ -950,6 +1052,9 @@ pub fn run() {
             open_dm,
             create_group,
             list_messages,
+            delete_message_for_me,
+            delete_message_for_everyone,
+            abort_outgoing_file,
             mark_conversation_read,
             send_message,
             get_group_key,

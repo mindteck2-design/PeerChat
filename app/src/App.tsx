@@ -26,6 +26,10 @@ import {
   Toolbar,
   Typography,
   CircularProgress,
+  LinearProgress,
+  Menu,
+  MenuItem,
+  ListItemIcon,
 } from "@mui/material";
 import ChatIcon from "@mui/icons-material/ForumRounded";
 import SettingsIcon from "@mui/icons-material/SettingsRounded";
@@ -41,6 +45,10 @@ import PersonRemoveIcon from "@mui/icons-material/PersonRemoveRounded";
 import DoneIcon from "@mui/icons-material/DoneRounded";
 import DoneAllIcon from "@mui/icons-material/DoneAllRounded";
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
+import MoreVertIcon from "@mui/icons-material/MoreVertRounded";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
+import DeleteForeverIcon from "@mui/icons-material/DeleteForeverRounded";
+import StopCircleIcon from "@mui/icons-material/StopCircleRounded";
 import {
   peerApi,
   type Conversation,
@@ -51,6 +59,7 @@ import {
 } from "./peer";
 import {
   CHUNK_SIZE,
+  b64,
   createGroupKey,
   decryptChunk,
   decryptFilename,
@@ -334,9 +343,29 @@ function ChatScreen({
   const [addPick, setAddPick] = useState<string[]>([]);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
+  const [outgoingFile, setOutgoingFile] = useState<{
+    conversationId: string;
+    fileId?: string;
+    stagingDir?: string;
+    name: string;
+    done: number;
+    total: number;
+  } | null>(null);
+  const [incomingFile, setIncomingFile] = useState<{
+    fileId: string;
+    name: string;
+    done: number;
+    total: number;
+  } | null>(null);
+  const [msgMenu, setMsgMenu] = useState<{
+    anchor: HTMLElement;
+    message: Message;
+  } | null>(null);
   const scroller = useRef<HTMLDivElement | null>(null);
   const groupKeysRef = useRef(groupKeys);
   groupKeysRef.current = groupKeys;
+  const abortSendRef = useRef(false);
+  const abortOpenRef = useRef(false);
 
   const others = useMemo(
     () => peers.filter((p) => p.user_id !== profile.id),
@@ -411,7 +440,7 @@ function ChatScreen({
   useEffect(() => {
     const el = scroller.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, active?.id]);
+  }, [messages.length, active?.id, outgoingFile?.done, incomingFile?.done]);
 
   useEffect(() => {
     if (!active || !messages.some((m) => m.sender_id !== profile.id)) return;
@@ -426,7 +455,9 @@ function ChatScreen({
       if (active.kind === "group" && !gk) return;
       const next: Record<string, string> = {};
       for (const m of messages) {
-        if (m.conversation_id !== active.id || m.kind === "file_notice") continue;
+        if (m.conversation_id !== active.id || m.kind === "file_notice" || m.kind === "deleted") {
+          continue;
+        }
         try {
           if (active.kind === "group" && gk) {
             next[m.id] = await decryptWithGroupKey(m, gk);
@@ -577,47 +608,129 @@ function ChatScreen({
     return out;
   }, [messages, active?.id]);
 
+  async function abortOutgoingTransfer() {
+    abortSendRef.current = true;
+    const current = outgoingFile;
+    if (current?.fileId) {
+      try {
+        await peerApi.abortOutgoingFile(current.fileId);
+      } catch {
+        /* best effort */
+      }
+    }
+    setOutgoingFile(null);
+  }
+
+  function abortIncomingTransfer() {
+    abortOpenRef.current = true;
+    setIncomingFile(null);
+    setPreviewBusy(false);
+    setStatus("");
+  }
+
+  async function deleteForMe(message: Message) {
+    setMsgMenu(null);
+    try {
+      await peerApi.deleteMessageForMe(message.id);
+      if (active) setMessages(await peerApi.listMessages(active.id));
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function deleteForEveryone(message: Message) {
+    setMsgMenu(null);
+    try {
+      await peerApi.deleteMessageForEveryone(message.id);
+      if (active) setMessages(await peerApi.listMessages(active.id));
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
   async function sendFile(file: File) {
     if (!active) return;
-    setStatus(`Encrypting ${file.name}…`);
-    const memberIds = await peerApi.memberIds(active.id);
-    const pubs: Record<string, string> = {
-      [profile.id]: exportPublic(identity).x25519_public,
-    };
-    for (const mid of memberIds) {
-      const p = peers.find((x) => x.user_id === mid);
-      if (p) pubs[mid] = p.x25519_public;
-    }
-    const { contentKey, wrapped_keys } = await prepareFileEncryption(identity, pubs);
-    const nameEnc = encryptFilename(contentKey, file.name);
+    const conversationId = active.id;
     const chunkCount = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-    const { file_id, staging_dir } = await peerApi.createOutgoingFile({
-      conversationId: active.id,
-      encFilename: nameEnc.ciphertext,
-      filenameNonce: nameEnc.nonce,
-      sizeBytes: file.size,
-      chunkCount,
-      wrappedKeys: wrapped_keys,
-      originalPath: (file as File & { path?: string }).path || null,
-    });
-    setFileNames((s) => ({ ...s, [file_id]: file.name }));
-    for (let i = 0; i < chunkCount; i++) {
-      const slice = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-      const buf = new Uint8Array(await slice.arrayBuffer());
-      const { nonce, ciphertext } = encryptChunk(contentKey, buf);
-      await peerApi.writeFileChunk(staging_dir, i, Array.from(ciphertext), nonce);
-      setStatus(`Staging ${i + 1}/${chunkCount}`);
+    abortSendRef.current = false;
+    let fileId: string | undefined;
+    setOutgoingFile({ conversationId, name: file.name, done: 0, total: chunkCount });
+    try {
+      const memberIds = await peerApi.memberIds(conversationId);
+      const pubs: Record<string, string> = {
+        [profile.id]: exportPublic(identity).x25519_public,
+      };
+      for (const mid of memberIds) {
+        const p = peers.find((x) => x.user_id === mid);
+        if (p) pubs[mid] = p.x25519_public;
+      }
+      const { contentKey, wrapped_keys } = await prepareFileEncryption(identity, pubs);
+      const nameEnc = encryptFilename(contentKey, file.name);
+      const created = await peerApi.createOutgoingFile({
+        conversationId,
+        encFilename: nameEnc.ciphertext,
+        filenameNonce: nameEnc.nonce,
+        sizeBytes: file.size,
+        chunkCount,
+        wrappedKeys: wrapped_keys,
+        originalPath: (file as File & { path?: string }).path || null,
+      });
+      fileId = created.file_id;
+      const staging_dir = created.staging_dir;
+      setFileNames((s) => ({ ...s, [fileId!]: file.name }));
+      setOutgoingFile({
+        conversationId,
+        fileId,
+        stagingDir: staging_dir,
+        name: file.name,
+        done: 0,
+        total: chunkCount,
+      });
+      for (let i = 0; i < chunkCount; i++) {
+        if (abortSendRef.current) throw new Error("aborted");
+        const slice = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        const buf = new Uint8Array(await slice.arrayBuffer());
+        const { nonce, ciphertextB64 } = encryptChunk(contentKey, buf);
+        await peerApi.writeFileChunk(staging_dir, i, ciphertextB64, nonce);
+        if (i === 0 || i + 1 === chunkCount || (i + 1) % 2 === 0) {
+          setOutgoingFile({
+            conversationId,
+            fileId,
+            stagingDir: staging_dir,
+            name: file.name,
+            done: i + 1,
+            total: chunkCount,
+          });
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      }
+      if (abortSendRef.current) throw new Error("aborted");
+      await peerApi.sendFileNotice(
+        conversationId,
+        fileId,
+        memberIds.filter((id) => id !== profile.id)
+      );
+      setMessages(await peerApi.listMessages(conversationId));
+    } catch (err: any) {
+      if (String(err?.message || err) === "aborted") {
+        if (fileId) {
+          try {
+            await peerApi.abortOutgoingFile(fileId);
+          } catch {
+            /* ignore */
+          }
+        }
+      } else {
+        setStatus(err?.message || String(err));
+      }
+    } finally {
+      setOutgoingFile(null);
+      abortSendRef.current = false;
     }
-    await peerApi.sendFileNotice(
-      active.id,
-      file_id,
-      memberIds.filter((id) => id !== profile.id)
-    );
-    setStatus("");
-    setMessages(await peerApi.listMessages(active.id));
   }
 
   async function decryptFile(fileId: string, uploaderId: string) {
+    abortOpenRef.current = false;
     const file = await peerApi.getFile(fileId);
     if (!file) throw new Error("File metadata missing");
     const key = unwrapContentKey(file.wrapped_keys, profile.id, identity);
@@ -634,11 +747,17 @@ function ChatScreen({
         // The file may have moved; fall back to the encrypted chat copy.
       }
     }
+    const totalChunks = Math.max(1, Number(file.chunk_count) || 1);
+    setIncomingFile({ fileId, name, done: 0, total: totalChunks });
     const parts: Uint8Array[] = [];
-    for (let i = 0; i < file.chunk_count; i++) {
+    for (let i = 0; i < totalChunks; i++) {
+      if (abortOpenRef.current) throw new Error("aborted");
       const chunk = await peerApi.fetchFileChunk(fileId, i, uploaderId);
       parts.push(decryptChunk(key, chunk.nonce, fromB64(chunk.data_b64)));
-      setStatus(`Opening ${i + 1}/${file.chunk_count}`);
+      if (i === 0 || i + 1 === totalChunks || (i + 1) % 2 === 0) {
+        setIncomingFile({ fileId, name, done: i + 1, total: totalChunks });
+        await new Promise((r) => setTimeout(r, 0));
+      }
     }
     const total = parts.reduce((n, p) => n + p.length, 0);
     const merged = new Uint8Array(total);
@@ -659,9 +778,10 @@ function ChatScreen({
 
   async function previewFile(fileId: string, uploaderId: string) {
     setPreviewBusy(true);
-    setStatus("Opening file…");
+    setStatus("");
     try {
       const { file, name, data } = await decryptFile(fileId, uploaderId);
+      if (abortOpenRef.current) return;
       const mime = mimeForName(name);
       const bytes = new Uint8Array(data);
       const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
@@ -677,11 +797,14 @@ function ChatScreen({
           localPath: file.local_path,
         };
       });
-      setStatus("");
     } catch (err: any) {
-      setStatus(err?.message || String(err));
+      if (String(err?.message || err) !== "aborted") {
+        setStatus(err?.message || String(err));
+      }
     } finally {
+      setIncomingFile(null);
       setPreviewBusy(false);
+      abortOpenRef.current = false;
     }
   }
 
@@ -691,7 +814,7 @@ function ChatScreen({
     try {
       const path = await peerApi.saveDownloadedFile(
         filePreview.name,
-        Array.from(filePreview.data),
+        b64(filePreview.data),
         filePreview.fileId
       );
       if (filePreview.uploaderId !== profile.id) {
@@ -901,28 +1024,59 @@ function ChatScreen({
                       alignSelf: m.sender_id === profile.id ? "flex-end" : "flex-start",
                       maxWidth: "70%",
                       p: 1.5,
-                      bgcolor: m.sender_id === profile.id ? "#DCEFE9" : "#FFFFFF",
+                      bgcolor:
+                        m.kind === "deleted"
+                          ? "#F1F4F3"
+                          : m.sender_id === profile.id
+                            ? "#DCEFE9"
+                            : "#FFFFFF",
                       border: "1px solid #D5E3DD",
+                      position: "relative",
                     }}
                   >
-                    {active?.kind === "group" && m.sender_id !== profile.id && (
+                    {m.kind !== "deleted" && (
+                      <IconButton
+                        size="small"
+                        aria-label="Message options"
+                        onClick={(e) => setMsgMenu({ anchor: e.currentTarget, message: m })}
+                        sx={{ position: "absolute", top: 2, right: 2, opacity: 0.55 }}
+                      >
+                        <MoreVertIcon sx={{ fontSize: 16 }} />
+                      </IconButton>
+                    )}
+                    {active?.kind === "group" && m.sender_id !== profile.id && m.kind !== "deleted" && (
                       <Typography variant="caption" color="primary" fontWeight={700} display="block">
                         {senderLabel(m.sender_id)}
                       </Typography>
                     )}
-                    {m.kind === "file_notice" ? (
+                    {m.kind === "deleted" ? (
+                      <Typography
+                        fontStyle="italic"
+                        color="text.secondary"
+                        sx={{ pr: 2 }}
+                      >
+                        This message was deleted
+                      </Typography>
+                    ) : m.kind === "file_notice" ? (
                       <Button
                         size="small"
                         startIcon={<InsertDriveFileIcon />}
                         endIcon={<OpenInNewIcon />}
-                        disabled={previewBusy}
+                        disabled={previewBusy || !!incomingFile}
                         onClick={() => m.file_id && previewFile(m.file_id, m.sender_id)}
-                        sx={{ textTransform: "none", fontWeight: 700, justifyContent: "flex-start" }}
+                        sx={{
+                          textTransform: "none",
+                          fontWeight: 700,
+                          justifyContent: "flex-start",
+                          pr: 3,
+                        }}
                       >
                         {(m.file_id && fileNames[m.file_id]) || "Encrypted file"}
                       </Button>
                     ) : (
-                      <Typography whiteSpace="pre-wrap">{plain[m.id] || "…"}</Typography>
+                      <Typography whiteSpace="pre-wrap" sx={{ pr: 2 }}>
+                        {plain[m.id] || "…"}
+                      </Typography>
                     )}
                     <Box
                       sx={{
@@ -936,6 +1090,7 @@ function ChatScreen({
                     >
                       <Typography variant="caption">{formatClock(m.created_at)}</Typography>
                       {m.sender_id === profile.id &&
+                        m.kind !== "deleted" &&
                         (m.read ? (
                           <DoneAllIcon
                             titleAccess="Read"
@@ -952,6 +1107,105 @@ function ChatScreen({
               ))}
             </Box>
           ))}
+          {outgoingFile && active?.id === outgoingFile.conversationId && (
+            <Paper
+              elevation={0}
+              sx={{
+                alignSelf: "flex-end",
+                maxWidth: "70%",
+                p: 1.5,
+                bgcolor: "#E8EEEC",
+                border: "1px dashed #B7C7C1",
+                opacity: 0.85,
+              }}
+            >
+              <Stack direction="row" spacing={1.25} alignItems="center">
+                <CircularProgress size={18} thickness={5} />
+                <Box minWidth={0} flex={1}>
+                  <Typography noWrap fontWeight={700} color="text.secondary">
+                    {outgoingFile.name}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Encrypting & preparing…
+                    {outgoingFile.total
+                      ? ` ${Math.min(
+                          100,
+                          Math.round((100 * outgoingFile.done) / outgoingFile.total)
+                        )}%`
+                      : ""}
+                  </Typography>
+                  <LinearProgress
+                    variant="determinate"
+                    value={
+                      outgoingFile.total
+                        ? Math.min(100, (100 * outgoingFile.done) / outgoingFile.total)
+                        : 0
+                    }
+                    sx={{ mt: 0.75, height: 4, borderRadius: 999 }}
+                  />
+                </Box>
+                <IconButton
+                  size="small"
+                  color="error"
+                  aria-label="Abort file send"
+                  onClick={abortOutgoingTransfer}
+                >
+                  <StopCircleIcon />
+                </IconButton>
+              </Stack>
+              <Typography variant="caption" color="text.secondary" display="block" mt={0.75} textAlign="right">
+                Sending · tap stop to abort
+              </Typography>
+            </Paper>
+          )}
+          {incomingFile && (
+            <Paper
+              elevation={0}
+              sx={{
+                alignSelf: "flex-start",
+                maxWidth: "70%",
+                p: 1.5,
+                bgcolor: "#E8EEEC",
+                border: "1px dashed #B7C7C1",
+                opacity: 0.85,
+              }}
+            >
+              <Stack direction="row" spacing={1.25} alignItems="center">
+                <CircularProgress size={18} thickness={5} />
+                <Box minWidth={0} flex={1}>
+                  <Typography noWrap fontWeight={700} color="text.secondary">
+                    {incomingFile.name}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Opening…
+                    {incomingFile.total
+                      ? ` ${Math.min(
+                          100,
+                          Math.round((100 * incomingFile.done) / incomingFile.total)
+                        )}%`
+                      : ""}
+                  </Typography>
+                  <LinearProgress
+                    variant="determinate"
+                    value={
+                      incomingFile.total
+                        ? Math.min(100, (100 * incomingFile.done) / incomingFile.total)
+                        : 0
+                    }
+                    sx={{ mt: 0.75, height: 4, borderRadius: 999 }}
+                  />
+                </Box>
+                <IconButton
+                  size="small"
+                  color="error"
+                  aria-label="Abort file open"
+                  onClick={abortIncomingTransfer}
+                >
+                  <StopCircleIcon />
+                </IconButton>
+              </Stack>
+            </Paper>
+          )}
         </Box>
 
         {active && inGroup && (
@@ -997,11 +1251,16 @@ function ChatScreen({
               </Box>
             )}
             <Box display="flex" gap={1}>
-              <IconButton component="label" aria-label="Attach file">
+              <IconButton
+                component="label"
+                aria-label="Attach file"
+                disabled={!!outgoingFile}
+              >
                 <AttachFileIcon />
                 <input
                   hidden
                   type="file"
+                  disabled={!!outgoingFile}
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     if (f) stageFile(f);
@@ -1014,6 +1273,7 @@ function ChatScreen({
                 size="small"
                 placeholder="Encrypted message…"
                 value={text}
+                disabled={!!outgoingFile}
                 onChange={(e) => setText(e.target.value)}
                 onKeyDown={(e) =>
                   e.key === "Enter" && !e.shiftKey && (e.preventDefault(), submitComposer())
@@ -1021,7 +1281,7 @@ function ChatScreen({
               />
               <Button
                 variant="contained"
-                disabled={!text.trim() && !pendingFile}
+                disabled={!!outgoingFile || (!text.trim() && !pendingFile)}
                 onClick={submitComposer}
               >
                 Send
@@ -1035,6 +1295,33 @@ function ChatScreen({
           </Paper>
         )}
       </Box>
+
+      <Menu
+        anchorEl={msgMenu?.anchor ?? null}
+        open={!!msgMenu}
+        onClose={() => setMsgMenu(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem
+          onClick={() => msgMenu && deleteForMe(msgMenu.message)}
+        >
+          <ListItemIcon>
+            <DeleteOutlineIcon fontSize="small" />
+          </ListItemIcon>
+          Delete for me
+        </MenuItem>
+        {msgMenu?.message.sender_id === profile.id && msgMenu.message.kind !== "deleted" && (
+          <MenuItem
+            onClick={() => msgMenu && deleteForEveryone(msgMenu.message)}
+          >
+            <ListItemIcon>
+              <DeleteForeverIcon fontSize="small" color="error" />
+            </ListItemIcon>
+            Delete for everyone
+          </MenuItem>
+        )}
+      </Menu>
 
       <Dialog open={!!pinOpen} onClose={() => setPinOpen(null)}>
         <DialogTitle>Trust this peer?</DialogTitle>

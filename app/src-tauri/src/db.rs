@@ -105,6 +105,13 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             acked_at TEXT NOT NULL,
             PRIMARY KEY (file_id, user_id)
         );
+
+        CREATE TABLE IF NOT EXISTS hidden_messages (
+            user_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            hidden_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, message_id)
+        );
         "#,
     )
     .map_err(|e| e.to_string())?;
@@ -350,14 +357,30 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
 }
 
 pub fn insert_message(conn: &Connection, msg: &Value) -> Result<(), String> {
+    let id = msg["id"].as_str().unwrap_or("");
+    let incoming_kind = msg["kind"].as_str().unwrap_or("text");
+    // Don't revive a tombstone if a delayed original copy arrives later.
+    if incoming_kind != "deleted" {
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT kind FROM messages WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if existing.as_deref() == Some("deleted") {
+            return Ok(());
+        }
+    }
     conn.execute(
         r#"INSERT OR REPLACE INTO messages(id, conversation_id, sender_id, kind, ciphertext, nonce, wrapped_keys, signature, file_id, created_at, delivered)
            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"#,
         params![
-            msg["id"].as_str().unwrap_or(""),
+            id,
             msg["conversation_id"].as_str().unwrap_or(""),
             msg["sender_id"].as_str().unwrap_or(""),
-            msg["kind"].as_str().unwrap_or("text"),
+            incoming_kind,
             msg["ciphertext"].as_str().unwrap_or(""),
             msg["nonce"].as_str().unwrap_or(""),
             msg.get("wrapped_keys").map(|v| v.to_string()).unwrap_or_else(|| "{}".into()),
@@ -371,7 +394,11 @@ pub fn insert_message(conn: &Connection, msg: &Value) -> Result<(), String> {
     Ok(())
 }
 
-pub fn list_messages(conn: &Connection, conversation_id: &str) -> Result<Vec<Value>, String> {
+pub fn list_messages(
+    conn: &Connection,
+    conversation_id: &str,
+    viewer_id: &str,
+) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
             r#"SELECT m.id, m.conversation_id, m.sender_id, m.kind, m.ciphertext,
@@ -387,12 +414,15 @@ pub fn list_messages(conn: &Connection, conversation_id: &str) -> Result<Vec<Val
                         THEN 1 ELSE 0
                       END AS is_read
                FROM messages m
+               LEFT JOIN hidden_messages h
+                 ON h.message_id=m.id AND h.user_id=?2
                WHERE m.conversation_id=?1
+                 AND h.message_id IS NULL
                ORDER BY m.created_at ASC"#,
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![conversation_id], |r| {
+        .query_map(params![conversation_id, viewer_id], |r| {
             let wraps: String = r.get(6)?;
             let wrapped_keys: Value = serde_json::from_str(&wraps).unwrap_or(serde_json::json!({}));
             Ok(serde_json::json!({
@@ -723,4 +753,84 @@ pub fn conversation_title(conn: &Connection, conversation_id: &str) -> Result<Op
     .optional()
     .map(|o| o.flatten())
     .map_err(|e| e.to_string())
+}
+
+pub fn hide_message(conn: &Connection, user_id: &str, message_id: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO hidden_messages(user_id, message_id, hidden_at) VALUES (?1,?2,?3)",
+        params![user_id, message_id, chrono::Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn get_message(conn: &Connection, message_id: &str) -> Result<Option<Value>, String> {
+    conn.query_row(
+        "SELECT id, conversation_id, sender_id, kind, ciphertext, nonce, wrapped_keys, signature, file_id, created_at, delivered FROM messages WHERE id=?1",
+        params![message_id],
+        |r| {
+            let wraps: String = r.get(6)?;
+            let wrapped_keys: Value = serde_json::from_str(&wraps).unwrap_or(serde_json::json!({}));
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "conversation_id": r.get::<_, String>(1)?,
+                "sender_id": r.get::<_, String>(2)?,
+                "kind": r.get::<_, String>(3)?,
+                "ciphertext": r.get::<_, String>(4)?,
+                "nonce": r.get::<_, String>(5)?,
+                "wrapped_keys": wrapped_keys,
+                "signature": r.get::<_, String>(7)?,
+                "file_id": r.get::<_, Option<String>>(8)?,
+                "created_at": r.get::<_, String>(9)?,
+                "delivered": r.get::<_, i64>(10)? == 1,
+            }))
+        },
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+pub fn tombstone_message(conn: &Connection, message_id: &str) -> Result<(), String> {
+    conn.execute(
+        r#"UPDATE messages
+           SET kind='deleted',
+               ciphertext='',
+               nonce='',
+               wrapped_keys='{}',
+               signature='',
+               file_id=NULL
+           WHERE id=?1"#,
+        params![message_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn cancel_outbox_for_message(conn: &Connection, message_id: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM outbox WHERE delivered_at IS NULL AND (id=?1 OR id LIKE ?2)",
+        params![message_id, format!("{message_id}:%")],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_file_record(conn: &Connection, file_id: &str) -> Result<(), String> {
+    let staging: Option<String> = conn
+        .query_row(
+            "SELECT staging_dir FROM files WHERE id=?1",
+            params![file_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    conn.execute("DELETE FROM file_acks WHERE file_id=?1", params![file_id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM files WHERE id=?1", params![file_id])
+        .map_err(|e| e.to_string())?;
+    if let Some(dir) = staging {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    Ok(())
 }

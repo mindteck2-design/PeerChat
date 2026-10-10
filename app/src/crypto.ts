@@ -4,7 +4,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 
-export const CHUNK_SIZE = 512 * 1024;
+/** Larger chunks = fewer encrypt + IPC round-trips on big LAN files. */
+export const CHUNK_SIZE = 4 * 1024 * 1024;
 
 export type Identity = {
   x25519Private: Uint8Array;
@@ -14,9 +15,13 @@ export type Identity = {
 };
 
 function b64(bytes: Uint8Array): string {
-  let s = "";
-  bytes.forEach((b) => (s += String.fromCharCode(b)));
-  return btoa(s);
+  // Chunked conversion avoids call-stack limits and is much faster than += in a loop.
+  let binary = "";
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + step));
+  }
+  return btoa(binary);
 }
 
 function fromB64(s: string): Uint8Array {
@@ -211,7 +216,8 @@ export async function prepareFileEncryption(
 export function encryptChunk(contentKey: Uint8Array, plain: Uint8Array) {
   const nonce = randomBytes(12);
   const cipher = gcm(contentKey, nonce);
-  return { nonce: b64(nonce), ciphertext: cipher.encrypt(plain) };
+  const ciphertext = cipher.encrypt(plain);
+  return { nonce: b64(nonce), ciphertext, ciphertextB64: b64(ciphertext) };
 }
 
 export function decryptChunk(contentKey: Uint8Array, nonceB64: string, ct: Uint8Array) {

@@ -84,7 +84,25 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str) -> String {
             };
             let conn = db.lock();
             if let Some(msg) = payload.get("message") {
-                let _ = db::insert_message(&conn, msg);
+                if payload
+                    .get("delete_for_everyone")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    if let Some(mid) = msg.get("id").and_then(|v| v.as_str()) {
+                        let _ = db::tombstone_message(&conn, mid);
+                        // Ensure the tombstone row exists even if the original never arrived.
+                        let _ = db::insert_message(&conn, msg);
+                        let _ = db::tombstone_message(&conn, mid);
+                    }
+                } else if msg.get("kind").and_then(|v| v.as_str()) == Some("deleted") {
+                    if let Some(mid) = msg.get("id").and_then(|v| v.as_str()) {
+                        let _ = db::insert_message(&conn, msg);
+                        let _ = db::tombstone_message(&conn, mid);
+                    }
+                } else {
+                    let _ = db::insert_message(&conn, msg);
+                }
             }
             if let Some(file) = payload.get("file") {
                 let _ = db::insert_file(&conn, file);
