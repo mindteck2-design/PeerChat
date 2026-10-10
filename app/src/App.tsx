@@ -123,12 +123,13 @@ import {
   SavedPanel,
   SearchDialog,
   SnippetDialog,
-  SnakeGame,
   TransfersPanel,
   type BundleItem,
 } from "./panels";
 import type { SavedItem, ScanResult, TransferLog } from "./peer";
 import { ThemeMode } from "./theme";
+import { FEATURE_GAMES } from "./features";
+import { GamesHub, type GameDispatchFn, type GameMsg } from "./games/games";
 
 type Screen = "setup" | "chat" | "settings";
 
@@ -560,6 +561,9 @@ function ChatScreen({
   const [pendingShareFiles, setPendingShareFiles] = useState<string[]>([]);
   const [scanWarn, setScanWarn] = useState<{ detail: string; onProceed: () => void } | null>(null);
 
+  // Ref for the active game's inbound message dispatcher (set by each game component)
+  const gameDispatchRef = useRef<GameDispatchFn | null>(null);
+
   const scroller = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLInputElement | null>(null);
   const chatSearchRef = useRef<HTMLInputElement | null>(null);
@@ -642,7 +646,7 @@ function ChatScreen({
       peerApi.listLanHosts().catch(() => []),
       peerApi.listTransfers().catch(() => [] as TransferLog[]),
       peerApi.listSavedItems().catch(() => [] as SavedItem[]),
-      peerApi.getAppSetting("games_enabled").catch(() => "1"),
+      FEATURE_GAMES ? peerApi.getAppSetting("games_enabled").catch(() => "1") : Promise.resolve("0"),
     ]);
     setScanning(false);
     setPeers(p);
@@ -650,7 +654,7 @@ function ChatScreen({
     setLanHosts(hosts);
     setTransfers(logs);
     setSavedItems(saved);
-    setGamesOn(gamesFlag !== "0");
+    setGamesOn(FEATURE_GAMES && gamesFlag !== "0");
     setActive((prev) => {
       if (!prev) return prev;
       const fresh = c.find((x) => x.id === prev.id);
@@ -691,6 +695,29 @@ function ChatScreen({
       if (p.from_id === profile.id) return;
       const kind = p.kind || "";
       if (kind === "reaction" || kind === "pin" || kind === "unpin" || kind === "deleted") return;
+
+      // Route game_move messages to the active game component.
+      if (kind === "game_move" && gameDispatchRef.current && p.from_id) {
+        const fromId = p.from_id;
+        void (async () => {
+          try {
+            const msgs = await peerApi.listMessages(cid);
+            const latest = msgs.filter((m) => m.kind === "game_move" && m.sender_id === fromId).at(-1);
+            if (!latest) return;
+            const peer = peers.find((x) => x.user_id === fromId);
+            if (!peer) return;
+            const pubs: Record<string, string> = {
+              [peer.user_id]: peer.x25519_public,
+              [profile.id]: exportPublic(identity).x25519_public,
+            };
+            const plaintext = await decryptMessage({ ...latest, wrapped_keys: latest.wrapped_keys || {} }, profile.id, identity);
+            const gameMsg = JSON.parse(plaintext) as GameMsg;
+            gameDispatchRef.current?.(fromId, gameMsg);
+          } catch { /* ignore malformed game messages */ }
+        })();
+        return; // don't toast for game moves
+      }
+
       // Native OS toast (not Web Notification — that flash-prompted on WebView2).
       void (async () => {
         try {
@@ -1155,6 +1182,27 @@ function ChatScreen({
       memberIds.filter((id) => id !== profile.id)
     );
     setMessages(await peerApi.listMessages(active.id));
+  }
+
+  /**
+   * Send a game message to a specific peer via their DM conversation.
+   * Opens or reuses the DM conversation, encrypts, and sends kind=game_move.
+   */
+  async function sendGameMsg(peerId: string, msg: GameMsg): Promise<void> {
+    const peer = peers.find((p) => p.user_id === peerId);
+    if (!peer) throw new Error("Peer not found");
+    const conv = await peerApi.openDm(peerId);
+    const pubs: Record<string, string> = {
+      [peer.user_id]: peer.x25519_public,
+      [profile.id]: exportPublic(identity).x25519_public,
+    };
+    const body = JSON.stringify(msg);
+    const enc = await encryptMessage(body, conv.id, profile.id, identity, pubs);
+    await peerApi.sendMessage(
+      conv.id,
+      { kind: "game_move", sender_id: profile.id, ...enc },
+      [peerId]
+    );
   }
 
   async function sendText(body: string, replyToId?: string) {
@@ -2123,7 +2171,7 @@ function ChatScreen({
             ["groups", "Groups", <GroupsIcon key="g" />],
             ["people", "People", <PeopleAltIcon key="p" />],
             ["transfers", "Transfers", <DownloadingIcon key="t" />],
-            ["games", "Games", <SportsEsportsIcon key="s" />],
+            ...(FEATURE_GAMES ? [["games", "Games", <SportsEsportsIcon key="s" />] as const] : []),
             ["saved", "Saved", <BookmarkBorderIcon key="b" />],
           ] as const
         ).map(([id, label, icon]) => (
@@ -2450,7 +2498,15 @@ function ChatScreen({
             }}
           />
         )}
-        {nav === "games" && (gamesOn ? <SnakeGame /> : (
+        {FEATURE_GAMES && nav === "games" && (gamesOn ? (
+          <GamesHub
+            peers={peers}
+            myId={profile.id}
+            myName={profile.display_name}
+            sendGameMsg={sendGameMsg}
+            dispatchRef={gameDispatchRef}
+          />
+        ) : (
           <Box p={3}><Alert severity="info">Games are turned off in Settings.</Alert></Box>
         ))}
         {nav === "saved" && (
@@ -4194,28 +4250,30 @@ function SettingsScreen(props: {
           </Typography>
         </Paper>
 
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Games
-          </Typography>
-          <FormControlLabel
-            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
-            labelPlacement="start"
-            control={
-              <Switch
-                checked={gamesEnabled}
-                onChange={(_, v) => {
-                  setGamesEnabled(v);
-                  peerApi.setAppSetting("games_enabled", v ? "1" : "0").then(() => setStatus(v ? "Games enabled" : "Games disabled")).catch((err: any) => setStatus(err?.message || String(err)));
-                }}
-              />
-            }
-            label="Enable offline games"
-          />
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Shows the Games tab in the sidebar. Currently includes Snake.
-          </Typography>
-        </Paper>
+        {FEATURE_GAMES && (
+          <Paper sx={{ p: 2.5 }} variant="outlined">
+            <Typography variant="h6" gutterBottom>
+              Games
+            </Typography>
+            <FormControlLabel
+              sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
+              labelPlacement="start"
+              control={
+                <Switch
+                  checked={gamesEnabled}
+                  onChange={(_, v) => {
+                    setGamesEnabled(v);
+                    peerApi.setAppSetting("games_enabled", v ? "1" : "0").then(() => setStatus(v ? "Games enabled" : "Games disabled")).catch((err: any) => setStatus(err?.message || String(err)));
+                  }}
+                />
+              }
+              label="Enable offline games"
+            />
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              Shows the Games tab in the sidebar. Currently includes Snake, 2048, Tic-Tac-Toe, Rock Paper Scissors, and Dots & Boxes.
+            </Typography>
+          </Paper>
+        )}
 
         <Alert severity="info">
           No central server — chats live in local SQLite and deliver when peers come online. For
