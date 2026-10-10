@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { APP_VERSION_FALLBACK, appVersion } from "./version";
 import {
   Alert,
@@ -35,8 +35,13 @@ import {
   CircularProgress,
   FormControlLabel,
   LinearProgress,
+  useTheme,
 } from "@mui/material";
 import ChatIcon from "@mui/icons-material/ForumRounded";
+import GroupsIcon from "@mui/icons-material/GroupsRounded";
+import DownloadingIcon from "@mui/icons-material/DownloadingRounded";
+import SportsEsportsIcon from "@mui/icons-material/SportsEsportsRounded";
+import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorderRounded";
 import SettingsIcon from "@mui/icons-material/SettingsRounded";
 import AttachFileIcon from "@mui/icons-material/AttachFileRounded";
 import GroupAddIcon from "@mui/icons-material/GroupAddRounded";
@@ -90,6 +95,8 @@ import {
   decryptFilename,
   decryptMessage,
   decryptWithGroupKey,
+  finishHasher,
+  newContentHasher,
   encryptChunk,
   encryptFilename,
   encryptMessage,
@@ -105,6 +112,23 @@ import {
 } from "./crypto";
 import { EMOJI_SET, QUICK_REACTIONS } from "./emoji";
 import { getOrCreateIdentity } from "./storage";
+import { matchingCommands, SLASH_COMMANDS, type CommandContext } from "./commands";
+
+const SLASH_NAMES = new Set(SLASH_COMMANDS.map((c) => c.name));
+import {
+  AnnounceDialog,
+  BundleDialog,
+  HelpDialog,
+  PollDialog,
+  SavedPanel,
+  SearchDialog,
+  SnippetDialog,
+  SnakeGame,
+  TransfersPanel,
+  type BundleItem,
+} from "./panels";
+import type { SavedItem, TransferLog } from "./peer";
+import { ThemeMode } from "./theme";
 
 type Screen = "setup" | "chat" | "settings";
 
@@ -245,7 +269,7 @@ export default function App() {
       const ver = await appVersion();
       setVersion(ver);
       try {
-        await getCurrentWindow().setTitle(`PeerTalk ${ver}`);
+        await getCurrentWindow().setTitle(`PeerChat ${ver}`);
       } catch {
         /* browser preview */
       }
@@ -358,7 +382,7 @@ function SetupScreen(props: {
         <Paper elevation={0} sx={{ width: "min(440px, 100%)", p: 4, border: "1px solid #D5E3DD" }}>
           <Stack direction="row" alignItems="baseline" spacing={1}>
             <Typography variant="overline" color="primary" letterSpacing={2}>
-              PeerTalk
+              PeerChat
             </Typography>
             <Typography variant="caption" color="text.secondary">
               v{props.version}
@@ -387,11 +411,77 @@ function SetupScreen(props: {
             />
             {props.error && <Alert severity="error">{props.error}</Alert>}
             <Button variant="contained" size="large" disabled={busy} onClick={create}>
-              {busy ? "Starting…" : "Start PeerTalk"}
+              {busy ? "Starting…" : "Start PeerChat"}
             </Button>
           </Stack>
         </Paper>
       </Fade>
+    </Box>
+  );
+}
+
+function RichCard({
+  kind,
+  raw,
+  votes,
+  plain,
+  onVote,
+}: {
+  kind: string;
+  raw: string;
+  votes: Message[];
+  plain: Record<string, string>;
+  onVote: (option: string) => void;
+}) {
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  if (kind === "poll" && parsed?.question && Array.isArray(parsed.options)) {
+    const tally = new Map<string, number>();
+    const seen = new Set<string>();
+    for (const vote of votes) {
+      if (seen.has(vote.sender_id)) continue;
+      seen.add(vote.sender_id);
+      const choice = plain[vote.id];
+      if (!choice) continue;
+      tally.set(choice, (tally.get(choice) || 0) + 1);
+    }
+    return (
+      <Box sx={{ pr: 1 }}>
+        <Typography variant="overline" color="primary">Poll</Typography>
+        <Typography fontWeight={700} sx={{ mb: 0.5 }}>{parsed.question}</Typography>
+        <Stack spacing={0.5}>
+          {parsed.options.map((option: string) => (
+            <Button key={option} size="small" variant="outlined" onClick={() => onVote(option)} sx={{ justifyContent: "space-between" }}>
+              <span>{option}</span>
+              <span>{tally.get(option) || 0}</span>
+            </Button>
+          ))}
+        </Stack>
+        <Typography variant="caption" color="text.secondary">{seen.size} vote{seen.size === 1 ? "" : "s"} received on this computer</Typography>
+      </Box>
+    );
+  }
+  if (kind === "snippet") {
+    const title = parsed?.title || "Snippet";
+    const body = parsed?.body || raw;
+    return (
+      <Box sx={{ pr: 1 }}>
+        <Typography variant="overline" color="primary">{title}</Typography>
+        <Typography component="pre" sx={{ m: 0, fontFamily: "ui-monospace, monospace", fontSize: 12, whiteSpace: "pre-wrap" }}>{body}</Typography>
+      </Box>
+    );
+  }
+  const title = parsed?.title || "Announcement";
+  const body = parsed?.body || raw;
+  return (
+    <Box sx={{ pr: 1 }}>
+      <Typography variant="overline" color="primary">Announcement</Typography>
+      <Typography fontWeight={700}>{title}</Typography>
+      <Typography variant="body2" whiteSpace="pre-wrap">{body}</Typography>
     </Box>
   );
 }
@@ -407,6 +497,8 @@ function ChatScreen({
   onSettings: () => void;
   version: string;
 }) {
+  const muiTheme = useTheme();
+  const dark = muiTheme.palette.mode === "dark";
   const [peers, setPeers] = useState<Peer[]>([]);
   const [lanHosts, setLanHosts] = useState<LanHost[]>([]);
   const [convs, setConvs] = useState<Conversation[]>([]);
@@ -415,6 +507,24 @@ function ChatScreen({
   const [plain, setPlain] = useState<Record<string, string>>({});
   const [groupKeys, setGroupKeys] = useState<Record<string, Uint8Array>>({});
   const [tab, setTab] = useState(0);
+  const [nav, setNav] = useState<"people" | "chats" | "groups" | "transfers" | "games" | "saved">("chats");
+  const [scanning, setScanning] = useState(false);
+  const [transfers, setTransfers] = useState<TransferLog[]>([]);
+  const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
+  const [bundleOpen, setBundleOpen] = useState(false);
+  const [bundleBusy, setBundleBusy] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchHits, setSearchHits] = useState<{ id: string; title: string; detail: string; conversationId?: string }[]>([]);
+  const [announceOpen, setAnnounceOpen] = useState(false);
+  const [pollOpen, setPollOpen] = useState(false);
+  const [snippetOpen, setSnippetOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [gamesOn, setGamesOn] = useState(true);
+  const filePickRef = useRef<HTMLInputElement | null>(null);
+  const pauseRef = useRef(false);
   const [chatSearch, setChatSearch] = useState("");
 
   const [text, setText] = useState("");
@@ -475,12 +585,14 @@ function ChatScreen({
 
   const filteredConvs = useMemo(() => {
     const q = chatSearch.trim().toLowerCase();
-    if (!q) return convs;
     return convs.filter((c) => {
+      if (nav === "groups" && c.kind !== "group") return false;
+      if (nav === "chats" && c.kind !== "dm") return false;
+      if (!q) return true;
       const title = (c.kind === "dm" ? c.peer_name : c.title) || "";
       return title.toLowerCase().includes(q);
     });
-  }, [convs, chatSearch]);
+  }, [convs, chatSearch, nav]);
 
   const isAdmin = useMemo(
     () =>
@@ -516,19 +628,27 @@ function ChatScreen({
   }
 
   async function refresh() {
+    setScanning(true);
     try {
       await peerApi.discoverPeers();
     } catch {
       /* ignore */
     }
-    const [p, c, hosts] = await Promise.all([
+    const [p, c, hosts, logs, saved, gamesFlag] = await Promise.all([
       peerApi.listPeers(),
       peerApi.listConversations(),
       peerApi.listLanHosts().catch(() => []),
+      peerApi.listTransfers().catch(() => [] as TransferLog[]),
+      peerApi.listSavedItems().catch(() => [] as SavedItem[]),
+      peerApi.getAppSetting("games_enabled").catch(() => "1"),
     ]);
+    setScanning(false);
     setPeers(p);
     setConvs(c);
     setLanHosts(hosts);
+    setTransfers(logs);
+    setSavedItems(saved);
+    setGamesOn(gamesFlag !== "0");
     setActive((prev) => {
       if (!prev) return prev;
       const fresh = c.find((x) => x.id === prev.id);
@@ -584,7 +704,7 @@ function ChatScreen({
             granted = (await requestPermission()) === "granted";
           }
           if (!granted) return;
-          const title = (p.from_name || "PeerTalk").trim() || "PeerTalk";
+          const title = (p.from_name || "PeerChat").trim() || "PeerChat";
           const body =
             kind === "file_notice"
               ? "Sent a file"
@@ -980,6 +1100,39 @@ function ChatScreen({
     );
   }
 
+  async function sendEncrypted(kind: string, body: string, replyToId?: string) {
+    if (!active || !body.trim()) return;
+    const peer = active.kind === "dm" ? peers.find((p) => p.user_id === active.peer_id) : undefined;
+    if (peer?.identity_changed) {
+      setStatus("This peer's certificate changed. Review it in People before sending.");
+      return;
+    }
+    let message: any;
+    if (active.kind === "dm" && active.peer_id) {
+      if (!peer) {
+        setStatus("Peer not found");
+        return;
+      }
+      const pubs: Record<string, string> = {
+        [peer.user_id]: peer.x25519_public,
+        [profile.id]: exportPublic(identity).x25519_public,
+      };
+      const enc = await encryptMessage(body.trim(), active.id, profile.id, identity, pubs);
+      message = { kind, sender_id: profile.id, ...enc, reply_to: replyToId ?? null };
+    } else {
+      const gk = await ensureGroupKey(active.id);
+      const enc = await encryptWithGroupKey(body.trim(), active.id, profile.id, gk, identity);
+      message = { kind, sender_id: profile.id, ...enc, reply_to: replyToId ?? null };
+    }
+    const memberIds = await resolveMemberIds(active);
+    await peerApi.sendMessage(
+      active.id,
+      message,
+      memberIds.filter((id) => id !== profile.id)
+    );
+    setMessages(await peerApi.listMessages(active.id));
+  }
+
   async function sendText(body: string, replyToId?: string) {
     if (!active || !body.trim()) return;
     const editing = editingMessage;
@@ -1056,7 +1209,9 @@ function ChatScreen({
   }
 
   const dayGroups = useMemo(() => {
-    const visible = active ? messages.filter((m) => m.conversation_id === active.id) : [];
+    const visible = active
+      ? messages.filter((m) => m.conversation_id === active.id && m.kind !== "poll_vote")
+      : [];
     const out: { day: string; label: string; items: Message[] }[] = [];
     for (const m of visible) {
       const day = dayKey(m.created_at);
@@ -1118,13 +1273,80 @@ function ChatScreen({
     }
   }
 
-  async function sendFile(file: File) {
+  function labelForConversation(conversationId: string) {
+    const c = convs.find((x) => x.id === conversationId) || (active?.id === conversationId ? active : null);
+    if (!c) return "conversation";
+    return c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
+  }
+
+  async function recordTransfer(row: {
+    id: string;
+    filename: string;
+    direction: string;
+    status: string;
+    size_bytes?: number;
+    bytes_done?: number;
+    file_id?: string;
+    conversation_id?: string;
+    peer_label?: string;
+    error?: string | null;
+    verified?: boolean;
+    started_at?: string;
+  }) {
+    const terminal = row.status === "completed" || row.status === "failed" || row.status === "interrupted";
+    try {
+      await peerApi.upsertTransfer({
+        size_bytes: row.size_bytes ?? 0,
+        bytes_done: row.bytes_done ?? 0,
+        verified: !!row.verified,
+        started_at: row.started_at || new Date().toISOString(),
+        finished_at: terminal ? new Date().toISOString() : null,
+        error: row.error || null,
+        ...row,
+      });
+      setTransfers(await peerApi.listTransfers());
+    } catch (err) {
+      console.error("transfer log", err);
+    }
+  }
+
+  async function readNextPlainChunk(source: File | { path: string }, offset: number) {
+    if (source instanceof File) {
+      const slice = source.slice(offset, offset + CHUNK_SIZE);
+      return new Uint8Array(await slice.arrayBuffer());
+    }
+    const data = await peerApi.readBundleChunk(source.path, offset, CHUNK_SIZE);
+    return fromB64(data);
+  }
+
+  async function sendFile(file: File | { path: string; name: string; size: number }) {
     if (!active) return;
+    const blocked = peers.find((p) => p.user_id === active.peer_id && p.identity_changed);
+    if (blocked) {
+      setStatus("This peer's certificate changed. Review it in People before sending.");
+      return;
+    }
+    const name = file instanceof File ? file.name : file.name;
+    const size = file instanceof File ? file.size : file.size;
     const conversationId = active.id;
-    const chunkCount = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+    const chunkCount = Math.max(1, Math.ceil(size / CHUNK_SIZE));
+    const transferId = `send-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const started = new Date().toISOString();
     abortSendRef.current = false;
+    pauseRef.current = false;
     let fileId: string | undefined;
-    setOutgoingFile({ conversationId, name: file.name, done: 0, total: chunkCount });
+    setOutgoingFile({ conversationId, name, done: 0, total: chunkCount });
+    await recordTransfer({
+      id: transferId,
+      filename: name,
+      direction: "send",
+      status: "connecting",
+      size_bytes: size,
+      conversation_id: conversationId,
+      peer_label: labelForConversation(conversationId),
+      started_at: started,
+    });
+    const startedMs = Date.now();
     try {
       const memberIds = await peerApi.memberIds(conversationId);
       const pubs: Record<string, string> = {
@@ -1135,52 +1357,99 @@ function ChatScreen({
         if (p) pubs[mid] = p.x25519_public;
       }
       const { contentKey, wrapped_keys } = await prepareFileEncryption(identity, pubs);
-      const nameEnc = encryptFilename(contentKey, file.name);
+      const nameEnc = encryptFilename(contentKey, name);
       const created = await peerApi.createOutgoingFile({
         conversationId,
         encFilename: nameEnc.ciphertext,
         filenameNonce: nameEnc.nonce,
-        sizeBytes: file.size,
+        sizeBytes: size,
         chunkCount,
         wrappedKeys: wrapped_keys,
-        originalPath: (file as File & { path?: string }).path || null,
+        originalPath: file instanceof File ? (file as File & { path?: string }).path || null : file.path,
         fileCryptoV: 2,
       });
       fileId = created.file_id;
-      setFileNames((s) => ({ ...s, [fileId!]: file.name }));
-      setOutgoingFile({
-        conversationId,
-        fileId,
-        name: file.name,
-        done: 0,
-        total: chunkCount,
+      setFileNames((s) => ({ ...s, [fileId!]: name }));
+      const hasher = newContentHasher();
+      let sentBytes = 0;
+      await recordTransfer({
+        id: transferId,
+        filename: name,
+        direction: "send",
+        status: "transferring",
+        size_bytes: size,
+        file_id: fileId,
+        conversation_id: conversationId,
+        peer_label: labelForConversation(conversationId),
+        started_at: started,
       });
       for (let i = 0; i < chunkCount; i++) {
+        while (pauseRef.current) {
+          if (abortSendRef.current) throw new Error("aborted");
+          await new Promise((r) => setTimeout(r, 200));
+        }
         if (abortSendRef.current) throw new Error("aborted");
-        const slice = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        const buf = new Uint8Array(await slice.arrayBuffer());
+        const buf = await readNextPlainChunk(file instanceof File ? file : { path: file.path }, i * CHUNK_SIZE);
+        hasher.update(buf);
         const { nonce, ciphertextB64 } = encryptChunk(contentKey, buf, i);
         await peerApi.writeFileChunk(fileId, i, ciphertextB64, nonce);
+        sentBytes += buf.length;
         if (i === 0 || i + 1 === chunkCount || (i + 1) % 2 === 0) {
-          setOutgoingFile({
-            conversationId,
-            fileId,
-            name: file.name,
-            done: i + 1,
-            total: chunkCount,
+          setOutgoingFile({ conversationId, fileId, name, done: i + 1, total: chunkCount });
+          await recordTransfer({
+            id: transferId,
+            filename: name,
+            direction: "send",
+            status: "transferring",
+            size_bytes: size,
+            bytes_done: sentBytes,
+            file_id: fileId,
+            conversation_id: conversationId,
+            peer_label: labelForConversation(conversationId),
+            started_at: started,
           });
           await new Promise((r) => setTimeout(r, 0));
         }
       }
       if (abortSendRef.current) throw new Error("aborted");
+      await recordTransfer({
+        id: transferId,
+        filename: name,
+        direction: "send",
+        status: "verifying",
+        size_bytes: size,
+        bytes_done: sentBytes,
+        file_id: fileId,
+        conversation_id: conversationId,
+        peer_label: labelForConversation(conversationId),
+        started_at: started,
+      });
+      const digest = finishHasher(hasher);
+      await peerApi.setFileContentHash(fileId, digest);
       await peerApi.sendFileNotice(
         conversationId,
         fileId,
         memberIds.filter((id) => id !== profile.id)
       );
       setMessages(await peerApi.listMessages(conversationId));
+      const seconds = Math.max(0.1, (Date.now() - startedMs) / 1000);
+      await recordTransfer({
+        id: transferId,
+        filename: name,
+        direction: "send",
+        status: "completed",
+        size_bytes: size,
+        bytes_done: sentBytes,
+        verified: true,
+        file_id: fileId,
+        conversation_id: conversationId,
+        peer_label: labelForConversation(conversationId),
+        started_at: started,
+      });
+      setStatus(`Sent ${name} · verified · ${Math.round(sentBytes / seconds / 1024)} KB/s`);
     } catch (err: any) {
-      if (String(err?.message || err) === "aborted") {
+      const raw = String(err?.message || err);
+      if (raw === "aborted") {
         if (fileId) {
           try {
             await peerApi.abortOutgoingFile(fileId);
@@ -1188,12 +1457,37 @@ function ChatScreen({
             /* ignore */
           }
         }
+        await recordTransfer({
+          id: transferId,
+          filename: name,
+          direction: "send",
+          status: "interrupted",
+          size_bytes: size,
+          file_id: fileId,
+          error: "Cancelled",
+          conversation_id: conversationId,
+          peer_label: labelForConversation(conversationId),
+          started_at: started,
+        });
       } else {
-        setStatus(err?.message || String(err));
+        setStatus(explainTransferError(raw));
+        await recordTransfer({
+          id: transferId,
+          filename: name,
+          direction: "send",
+          status: "failed",
+          size_bytes: size,
+          file_id: fileId,
+          error: explainTransferError(raw),
+          conversation_id: conversationId,
+          peer_label: labelForConversation(conversationId),
+          started_at: started,
+        });
       }
     } finally {
       setOutgoingFile(null);
       abortSendRef.current = false;
+      pauseRef.current = false;
     }
   }
 
@@ -1304,27 +1598,139 @@ function ChatScreen({
   }
 
   /** One-click: fetch from peer (sender must be online) → save under Downloads. */
+  function explainTransferError(raw: string) {
+    if (/space/i.test(raw)) return `Not enough disk space. ${raw}`;
+    if (/permission/i.test(raw)) return `Permission denied while writing the file. ${raw}`;
+    if (/integrity/i.test(raw)) return raw;
+    if (/invalid destination/i.test(raw)) return raw;
+    if (/offline|no ip|no port|uploader|connect|tls|fingerprint|forbidden|missing chunk/i.test(raw)) {
+      return "Can't reach the sender. Keep PeerChat open on both computers on the same LAN, then retry.";
+    }
+    return raw;
+  }
+
   async function downloadFileToDownloads(fileId: string, uploaderId: string) {
     setPreviewBusy(true);
     setStatus("Downloading…");
+    abortOpenRef.current = false;
+    const transferId = `recv-${fileId}`;
+    const started = new Date().toISOString();
+    let name = "file";
     try {
-      const { file, name, data } = await decryptFile(fileId, uploaderId);
-      if (abortOpenRef.current) return;
-      const path = await peerApi.saveDownloadedFile(name, b64(data), fileId);
+      const file = await peerApi.getFile(fileId);
+      if (!file) throw new Error("File metadata missing");
+      const key = unwrapContentKey(file.wrapped_keys, profile.id, identity);
+      try {
+        name = decryptFilename(key, file.filename_nonce, file.enc_filename);
+      } catch {
+        name = "file.bin";
+      }
+      if (file.local_path) {
+        const check = await peerApi.verifyDownloadedFile(fileId);
+        setStatus(check.verified ? `Already saved and verified: ${file.local_path}` : `Saved, hash not provided by sender: ${file.local_path}`);
+        await recordTransfer({
+          id: transferId,
+          filename: name,
+          direction: "recv",
+          status: "completed",
+          size_bytes: Number(file.size_bytes) || 0,
+          bytes_done: Number(file.size_bytes) || 0,
+          verified: !!check.verified,
+          file_id: fileId,
+          error: check.reason || null,
+          peer_label: senderLabel(uploaderId),
+          started_at: started,
+        });
+        return;
+      }
+      const totalChunks = Math.max(1, Number(file.chunk_count) || 1);
+      const cryptoV = Number(file.file_crypto_v) || 1;
+      const progress = await peerApi.beginFileReceive(fileId);
+      let next = Number(progress.next_index) || 0;
+      setIncomingFile({ fileId, name, done: next, total: totalChunks });
+      await recordTransfer({
+        id: transferId,
+        filename: name,
+        direction: "recv",
+        status: next > 0 ? "transferring" : "connecting",
+        size_bytes: Number(file.size_bytes) || 0,
+        bytes_done: next * CHUNK_SIZE,
+        file_id: fileId,
+        conversation_id: active?.id,
+        peer_label: senderLabel(uploaderId),
+        started_at: started,
+      });
+      for (let i = next; i < totalChunks; i++) {
+        if (abortOpenRef.current) throw new Error("aborted");
+        let chunk;
+        try {
+          chunk = await peerApi.fetchFileChunk(fileId, i, uploaderId);
+        } catch (err) {
+          await recordTransfer({
+            id: transferId,
+            filename: name,
+            direction: "recv",
+            status: "interrupted",
+            file_id: fileId,
+            error: explainTransferError(String((err as any)?.message || err)),
+            peer_label: senderLabel(uploaderId),
+            started_at: started,
+          });
+          throw err;
+        }
+        const plain = decryptChunk(key, chunk.nonce, fromB64(chunk.data_b64), cryptoV >= 2 ? i : undefined);
+        await peerApi.appendFileReceive(fileId, i, b64(plain));
+        setIncomingFile({ fileId, name, done: i + 1, total: totalChunks });
+      }
+      await recordTransfer({
+        id: transferId,
+        filename: name,
+        direction: "recv",
+        status: "verifying",
+        size_bytes: Number(file.size_bytes) || 0,
+        bytes_done: Number(file.size_bytes) || 0,
+        file_id: fileId,
+        peer_label: senderLabel(uploaderId),
+        started_at: started,
+      });
+      const path = await peerApi.finalizeFileReceive(fileId, name);
+      const check = await peerApi.verifyDownloadedFile(fileId);
       if (uploaderId !== profile.id) {
         await peerApi.ackFileDownload(fileId, uploaderId).catch(() => {});
       }
-      setStatus(`Saved to Downloads: ${path}`);
+      await recordTransfer({
+        id: transferId,
+        filename: name,
+        direction: "recv",
+        status: "completed",
+        size_bytes: Number(file.size_bytes) || 0,
+        bytes_done: Number(file.size_bytes) || 0,
+        verified: !!check.verified,
+        file_id: fileId,
+        error: check.verified ? null : check.reason || null,
+        peer_label: senderLabel(uploaderId),
+        started_at: started,
+      });
+      setStatus(check.verified ? `Saved and verified: ${path}` : `Saved (sender sent no hash): ${path}`);
     } catch (err: any) {
       const raw = String(err?.message || err);
-      if (raw === "aborted") return;
-      if (/offline|no ip|no port|uploader|connect|tls|fingerprint|forbidden|missing chunk/i.test(raw)) {
-        setStatus(
-          "Can't download yet — the sender must keep PeerTalk open on the same LAN, then try again."
-        );
-      } else {
-        setStatus(raw);
+      if (raw === "aborted") {
+        await peerApi.discardFileReceive(fileId).catch(() => {});
+        setStatus("Download cancelled");
+        return;
       }
+      const message = explainTransferError(raw);
+      setStatus(message);
+      await recordTransfer({
+        id: transferId,
+        filename: name,
+        direction: "recv",
+        status: /integrity|space|permission|destination/i.test(raw) ? "failed" : "interrupted",
+        file_id: fileId,
+        error: message,
+        peer_label: senderLabel(uploaderId),
+        started_at: started,
+      });
     } finally {
       setIncomingFile(null);
       setPreviewBusy(false);
@@ -1515,6 +1921,106 @@ function ChatScreen({
     }
   }
 
+  const commandCtx: CommandContext = {
+    hasConversation: !!active && inGroup,
+    isGroup: active?.kind === "group" && inGroup,
+    hasMessageSelection: !!(replyTo || msgMenu),
+  };
+  const slashToken = text.startsWith("/") ? text.split(/\s/)[0] : "";
+  const slashSuggestions =
+    slashToken && !editingMessage && !text.includes("\n") ? matchingCommands(slashToken, commandCtx) : [];
+
+  async function runSlash(name: string) {
+    setText("");
+    if (active) draftsRef.current[active.id] = "";
+    if (name === "/send") {
+      filePickRef.current?.click();
+    } else if (name === "/bundle") {
+      setBundleOpen(true);
+    } else if (name === "/transfers") {
+      setNav("transfers");
+    } else if (name === "/peers") {
+      setNav("people");
+      setTab(0);
+    } else if (name === "/announce") {
+      setAnnounceOpen(true);
+    } else if (name === "/poll") {
+      setPollOpen(true);
+    } else if (name === "/snippet") {
+      setSnippetOpen(true);
+    } else if (name === "/search") {
+      setSearchOpen(true);
+    } else if (name === "/pin") {
+      const target = replyTo || msgMenu?.message;
+      if (!target) setStatus("Select or reply to a message, then use /pin.");
+      else await togglePinMessage(target);
+    } else if (name === "/help") {
+      setHelpOpen(true);
+    }
+  }
+
+  async function runSearch() {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) {
+      setSearchHits([]);
+      return;
+    }
+    setSearchBusy(true);
+    const hits: { id: string; title: string; detail: string; conversationId?: string }[] = [];
+    for (const c of convs) {
+      const title = (c.kind === "dm" ? c.peer_name : c.title) || "";
+      if (title.toLowerCase().includes(q)) {
+        hits.push({ id: `c-${c.id}`, title, detail: c.kind === "group" ? "Group" : "Direct message", conversationId: c.id });
+      }
+    }
+    for (const item of savedItems) {
+      if (item.preview.toLowerCase().includes(q)) {
+        hits.push({ id: `s-${item.id}`, title: item.preview, detail: "Saved", conversationId: item.conversation_id });
+      }
+    }
+    for (const row of transfers) {
+      if (row.filename.toLowerCase().includes(q)) {
+        hits.push({ id: `t-${row.id}`, title: row.filename, detail: `Transfer · ${row.status}`, conversationId: row.conversation_id || undefined });
+      }
+    }
+    for (const c of convs) {
+      try {
+        const msgs = await peerApi.listMessages(c.id);
+        if (c.kind === "group") {
+          try {
+            await ensureGroupKey(c.id);
+          } catch {
+            continue;
+          }
+        }
+        for (const m of msgs) {
+          if (m.kind === "file_notice" || m.kind === "deleted" || m.kind === "poll_vote") continue;
+          let textBody = "";
+          try {
+            if (c.kind === "group") {
+              const gk = await ensureGroupKey(c.id);
+              textBody = await decryptWithGroupKey(m, gk);
+            } else {
+              textBody = await decryptMessage({ ...m, wrapped_keys: m.wrapped_keys || {} }, profile.id, identity);
+            }
+          } catch {
+            continue;
+          }
+          if (textBody.toLowerCase().includes(q)) {
+            const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
+            hits.push({ id: `m-${m.id}`, title, detail: textBody.slice(0, 140), conversationId: c.id });
+          }
+          if (hits.length > 40) break;
+        }
+      } catch {
+        /* skip locked conversation */
+      }
+      if (hits.length > 40) break;
+    }
+    setSearchHits(hits);
+    setSearchBusy(false);
+  }
+
   const activeTitle = active
     ? active.kind === "dm"
       ? active.peer_name || "Direct"
@@ -1541,34 +2047,39 @@ function ChatScreen({
           alignItems: "center",
           py: 1.5,
           gap: 0.5,
-          borderRight: "1px solid #D5E3DD",
-          bgcolor: "#EEF4F2",
+          borderRight: "1px solid",
+          borderColor: "divider",
+          bgcolor: "background.paper",
         }}
       >
-        <Tooltip title="Chats" placement="right">
-          <IconButton
-            color={tab === 1 ? "primary" : "default"}
-            onClick={() => setTab(1)}
-            sx={{
-              bgcolor: tab === 1 ? "rgba(15,107,92,0.14)" : "transparent",
-              borderRadius: 2.5,
-            }}
-          >
-            <ChatIcon />
-          </IconButton>
-        </Tooltip>
-        <Tooltip title="People" placement="right">
-          <IconButton
-            color={tab === 0 ? "primary" : "default"}
-            onClick={() => setTab(0)}
-            sx={{
-              bgcolor: tab === 0 ? "rgba(15,107,92,0.14)" : "transparent",
-              borderRadius: 2.5,
-            }}
-          >
-            <PeopleAltIcon />
-          </IconButton>
-        </Tooltip>
+        {(
+          [
+            ["chats", "Chats", <ChatIcon key="c" />],
+            ["groups", "Groups", <GroupsIcon key="g" />],
+            ["people", "People", <PeopleAltIcon key="p" />],
+            ["transfers", "Transfers", <DownloadingIcon key="t" />],
+            ["games", "Games", <SportsEsportsIcon key="s" />],
+            ["saved", "Saved", <BookmarkBorderIcon key="b" />],
+          ] as const
+        ).map(([id, label, icon]) => (
+          <Tooltip key={id} title={label} placement="right">
+            <IconButton
+              color={nav === id ? "primary" : "default"}
+              aria-label={label}
+              onClick={() => {
+                setNav(id);
+                if (id === "people") setTab(0);
+                if (id === "chats" || id === "groups") setTab(1);
+              }}
+              sx={{
+                bgcolor: nav === id ? "action.selected" : "transparent",
+                borderRadius: 2.5,
+              }}
+            >
+              {icon}
+            </IconButton>
+          </Tooltip>
+        ))}
         <Box flex={1} />
         <Tooltip title="Settings" placement="right">
           <IconButton onClick={onSettings} sx={{ borderRadius: 2.5 }}>
@@ -1582,23 +2093,24 @@ function ChatScreen({
         sx={{
           width: 300,
           flexShrink: 0,
-          display: "flex",
           flexDirection: "column",
           overflow: "hidden",
-          borderRight: "1px solid #D5E3DD",
-          bgcolor: "#FFFFFF",
+          borderRight: "1px solid",
+          borderColor: "divider",
+          bgcolor: "background.paper",
+          display: nav === "transfers" || nav === "games" || nav === "saved" ? "none" : "flex",
         }}
       >
         <Box sx={{ px: 2, pt: 1.75, pb: 1, display: "flex", alignItems: "center", gap: 1 }}>
           <Box flex={1} minWidth={0}>
             <Typography variant="subtitle1" fontWeight={700} lineHeight={1.2}>
-              PeerTalk{" "}
+              PeerChat{" "}
               <Typography component="span" variant="caption" color="text.secondary" fontWeight={500}>
                 v{version}
               </Typography>
             </Typography>
             <Typography variant="caption" color="text.secondary" noWrap display="block">
-              {profile.display_name}
+              {scanning ? "Scanning LAN…" : profile.display_name}
             </Typography>
           </Box>
           <IconButton size="small" aria-label="Refresh peers" onClick={() => refresh()}>
@@ -1662,23 +2174,43 @@ function ChatScreen({
                     </Avatar>
                     <ListItemText
                       primary={p.display_name}
-                      secondary={p.online ? "Online" : lastSeenLabel(p.last_seen_at)}
+                      secondary={
+                        p.identity_changed
+                          ? "Certificate changed — review before chatting"
+                          : p.online
+                            ? "Online"
+                            : lastSeenLabel(p.last_seen_at)
+                      }
                       primaryTypographyProps={{ fontWeight: 600, fontSize: 14, noWrap: true }}
                       secondaryTypographyProps={{ fontSize: 12 }}
                     />
+                    {p.identity_changed && (
+                      <Button
+                        size="small"
+                        color="warning"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          await peerApi.acceptPendingIdentity(p.user_id);
+                          setStatus(`Accepted the new certificate for ${p.display_name}`);
+                          await refresh();
+                        }}
+                      >
+                        Review
+                      </Button>
+                    )}
                     <Box
                       sx={{
                         width: 8,
                         height: 8,
                         borderRadius: "50%",
-                        bgcolor: p.online ? "success.main" : "grey.400",
+                        bgcolor: p.identity_changed ? "warning.main" : p.online ? "success.main" : "grey.400",
                       }}
                     />
                   </ListItemButton>
                 ))}
               {!others.length && (
                 <Typography sx={{ p: 2 }} color="text.secondary" variant="body2">
-                  No peers yet. Start PeerTalk on another PC on this LAN and hit refresh.
+                  No peers yet. Start PeerChat on another PC on this LAN and hit refresh.
                 </Typography>
               )}
               {lanHosts.length > 0 && (
@@ -1707,7 +2239,7 @@ function ChatScreen({
                           {h.label}
                         </Typography>
                         <Typography variant="caption" color="text.secondary">
-                          {h.ip} · No PeerTalk
+                          {h.ip} · No PeerChat
                         </Typography>
                       </Box>
                     </Box>
@@ -1839,14 +2371,57 @@ function ChatScreen({
         height="100%"
         overflow="hidden"
       >
+        {nav === "transfers" && (
+          <TransfersPanel
+            rows={transfers}
+            onClose={() => setNav("chats")}
+            onRetry={(row) => {
+              if (row.direction === "recv" && row.file_id) {
+                const msg = messages.find((m) => m.file_id === row.file_id);
+                downloadFileToDownloads(row.file_id, msg?.sender_id || profile.id);
+              } else {
+                setStatus("Open the conversation and send the file again to retry an upload.");
+              }
+            }}
+          />
+        )}
+        {nav === "games" && (gamesOn ? <SnakeGame /> : (
+          <Box p={3}><Alert severity="info">Games are turned off in Settings.</Alert></Box>
+        ))}
+        {nav === "saved" && (
+          <SavedPanel
+            items={savedItems}
+            onOpen={(id) => {
+              const conv = convs.find((c) => c.id === id);
+              if (conv) {
+                selectConversation(conv);
+                setNav(conv.kind === "group" ? "groups" : "chats");
+                setTab(1);
+              }
+            }}
+            onRemove={async (id) => {
+              await peerApi.deleteSavedItem(id);
+              setSavedItems(await peerApi.listSavedItems());
+            }}
+          />
+        )}
+        <Box
+          sx={{
+            display: nav === "chats" || nav === "groups" || nav === "people" ? "flex" : "none",
+            flexDirection: "column",
+            flex: 1,
+            minHeight: 0,
+          }}
+        >
         <AppBar
           position="static"
           elevation={0}
           sx={{
             flexShrink: 0,
-            bgcolor: "#FFFFFF",
+            bgcolor: "background.paper",
             color: "text.primary",
-            borderBottom: "1px solid #D5E3DD",
+            borderBottom: "1px solid",
+            borderColor: "divider",
             zIndex: 2,
           }}
         >
@@ -1888,6 +2463,9 @@ function ChatScreen({
               />
             )}
             {status && <Chip size="small" label={status} onDelete={() => setStatus("")} />}
+            {active?.kind === "dm" && peers.some((p) => p.user_id === active.peer_id && p.identity_changed) && (
+              <Chip size="small" color="warning" label="Identity changed" />
+            )}
             {active?.kind === "group" && (
               <IconButton
                 aria-label="Group members"
@@ -1913,9 +2491,10 @@ function ChatScreen({
           flexDirection="column"
           gap={0.75}
           sx={{
-            bgcolor: "#F3F6F4",
-            backgroundImage:
-              "radial-gradient(rgba(15,107,92,0.06) 1px, transparent 1px)",
+            bgcolor: "background.default",
+            backgroundImage: dark
+              ? "radial-gradient(rgba(76,141,255,0.08) 1px, transparent 1px)"
+              : "radial-gradient(rgba(15,107,92,0.06) 1px, transparent 1px)",
             backgroundSize: "18px 18px",
           }}
         >
@@ -2144,12 +2723,22 @@ function ChatScreen({
                               </Tooltip>
                             </Stack>
                           ) : (
+                            m.kind === "announcement" || m.kind === "snippet" || m.kind === "poll" ? (
+                              <RichCard
+                                kind={m.kind}
+                                raw={plain[m.id] || ""}
+                                votes={messages.filter((v) => v.kind === "poll_vote" && v.reply_to === m.id)}
+                                plain={plain}
+                                onVote={(option) => sendEncrypted("poll_vote", option, m.id)}
+                              />
+                            ) : (
                             <Typography
                               whiteSpace="pre-wrap"
                               sx={{ pr: 1.5, fontSize: 14, lineHeight: 1.35 }}
                             >
                               {plain[m.id] || "…"}
                             </Typography>
+                            )
                           )}
                           <Box
                             sx={{
@@ -2173,7 +2762,7 @@ function ChatScreen({
                               <Tooltip
                                 title={
                                   m.last_error ||
-                                  "Could not reach the other PC (offline / no LAN IP). Keep PeerTalk open on both sides, then Retry."
+                                  "Could not reach the other PC (offline / no LAN IP). Keep PeerChat open on both sides, then Retry."
                                 }
                               >
                                 <Typography
@@ -2457,14 +3046,36 @@ function ChatScreen({
                 ))}
               </Stack>
             )}
+            {!!slashSuggestions.length && (
+              <List dense sx={{ py: 0 }}>
+                {slashSuggestions.map((cmd, idx) => (
+                  <ListItemButton
+                    key={cmd.name}
+                    selected={idx === slashIndex}
+                    onClick={() => runSlash(cmd.name)}
+                  >
+                    <ListItemText primary={cmd.name} secondary={cmd.hint} />
+                  </ListItemButton>
+                ))}
+              </List>
+            )}
             <Box
               display="flex"
               gap={0.5}
               alignItems="flex-end"
+              onDragOver={(e) => {
+                e.preventDefault();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                const files = Array.from(e.dataTransfer.files || []);
+                if (files.length) stageFiles(files);
+              }}
               sx={{
-                border: "1px solid #D5E3DD",
+                border: "1px solid",
+                borderColor: "divider",
                 borderRadius: 999,
-                bgcolor: "#F7FBFA",
+                bgcolor: dark ? "action.hover" : "#F7FBFA",
                 px: 0.75,
                 py: 0.35,
               }}
@@ -2485,6 +3096,7 @@ function ChatScreen({
               >
                 <AttachFileIcon fontSize="small" />
                 <input
+                  ref={filePickRef}
                   hidden
                   type="file"
                   multiple
@@ -2517,9 +3129,30 @@ function ChatScreen({
                   if (v.trim() && !editingMessage) notifyTyping();
                 }}
                 onKeyDown={(e) => {
+                  if (slashSuggestions.length && e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setSlashIndex((n) => (n + 1) % slashSuggestions.length);
+                    return;
+                  }
+                  if (slashSuggestions.length && e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setSlashIndex((n) => (n + slashSuggestions.length - 1) % slashSuggestions.length);
+                    return;
+                  }
+                  if (e.key === "Enter" && !e.shiftKey && slashToken) {
+                    e.preventDefault();
+                    const exact = SLASH_NAMES.has(slashToken);
+                    if (exact) runSlash(slashToken);
+                    else if (slashSuggestions[slashIndex]) runSlash(slashSuggestions[slashIndex].name);
+                    else setStatus("Unknown command. Type /help to see what is available. The draft was kept.");
+                    return;
+                  }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     submitComposer();
+                  } else if (e.key === "Escape" && slashSuggestions.length) {
+                    e.preventDefault();
+                    setText((t) => (t.startsWith("/") ? "" : t));
                   } else if (e.key === "Escape" && editingMessage) {
                     e.preventDefault();
                     cancelEdit();
@@ -2654,6 +3287,28 @@ function ChatScreen({
               Edit
             </MenuItem>
           )}
+        <MenuItem
+          onClick={async () => {
+            if (!msgMenu || !active) return;
+            const preview = (plain[msgMenu.message.id] || msgMenu.message.kind).slice(0, 500);
+            await peerApi.saveItem({
+              id: `save-${msgMenu.message.id}`,
+              message_id: msgMenu.message.id,
+              conversation_id: active.id,
+              kind: msgMenu.message.kind,
+              preview,
+              created_at: new Date().toISOString(),
+            });
+            setSavedItems(await peerApi.listSavedItems());
+            setStatus("Saved on this computer");
+            setMsgMenu(null);
+          }}
+        >
+          <ListItemIcon>
+            <BookmarkBorderIcon fontSize="small" />
+          </ListItemIcon>
+          Save
+        </MenuItem>
         <MenuItem onClick={() => msgMenu && togglePinMessage(msgMenu.message)}>
           <ListItemIcon>
             <PushPinIcon fontSize="small" />
@@ -2676,6 +3331,7 @@ function ChatScreen({
           </MenuItem>
         )}
       </Menu>
+        </Box>
 
       <Dialog open={!!pinOpen} onClose={() => setPinOpen(null)}>
         <DialogTitle>Trust this peer?</DialogTitle>
@@ -3035,6 +3691,96 @@ function ChatScreen({
           <Button onClick={() => setMembersOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
+
+      <AnnounceDialog
+        open={announceOpen}
+        onClose={() => setAnnounceOpen(false)}
+        onSend={async (title, body) => {
+          await sendEncrypted("announcement", JSON.stringify({ title, body }));
+          setAnnounceOpen(false);
+        }}
+      />
+
+      <PollDialog
+        open={pollOpen}
+        onClose={() => setPollOpen(false)}
+        onSend={async (question, options) => {
+          await sendEncrypted("poll", JSON.stringify({ question, options, votes: {} }));
+          setPollOpen(false);
+        }}
+      />
+
+      <SnippetDialog
+        open={snippetOpen}
+        onClose={() => setSnippetOpen(false)}
+        onSend={async (title, body) => {
+          await sendEncrypted("snippet", JSON.stringify({ title, body }));
+          setSnippetOpen(false);
+        }}
+      />
+
+      <SearchDialog
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        query={searchQuery}
+        setQuery={setSearchQuery}
+        onSearch={runSearch}
+        busy={searchBusy}
+        results={searchHits}
+        onJump={(conversationId) => {
+          const conv = convs.find((c) => c.id === conversationId);
+          if (conv) {
+            selectConversation(conv);
+            setNav(conv.kind === "group" ? "groups" : "chats");
+            setTab(1);
+          }
+          setSearchOpen(false);
+        }}
+      />
+
+      <BundleDialog
+        open={bundleOpen}
+        onClose={() => setBundleOpen(false)}
+        busy={bundleBusy}
+        onSend={async (items, zip, note) => {
+          if (!active) return;
+          setBundleBusy(true);
+          try {
+            let filePath: string;
+            let fileSize: number;
+            let fileName: string;
+            if (zip) {
+              const result = await peerApi.packBundle(items.map((i) => ({ abs_path: i.abs_path, rel_path: i.rel_path })));
+              filePath = result.path;
+              fileSize = result.size;
+              fileName = result.name;
+            } else {
+              if (items.length !== 1) throw new Error("Select exactly one file or use ZIP for multiple files.");
+              filePath = items[0].abs_path;
+              fileSize = items[0].size;
+              fileName = items[0].rel_path;
+            }
+            if (note) {
+              await sendEncrypted("text", note);
+            }
+            await sendFile({ path: filePath, name: fileName, size: fileSize });
+            if (zip) {
+              await peerApi.deleteBundleFile(filePath).catch(() => {});
+            }
+            setBundleOpen(false);
+          } catch (err: any) {
+            setStatus(err?.message || String(err));
+          } finally {
+            setBundleBusy(false);
+          }
+        }}
+      />
+
+      <HelpDialog
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        ctx={commandCtx}
+      />
     </Box>
   );
 }
@@ -3046,17 +3792,22 @@ function SettingsScreen(props: {
   onBack: () => void;
   onNameUpdated: (p: Profile) => void;
 }) {
+  const { mode, setMode } = useContext(ThemeMode);
   const [fp, setFp] = useState("");
   const [name, setName] = useState(props.profile.display_name);
   const [savingName, setSavingName] = useState(false);
   const [status, setStatus] = useState("");
   const [notifOn, setNotifOn] = useState(true);
   const [notifBusy, setNotifBusy] = useState(false);
+  const [downloadDir, setDownloadDir] = useState("");
+  const [gamesEnabled, setGamesEnabled] = useState(true);
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
 
   useEffect(() => {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
     peerApi.getNotificationsEnabled().then(setNotifOn).catch(() => setNotifOn(true));
+    peerApi.getAppSetting("download_dir").then((v) => setDownloadDir(v || "")).catch(() => {});
+    peerApi.getAppSetting("games_enabled").then((v) => setGamesEnabled(v !== "0")).catch(() => setGamesEnabled(true));
   }, []);
 
   async function toggleNotifications(enabled: boolean) {
@@ -3121,10 +3872,10 @@ function SettingsScreen(props: {
             About
           </Typography>
           <Typography variant="body1" fontWeight={600}>
-            PeerTalk {props.version}
+            PeerChat {props.version}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Installed builds update in place — run a newer Install-PeerTalk.bat (or setup.exe) to
+            Installed builds update in place — run a newer Install-PeerChat.bat (or setup.exe) to
             upgrade. Chat data stays in your Windows app data folder.
           </Typography>
         </Paper>
@@ -3144,7 +3895,7 @@ function SettingsScreen(props: {
           />
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             Uses Windows toast notifications (not the browser prompt). Muted chats stay quiet.
-            Toasts appear when the chat is not open or PeerTalk is in the background.
+            Toasts appear when the chat is not open or PeerChat is in the background.
           </Typography>
         </Paper>
 
@@ -3234,9 +3985,89 @@ function SettingsScreen(props: {
           </Stack>
         </Paper>
 
+        <Paper sx={{ p: 2.5 }} variant="outlined">
+          <Typography variant="h6" gutterBottom>
+            Appearance
+          </Typography>
+          <FormControlLabel
+            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
+            labelPlacement="start"
+            control={
+              <Switch
+                checked={mode === "light"}
+                onChange={(_, v) => {
+                  const next = v ? "light" : "dark";
+                  setMode(next);
+                  peerApi.setAppSetting("theme", next).catch(() => {});
+                }}
+              />
+            }
+            label="Light theme"
+          />
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Dark theme is the default. Your choice is saved locally.
+          </Typography>
+        </Paper>
+
+        <Paper sx={{ p: 2.5 }} variant="outlined">
+          <Typography variant="h6" gutterBottom>
+            Downloads
+          </Typography>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <TextField
+              label="Download folder"
+              size="small"
+              fullWidth
+              placeholder="(default: system Downloads folder)"
+              value={downloadDir}
+              onChange={(e) => setDownloadDir(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  peerApi.setAppSetting("download_dir", downloadDir.trim()).then(() => setStatus("Download folder saved")).catch((err: any) => setStatus(err?.message || String(err)));
+                }
+              }}
+            />
+            <Button
+              variant="contained"
+              onClick={() => {
+                peerApi.setAppSetting("download_dir", downloadDir.trim()).then(() => setStatus("Download folder saved")).catch((err: any) => setStatus(err?.message || String(err)));
+              }}
+            >
+              Save
+            </Button>
+          </Stack>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Received files land here. Leave blank to use the system Downloads folder.
+          </Typography>
+        </Paper>
+
+        <Paper sx={{ p: 2.5 }} variant="outlined">
+          <Typography variant="h6" gutterBottom>
+            Games
+          </Typography>
+          <FormControlLabel
+            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
+            labelPlacement="start"
+            control={
+              <Switch
+                checked={gamesEnabled}
+                onChange={(_, v) => {
+                  setGamesEnabled(v);
+                  peerApi.setAppSetting("games_enabled", v ? "1" : "0").then(() => setStatus(v ? "Games enabled" : "Games disabled")).catch((err: any) => setStatus(err?.message || String(err)));
+                }}
+              />
+            }
+            label="Enable offline games"
+          />
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Shows the Games tab in the sidebar. Currently includes Snake.
+          </Typography>
+        </Paper>
+
         <Alert severity="info">
           No central server — chats live in local SQLite and deliver when peers come online. For
-          reliable discovery and delivery, allow PeerTalk through your firewall: UDP 41234 for
+          reliable discovery and delivery, allow PeerChat through your firewall: UDP 41234 for
           discovery and TCP {props.profile.listen_port} for peer delivery (this TCP port is chosen
           automatically and may change if it's busy).
         </Alert>

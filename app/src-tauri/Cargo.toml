@@ -1,8 +1,8 @@
 [package]
 name = "lanmsg"
-version = "0.3.0"
-description = "PeerTalk secure P2P LAN messenger"
-authors = ["PeerTalk"]
+version = "0.4.0"
+description = "PeerChat secure P2P LAN messenger"
+authors = ["PeerChat"]
 edition = "2021"
 
 [lib]
@@ -29,6 +29,8 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 parking_lot = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+tauri-plugin-dialog = "2"
 
 [profile.release]
 panic = "abort"

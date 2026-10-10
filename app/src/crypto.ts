@@ -293,6 +293,14 @@ export function encryptFilename(contentKey: Uint8Array, filename: string) {
   return { nonce: b64(nonce), ciphertext: b64(ct) };
 }
 
+export function newContentHasher() {
+  return sha256.create();
+}
+
+export function finishHasher(hasher: ReturnType<typeof sha256.create>) {
+  return bytesToHex(hasher.digest());
+}
+
 export function decryptFilename(contentKey: Uint8Array, nonceB64: string, ciphertextB64: string) {
   const cipher = gcm(contentKey, fromB64(nonceB64));
   return new TextDecoder().decode(cipher.decrypt(fromB64(ciphertextB64)));

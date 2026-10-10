@@ -1,3 +1,4 @@
+mod bundle;
 mod db;
 mod discovery;
 mod peer_http;
@@ -50,6 +51,56 @@ fn safe_download_name(filename: &str) -> String {
     } else {
         trimmed
     }
+}
+
+fn explain_io(err: std::io::Error) -> String {
+    let raw = err.raw_os_error();
+    let text = err.to_string();
+    if raw == Some(28) || text.to_lowercase().contains("space") {
+        format!("insufficient disk space: {text}")
+    } else if raw == Some(13) || text.to_lowercase().contains("permission") {
+        format!("permission denied: {text}")
+    } else {
+        text
+    }
+}
+
+fn resolve_download_dir(app: &AppHandle, state: &AppState) -> Result<PathBuf, String> {
+    let custom = {
+        let conn = state.db.lock();
+        db::get_setting(&conn, "download_dir")?
+    };
+    if let Some(custom) = custom {
+        let trimmed = custom.trim();
+        if !trimmed.is_empty() {
+            let path = PathBuf::from(trimmed);
+            if !path.is_absolute() {
+                return Err("invalid destination: download directory must be an absolute path".into());
+            }
+            std::fs::create_dir_all(&path).map_err(explain_io)?;
+            return Ok(path);
+        }
+    }
+    app.path()
+        .download_dir()
+        .or_else(|_| app.path().app_data_dir())
+        .map_err(|e| e.to_string())
+}
+
+fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(explain_io)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(explain_io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn resolve_staging_dir(app: &AppHandle, file_id: &str) -> Result<PathBuf, String> {
@@ -1548,12 +1599,8 @@ async fn save_downloaded_file(
         return Err("decoded file exceeds size limit".into());
     }
     let name = safe_download_name(&filename);
-    let dir = app
-        .path()
-        .download_dir()
-        .or_else(|_| app.path().app_data_dir())
-        .map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir = resolve_download_dir(&app, &state)?;
+    std::fs::create_dir_all(&dir).map_err(explain_io)?;
     let mut path = dir.join(&name);
     if path.exists() {
         let stamp = std::time::SystemTime::now()
@@ -1570,9 +1617,9 @@ async fn save_downloaded_file(
     }
     // Reject path escape even after join.
     if !path.starts_with(&dir) {
-        return Err("invalid download path".into());
+        return Err("invalid destination".into());
     }
-    std::fs::write(&path, &data).map_err(|e| e.to_string())?;
+    std::fs::write(&path, &data).map_err(explain_io)?;
     if let Some(file_id) = file_id {
         let conn = state.db.lock();
         db::set_file_local_path(&conn, &file_id, &path.display().to_string())?;
@@ -1657,12 +1704,8 @@ fn finalize_file_receive(
         return Err("temp file missing".into());
     }
     let name = safe_download_name(&filename);
-    let dir = app
-        .path()
-        .download_dir()
-        .or_else(|_| app.path().app_data_dir())
-        .map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir = resolve_download_dir(&app, &state)?;
+    std::fs::create_dir_all(&dir).map_err(explain_io)?;
     let mut path = dir.join(&name);
     if path.exists() {
         let stamp = std::time::SystemTime::now()
@@ -1682,9 +1725,11 @@ fn finalize_file_receive(
     }
     std::fs::rename(&temp, &path)
         .or_else(|_| {
-            std::fs::copy(&temp, &path).map(|_| ()).and_then(|_| std::fs::remove_file(&temp))
+            std::fs::copy(&temp, &path)
+                .map(|_| ())
+                .and_then(|_| std::fs::remove_file(&temp))
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(explain_io)?;
     let conn = state.db.lock();
     db::set_file_local_path(&conn, &file_id, &path.display().to_string())?;
     let _ = db::clear_receive_progress(&conn, &file_id);
@@ -1763,11 +1808,189 @@ fn tls_fingerprint_peer(host: String, port: u16) -> Result<String, String> {
     Ok(fp)
 }
 
+const SETTING_KEYS: &[&str] = &["theme", "games_enabled", "download_dir"];
+
+#[tauri::command]
+fn get_app_setting(state: State<AppState>, key: String) -> Result<Option<String>, String> {
+    if !SETTING_KEYS.contains(&key.as_str()) {
+        return Err("unknown setting".into());
+    }
+    let conn = state.db.lock();
+    db::get_setting(&conn, &key)
+}
+
+#[tauri::command]
+fn set_app_setting(state: State<AppState>, key: String, value: String) -> Result<(), String> {
+    if !SETTING_KEYS.contains(&key.as_str()) {
+        return Err("unknown setting".into());
+    }
+    if key == "theme" && value != "dark" && value != "light" {
+        return Err("theme must be dark or light".into());
+    }
+    if key == "games_enabled" && value != "0" && value != "1" {
+        return Err("games_enabled must be 0 or 1".into());
+    }
+    if key == "download_dir" && !value.trim().is_empty() {
+        let path = PathBuf::from(value.trim());
+        if !path.is_absolute() {
+            return Err("invalid destination: download directory must be an absolute path".into());
+        }
+        std::fs::create_dir_all(&path).map_err(explain_io)?;
+    }
+    let conn = state.db.lock();
+    db::set_setting(&conn, &key, value.trim())
+}
+
+#[tauri::command]
+fn accept_pending_identity(state: State<AppState>, user_id: String) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::accept_pending_identity(&conn, &user_id)
+}
+
+#[tauri::command]
+fn upsert_transfer(state: State<AppState>, row: Value) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::upsert_transfer(&conn, &row)
+}
+
+#[tauri::command]
+fn list_transfers(state: State<AppState>) -> Result<Vec<Value>, String> {
+    let conn = state.db.lock();
+    db::list_transfers(&conn, 200)
+}
+
+#[tauri::command]
+fn save_item(state: State<AppState>, row: Value) -> Result<(), String> {
+    let preview = row["preview"].as_str().unwrap_or("");
+    if preview.chars().count() > 4000 {
+        return Err("saved preview is too long".into());
+    }
+    let conn = state.db.lock();
+    db::save_item(&conn, &row)
+}
+
+#[tauri::command]
+fn delete_saved_item(state: State<AppState>, id: String) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::delete_saved_item(&conn, &id)
+}
+
+#[tauri::command]
+fn list_saved_items(state: State<AppState>) -> Result<Vec<Value>, String> {
+    let conn = state.db.lock();
+    db::list_saved_items(&conn)
+}
+
+#[tauri::command]
+fn peer_delivery_error(state: State<AppState>, user_id: String) -> Result<Option<Value>, String> {
+    let conn = state.db.lock();
+    db::latest_outbox_error(&conn, &user_id)
+}
+
+#[tauri::command]
+fn verify_downloaded_file(state: State<AppState>, file_id: String) -> Result<Value, String> {
+    let conn = state.db.lock();
+    let file = db::get_file(&conn, &file_id)?.ok_or("file metadata missing")?;
+    let path = file["local_path"]
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or("no local file to verify")?;
+    drop(conn);
+    if !path.is_file() {
+        return Err("local file missing before integrity check".into());
+    }
+    let actual = sha256_file(&path)?;
+    let expected = file["content_sha256"].as_str().unwrap_or("").trim().to_string();
+    if expected.is_empty() {
+        return Ok(json!({
+            "verified": false,
+            "sha256": actual,
+            "reason": "sender did not attach an integrity hash (older peer)"
+        }));
+    }
+    if !expected.eq_ignore_ascii_case(&actual) {
+        let _ = std::fs::remove_file(&path);
+        let conn = state.db.lock();
+        let _ = db::set_file_local_path(&conn, &file_id, "");
+        return Err(format!(
+            "integrity check failed for this file (expected {expected}, got {actual})"
+        ));
+    }
+    Ok(json!({ "verified": true, "sha256": actual }))
+}
+
+#[tauri::command]
+fn discard_file_receive(state: State<AppState>, file_id: String) -> Result<(), String> {
+    let conn = state.db.lock();
+    if let Ok(Some((_, temp))) = db::get_receive_progress(&conn, &file_id) {
+        if let Some(temp) = temp {
+            let path = PathBuf::from(temp);
+            if path.file_name().and_then(|s| s.to_str()) == Some(&format!("{file_id}.part")) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    db::clear_receive_progress(&conn, &file_id)
+}
+
+#[tauri::command]
+fn list_directory_files(root: String) -> Result<Vec<Value>, String> {
+    bundle::list_tree(std::path::Path::new(&root))
+}
+
+#[tauri::command]
+fn pack_bundle(app: AppHandle, entries: Vec<bundle::BundleEntry>) -> Result<Value, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("bundles");
+    std::fs::create_dir_all(&dir).map_err(explain_io)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = dir.join(format!("{id}.zip"));
+    let (size, count) = bundle::pack(&path, &entries)?;
+    Ok(json!({
+        "path": path.display().to_string(),
+        "size": size,
+        "count": count,
+        "name": format!("bundle-{}.zip", &id[..8]),
+    }))
+}
+
+#[tauri::command]
+fn read_bundle_chunk(app: AppHandle, path: String, offset: u64, len: u32) -> Result<String, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("bundles");
+    let bytes = bundle::read_under(base.as_path(), std::path::Path::new(&path), offset, len as usize)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[tauri::command]
+fn delete_bundle_file(app: AppHandle, path: String) -> Result<(), String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("bundles");
+    let base = base.canonicalize().map_err(|e| e.to_string())?;
+    let path = std::path::PathBuf::from(path);
+    let path = path.canonicalize().map_err(|e| e.to_string())?;
+    if !path.starts_with(&base) {
+        return Err("refusing to delete a file outside the bundle directory".into());
+    }
+    std::fs::remove_file(path).map_err(explain_io)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data = app
                 .path()
@@ -1857,9 +2080,24 @@ pub fn run() {
             open_local_file,
             read_local_file,
             tls_fingerprint_peer,
+            get_app_setting,
+            set_app_setting,
+            accept_pending_identity,
+            upsert_transfer,
+            list_transfers,
+            save_item,
+            delete_saved_item,
+            list_saved_items,
+            peer_delivery_error,
+            verify_downloaded_file,
+            discard_file_receive,
+            list_directory_files,
+            pack_bundle,
+            read_bundle_chunk,
+            delete_bundle_file,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running PeerTalk");
+        .expect("error while running PeerChat");
 }
 
 #[cfg(test)]

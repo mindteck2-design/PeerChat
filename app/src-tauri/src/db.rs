@@ -301,6 +301,42 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         conn.pragma_update(None, "user_version", 8)
             .map_err(|e| e.to_string())?;
     }
+
+    if version < 9 {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS saved_items (
+                id TEXT PRIMARY KEY,
+                message_id TEXT,
+                conversation_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                preview TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_saved_items_created ON saved_items(created_at);
+            CREATE TABLE IF NOT EXISTS transfer_log (
+                id TEXT PRIMARY KEY,
+                direction TEXT NOT NULL,
+                file_id TEXT,
+                conversation_id TEXT,
+                peer_label TEXT,
+                filename TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                error TEXT,
+                bytes_done INTEGER NOT NULL DEFAULT 0,
+                verified INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                finished_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_transfer_log_updated ON transfer_log(updated_at);
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "user_version", 9)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -2187,6 +2223,163 @@ pub fn upsert_receive_progress(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+pub fn accept_pending_identity(conn: &Connection, user_id: &str) -> Result<(), String> {
+    let n = conn
+        .execute(
+            r#"UPDATE peers SET
+                 tls_fingerprint = pending_tls_fingerprint,
+                 x25519_public = COALESCE(NULLIF(pending_x25519_public, ''), x25519_public),
+                 ed25519_public = COALESCE(NULLIF(pending_ed25519_public, ''), ed25519_public),
+                 identity_changed = 0,
+                 pending_tls_fingerprint = NULL,
+                 pending_x25519_public = NULL,
+                 pending_ed25519_public = NULL
+               WHERE user_id=?1 AND identity_changed=1
+                 AND pending_tls_fingerprint IS NOT NULL"#,
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("No pending identity change for this peer".into());
+    }
+    Ok(())
+}
+
+pub fn upsert_transfer(conn: &Connection, row: &Value) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        r#"INSERT INTO transfer_log(id, direction, file_id, conversation_id, peer_label, filename, size_bytes, status, error, bytes_done, verified, started_at, updated_at, finished_at)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+           ON CONFLICT(id) DO UPDATE SET
+             file_id=excluded.file_id,
+             status=excluded.status,
+             error=excluded.error,
+             bytes_done=excluded.bytes_done,
+             verified=excluded.verified,
+             updated_at=excluded.updated_at,
+             finished_at=excluded.finished_at,
+             size_bytes=excluded.size_bytes,
+             filename=excluded.filename"#,
+        params![
+            row["id"].as_str().unwrap_or(""),
+            row["direction"].as_str().unwrap_or("send"),
+            row.get("file_id").and_then(|v| v.as_str()),
+            row.get("conversation_id").and_then(|v| v.as_str()),
+            row.get("peer_label").and_then(|v| v.as_str()),
+            row["filename"].as_str().unwrap_or("file"),
+            row["size_bytes"].as_i64().unwrap_or(0),
+            row["status"].as_str().unwrap_or("queued"),
+            row.get("error").and_then(|v| v.as_str()),
+            row["bytes_done"].as_i64().unwrap_or(0),
+            if row["verified"].as_bool().unwrap_or(false) { 1 } else { 0 },
+            row["started_at"].as_str().unwrap_or(&now),
+            now,
+            row.get("finished_at").and_then(|v| v.as_str()),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn list_transfers(conn: &Connection, limit: i64) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, direction, file_id, conversation_id, peer_label, filename, size_bytes, status, error, bytes_done, verified, started_at, updated_at, finished_at FROM transfer_log ORDER BY updated_at DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![limit], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "direction": r.get::<_, String>(1)?,
+                "file_id": r.get::<_, Option<String>>(2)?,
+                "conversation_id": r.get::<_, Option<String>>(3)?,
+                "peer_label": r.get::<_, Option<String>>(4)?,
+                "filename": r.get::<_, String>(5)?,
+                "size_bytes": r.get::<_, i64>(6)?,
+                "status": r.get::<_, String>(7)?,
+                "error": r.get::<_, Option<String>>(8)?,
+                "bytes_done": r.get::<_, i64>(9)?,
+                "verified": r.get::<_, i64>(10)? == 1,
+                "started_at": r.get::<_, String>(11)?,
+                "updated_at": r.get::<_, String>(12)?,
+                "finished_at": r.get::<_, Option<String>>(13)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+pub fn save_item(conn: &Connection, row: &Value) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        r#"INSERT INTO saved_items(id, message_id, conversation_id, kind, preview, created_at)
+           VALUES (?1,?2,?3,?4,?5,?6)
+           ON CONFLICT(id) DO UPDATE SET preview=excluded.preview, kind=excluded.kind"#,
+        params![
+            row["id"].as_str().unwrap_or(""),
+            row.get("message_id").and_then(|v| v.as_str()),
+            row["conversation_id"].as_str().unwrap_or(""),
+            row["kind"].as_str().unwrap_or("text"),
+            row["preview"].as_str().unwrap_or(""),
+            row["created_at"].as_str().unwrap_or(&now),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_saved_item(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM saved_items WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn list_saved_items(conn: &Connection) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, message_id, conversation_id, kind, preview, created_at FROM saved_items ORDER BY created_at DESC LIMIT 500",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "message_id": r.get::<_, Option<String>>(1)?,
+                "conversation_id": r.get::<_, String>(2)?,
+                "kind": r.get::<_, String>(3)?,
+                "preview": r.get::<_, String>(4)?,
+                "created_at": r.get::<_, String>(5)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+pub fn latest_outbox_error(conn: &Connection, recipient_id: &str) -> Result<Option<Value>, String> {
+    conn.query_row(
+        "SELECT last_error, attempts, created_at FROM outbox WHERE recipient_id=?1 AND delivered_at IS NULL AND last_error IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+        params![recipient_id],
+        |r| {
+            Ok(serde_json::json!({
+                "last_error": r.get::<_, Option<String>>(0)?,
+                "attempts": r.get::<_, i64>(1)?,
+                "created_at": r.get::<_, String>(2)?,
+            }))
+        },
+    )
+    .optional()
+    .map_err(|e| e.to_string())
 }
 
 pub fn clear_receive_progress(conn: &Connection, file_id: &str) -> Result<(), String> {

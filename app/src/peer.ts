@@ -21,6 +21,7 @@ export type Peer = {
   online?: boolean;
   last_seen_at?: string | null;
   identity_changed?: boolean;
+  pending_tls_fingerprint?: string | null;
 };
 
 export type Conversation = {
@@ -231,4 +232,53 @@ export const peerApi = {
     inv<{ next_index: number; temp_path: string | null }>("get_receive_progress", { fileId }),
   openLocalFile: (fileId: string) => inv<void>("open_local_file", { fileId }),
   readLocalFile: (fileId: string) => inv<string>("read_local_file", { fileId }),
+  getAppSetting: (key: string) => inv<string | null>("get_app_setting", { key }),
+  setAppSetting: (key: string, value: string) => inv<void>("set_app_setting", { key, value }),
+  acceptPendingIdentity: (userId: string) => inv<void>("accept_pending_identity", { userId }),
+  upsertTransfer: (row: Record<string, unknown>) => inv<void>("upsert_transfer", { row }),
+  listTransfers: () => inv<TransferLog[]>("list_transfers"),
+  saveItem: (row: Record<string, unknown>) => inv<void>("save_item", { row }),
+  deleteSavedItem: (id: string) => inv<void>("delete_saved_item", { id }),
+  listSavedItems: () => inv<SavedItem[]>("list_saved_items"),
+  peerDeliveryError: (userId: string) =>
+    inv<{ last_error?: string | null; attempts?: number; created_at?: string } | null>(
+      "peer_delivery_error",
+      { userId }
+    ),
+  verifyDownloadedFile: (fileId: string) =>
+    inv<{ verified: boolean; sha256: string; reason?: string }>("verify_downloaded_file", { fileId }),
+  discardFileReceive: (fileId: string) => inv<void>("discard_file_receive", { fileId }),
+  listDirectoryFiles: (root: string) =>
+    inv<{ abs_path: string; rel_path: string; size: number }[]>("list_directory_files", { root }),
+  packBundle: (entries: { abs_path: string; rel_path: string }[]) =>
+    inv<{ path: string; size: number; count: number; name: string }>("pack_bundle", { entries }),
+  readBundleChunk: (path: string, offset: number, len: number) =>
+    inv<string>("read_bundle_chunk", { path, offset, len }),
+  deleteBundleFile: (path: string) => inv<void>("delete_bundle_file", { path }),
+};
+
+export type TransferLog = {
+  id: string;
+  direction: string;
+  file_id?: string | null;
+  conversation_id?: string | null;
+  peer_label?: string | null;
+  filename: string;
+  size_bytes: number;
+  status: string;
+  error?: string | null;
+  bytes_done: number;
+  verified: boolean;
+  started_at: string;
+  updated_at: string;
+  finished_at?: string | null;
+};
+
+export type SavedItem = {
+  id: string;
+  message_id?: string | null;
+  conversation_id: string;
+  kind: string;
+  preview: string;
+  created_at: string;
 };
