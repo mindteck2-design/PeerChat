@@ -144,6 +144,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE files ADD COLUMN content_sha256 TEXT", []);
     let _ = conn.execute("ALTER TABLE files ADD COLUMN file_crypto_v INTEGER DEFAULT 1", []);
     let _ = conn.execute("ALTER TABLE outbox ADD COLUMN last_attempt_at TEXT", []);
+    let _ = conn.execute("ALTER TABLE outbox ADD COLUMN next_retry_at TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE peers ADD COLUMN identity_changed INTEGER NOT NULL DEFAULT 0",
         [],
@@ -337,6 +338,19 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         conn.pragma_update(None, "user_version", 9)
             .map_err(|e| e.to_string())?;
     }
+
+    if version < 10 {
+        conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_outbox_next_retry
+              ON outbox(next_retry_at) WHERE delivered_at IS NULL;
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "user_version", 10)
+            .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -1338,7 +1352,7 @@ pub fn list_messages(
 pub fn reset_outbox_attempts(conn: &Connection, message_id: &str) -> Result<u64, String> {
     let n = conn
         .execute(
-            "UPDATE outbox SET attempts=0, last_error=NULL, last_attempt_at=NULL WHERE delivered_at IS NULL AND (id=?1 OR id LIKE ?2)",
+            "UPDATE outbox SET attempts=0, last_error=NULL, last_attempt_at=NULL, next_retry_at=NULL WHERE delivered_at IS NULL AND (id=?1 OR id LIKE ?2)",
             params![message_id, format!("{message_id}:%")],
         )
         .map_err(|e| e.to_string())?;
@@ -1362,13 +1376,21 @@ pub fn enqueue_outbox(
 }
 
 pub fn pending_outbox(conn: &Connection) -> Result<Vec<Value>, String> {
+    // Filter by next_retry_at in SQL so the index can skip non-due rows.
+    // Rows that have never failed (next_retry_at IS NULL) are always included.
+    let now = chrono::Utc::now().to_rfc3339();
     let mut stmt = conn
         .prepare(
-            "SELECT id, recipient_id, conversation_id, payload, created_at, attempts, last_error, last_attempt_at FROM outbox WHERE delivered_at IS NULL ORDER BY created_at ASC LIMIT 200",
+            r#"SELECT id, recipient_id, conversation_id, payload, created_at, attempts, last_error, last_attempt_at
+               FROM outbox
+               WHERE delivered_at IS NULL
+                 AND (next_retry_at IS NULL OR next_retry_at <= ?1)
+               ORDER BY created_at ASC
+               LIMIT 100"#,
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map(params![now], |r| {
             Ok(serde_json::json!({
                 "id": r.get::<_, String>(0)?,
                 "recipient_id": r.get::<_, String>(1)?,
@@ -1382,30 +1404,56 @@ pub fn pending_outbox(conn: &Connection) -> Result<Vec<Value>, String> {
         })
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    let now = chrono::Utc::now().timestamp();
     for row in rows {
-        let item = row.map_err(|e| e.to_string())?;
-        let attempts = item["attempts"].as_i64().unwrap_or(0);
-        if attempts > 0 {
-            // Exponential backoff from last attempt: 2^n seconds, max 60s.
-            let delay = (1i64 << attempts.min(6)).min(60);
-            let last = item["last_attempt_at"]
-                .as_str()
-                .or_else(|| item["created_at"].as_str());
-            if let Some(ts_s) = last {
-                if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_s) {
-                    if now - ts.timestamp() < delay {
-                        continue;
-                    }
-                }
-            }
-        }
-        out.push(item);
-        if out.len() >= 100 {
-            break;
-        }
+        out.push(row.map_err(|e| e.to_string())?);
     }
     Ok(out)
+}
+
+/// Items due for delivery to a specific peer (respects next_retry_at backoff).
+pub fn pending_outbox_for_peer(conn: &Connection, recipient_id: &str) -> Result<Vec<Value>, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut stmt = conn
+        .prepare(
+            r#"SELECT id, recipient_id, conversation_id, payload, created_at, attempts, last_error, last_attempt_at
+               FROM outbox
+               WHERE delivered_at IS NULL
+                 AND recipient_id=?1
+                 AND (next_retry_at IS NULL OR next_retry_at <= ?2)
+               ORDER BY created_at ASC
+               LIMIT 50"#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![recipient_id, now], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "recipient_id": r.get::<_, String>(1)?,
+                "conversation_id": r.get::<_, String>(2)?,
+                "payload": r.get::<_, String>(3)?,
+                "created_at": r.get::<_, String>(4)?,
+                "attempts": r.get::<_, i64>(5)?,
+                "last_error": r.get::<_, Option<String>>(6)?,
+                "last_attempt_at": r.get::<_, Option<String>>(7)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+/// Immediately re-enable delivery attempts for all pending items to a given peer.
+/// Called when a peer is rediscovered at a new address so the backoff window is bypassed.
+pub fn clear_peer_outbox_backoff(conn: &Connection, recipient_id: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE outbox SET next_retry_at=NULL WHERE delivered_at IS NULL AND recipient_id=?1",
+        params![recipient_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub fn mark_outbox_delivered(conn: &Connection, id: &str) -> Result<(), String> {
@@ -1433,10 +1481,27 @@ pub fn mark_outbox_delivered(conn: &Connection, id: &str) -> Result<(), String> 
 }
 
 pub fn bump_outbox_error(conn: &Connection, id: &str, err: &str) -> Result<(), String> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = chrono::Utc::now();
+    let now_str = now.to_rfc3339();
+    // Read current attempts so we can compute the correct next delay.
+    let attempts: i64 = conn
+        .query_row("SELECT attempts FROM outbox WHERE id=?1", params![id], |r| r.get(0))
+        .unwrap_or(0);
+    let new_attempts = attempts + 1;
+    // Exponential backoff: 2^n seconds capped at 60 s, with ±25 % jitter.
+    // Jitter uses FNV-1a hash of the id so different items for the same peer
+    // don't all retry at exactly the same moment (thundering-herd avoidance).
+    let base_delay = (1i64 << new_attempts.min(6)).min(60);
+    let jitter_range = (base_delay / 4).max(1);
+    let hash: u64 = id.bytes().fold(14_695_981_039_346_656_037_u64, |acc, b| {
+        acc.wrapping_mul(1_099_511_628_211).wrapping_add(b as u64)
+    });
+    let jitter = (hash % (jitter_range as u64 * 2)) as i64 - jitter_range;
+    let delay = (base_delay + jitter).max(1);
+    let next_retry_at = (now + chrono::Duration::seconds(delay)).to_rfc3339();
     conn.execute(
-        "UPDATE outbox SET attempts=attempts+1, last_error=?2, last_attempt_at=?3 WHERE id=?1",
-        params![id, err, now],
+        "UPDATE outbox SET attempts=attempts+1, last_error=?2, last_attempt_at=?3, next_retry_at=?4 WHERE id=?1",
+        params![id, err, now_str, next_retry_at],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -1937,7 +2002,7 @@ mod tests {
     fn migrate_sets_user_version() {
         let conn = mem();
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert!(v >= 8);
+        assert!(v >= 10);
     }
 
     #[test]
@@ -2075,13 +2140,116 @@ mod tests {
     fn outbox_backoff_skips_hot_loop() {
         let conn = mem();
         enqueue_outbox(&conn, "m9:u2", "u2", "c1", "{}").unwrap();
-        conn.execute(
-            "UPDATE outbox SET attempts=3, last_attempt_at=?1 WHERE id='m9:u2'",
-            params![chrono::Utc::now().to_rfc3339()],
-        )
-        .unwrap();
+        // Simulate failed attempts via bump_outbox_error so next_retry_at is set.
+        for _ in 0..3 {
+            bump_outbox_error(&conn, "m9:u2", "test error").unwrap();
+        }
         let pending = pending_outbox(&conn).unwrap();
         assert!(pending.iter().all(|p| p["id"].as_str() != Some("m9:u2")));
+    }
+
+    #[test]
+    fn outbox_fresh_item_is_immediately_due() {
+        let conn = mem();
+        enqueue_outbox(&conn, "m-fresh:u3", "u3", "c1", "{}").unwrap();
+        let pending = pending_outbox(&conn).unwrap();
+        assert!(pending.iter().any(|p| p["id"].as_str() == Some("m-fresh:u3")));
+    }
+
+    #[test]
+    fn bump_outbox_error_stores_next_retry_at() {
+        let conn = mem();
+        enqueue_outbox(&conn, "m-err:u4", "u4", "c1", "{}").unwrap();
+        bump_outbox_error(&conn, "m-err:u4", "network error").unwrap();
+        // next_retry_at should be in the future
+        let next: Option<String> = conn
+            .query_row("SELECT next_retry_at FROM outbox WHERE id='m-err:u4'", [], |r| r.get(0))
+            .unwrap();
+        assert!(next.is_some(), "next_retry_at should be set after bump");
+        let ts = chrono::DateTime::parse_from_rfc3339(next.as_deref().unwrap()).unwrap();
+        assert!(ts > chrono::Utc::now(), "next_retry_at should be in the future");
+    }
+
+    #[test]
+    fn reset_outbox_attempts_clears_next_retry_at() {
+        let conn = mem();
+        enqueue_outbox(&conn, "m-reset:u5", "u5", "c1", "{}").unwrap();
+        bump_outbox_error(&conn, "m-reset:u5", "err").unwrap();
+        // Item should be in backoff
+        let pending_before = pending_outbox(&conn).unwrap();
+        assert!(!pending_before.iter().any(|p| p["id"].as_str() == Some("m-reset:u5")));
+        // Reset should clear backoff
+        reset_outbox_attempts(&conn, "m-reset").unwrap();
+        let pending_after = pending_outbox(&conn).unwrap();
+        assert!(pending_after.iter().any(|p| p["id"].as_str() == Some("m-reset:u5")));
+    }
+
+    #[test]
+    fn clear_peer_outbox_backoff_unblocks_items() {
+        let conn = mem();
+        enqueue_outbox(&conn, "m-kick:u6", "u6", "c1", "{}").unwrap();
+        bump_outbox_error(&conn, "m-kick:u6", "err").unwrap();
+        // Peer comes back online — clear backoff
+        clear_peer_outbox_backoff(&conn, "u6").unwrap();
+        let pending = pending_outbox(&conn).unwrap();
+        assert!(pending.iter().any(|p| p["id"].as_str() == Some("m-kick:u6")));
+    }
+
+    #[test]
+    fn group_delivery_requires_all_recipients() {
+        let conn = mem();
+        // Two per-recipient outbox rows for the same message
+        enqueue_outbox(&conn, "mg1:u1", "u1", "g1", "{}").unwrap();
+        enqueue_outbox(&conn, "mg1:u2", "u2", "g1", "{}").unwrap();
+        // Insert the message row (delivered=0)
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO messages(id,conversation_id,sender_id,kind,ciphertext,nonce,wrapped_keys,signature,created_at,delivered) VALUES ('mg1','g1','me','text','','','{}','',?1,0)",
+            params![now],
+        ).unwrap();
+        // Deliver to u1 only — message should still be undelivered
+        mark_outbox_delivered(&conn, "mg1:u1").unwrap();
+        let delivered: i64 = conn
+            .query_row("SELECT delivered FROM messages WHERE id='mg1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(delivered, 0, "delivered must stay 0 until all recipients acked");
+        // Deliver to u2 — now message should be marked delivered
+        mark_outbox_delivered(&conn, "mg1:u2").unwrap();
+        let delivered: i64 = conn
+            .query_row("SELECT delivered FROM messages WHERE id='mg1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(delivered, 1, "delivered must be 1 after all recipients acked");
+    }
+
+    #[test]
+    fn duplicate_deliver_is_idempotent() {
+        let conn = mem();
+        enqueue_outbox(&conn, "dup1:u1", "u1", "c1", "{}").unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO messages(id,conversation_id,sender_id,kind,ciphertext,nonce,wrapped_keys,signature,created_at,delivered) VALUES ('dup1','c1','me','text','','','{}','',?1,0)",
+            params![now],
+        ).unwrap();
+        mark_outbox_delivered(&conn, "dup1:u1").unwrap();
+        // Second call must not error or corrupt state
+        mark_outbox_delivered(&conn, "dup1:u1").unwrap();
+        let delivered: i64 = conn
+            .query_row("SELECT delivered FROM messages WHERE id='dup1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(delivered, 1);
+    }
+
+    #[test]
+    fn pending_outbox_for_peer_returns_correct_subset() {
+        let conn = mem();
+        enqueue_outbox(&conn, "mp1:ua", "ua", "c1", "{}").unwrap();
+        enqueue_outbox(&conn, "mp2:ub", "ub", "c1", "{}").unwrap();
+        let for_ua = pending_outbox_for_peer(&conn, "ua").unwrap();
+        assert_eq!(for_ua.len(), 1);
+        assert_eq!(for_ua[0]["id"].as_str(), Some("mp1:ua"));
+        let for_ub = pending_outbox_for_peer(&conn, "ub").unwrap();
+        assert_eq!(for_ub.len(), 1);
+        assert_eq!(for_ub[0]["id"].as_str(), Some("mp2:ub"));
     }
 
     #[test]

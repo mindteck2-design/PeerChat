@@ -413,15 +413,15 @@ fn start_runtime_inner(
     Ok(())
 }
 
-async fn flush_outbox(db: &SharedDb) {
-    let pending = {
-        let conn = db.lock();
-        db::pending_outbox(&conn).unwrap_or_default()
-    };
-    for item in pending {
+/// Deliver a slice of outbox items that all belong to the same recipient peer.
+/// Items are delivered sequentially to preserve per-peer ordering.
+/// A 10-second total timeout wraps each request (covers TLS handshake + body read).
+async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
+    for item in items {
         let id = item["id"].as_str().unwrap_or("").to_string();
         let recipient = item["recipient_id"].as_str().unwrap_or("").to_string();
         let payload_str = item["payload"].as_str().unwrap_or("{}").to_string();
+
         let peer = {
             let conn = db.lock();
             db::get_peer(&conn, &recipient).ok().flatten()
@@ -429,12 +429,16 @@ async fn flush_outbox(db: &SharedDb) {
         let Some(peer) = peer else {
             continue;
         };
-        let Some(ip) = peer["last_ip"].as_str() else {
-            let conn = db.lock();
-            let _ = db::bump_outbox_error(&conn, &id, "peer has no LAN IP yet — refresh People");
-            continue;
+
+        let ip = match peer["last_ip"].as_str() {
+            Some(ip) => ip.to_string(),
+            None => {
+                let conn = db.lock();
+                let _ = db::bump_outbox_error(&conn, &id, "peer has no LAN IP yet — refresh People");
+                continue;
+            }
         };
-        if !discovery::is_usable_lan_ip(ip) {
+        if !discovery::is_usable_lan_ip(&ip) {
             let conn = db.lock();
             let _ = db::bump_outbox_error(
                 &conn,
@@ -453,7 +457,6 @@ async fn flush_outbox(db: &SharedDb) {
         };
         let pinned = peer["pinned"].as_bool().unwrap_or(false);
         let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
-        // Pinned peers must present a known TLS fingerprint.
         if pinned && fp.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
             let conn = db.lock();
             let _ = db::bump_outbox_error(&conn, &id, "pinned peer missing fingerprint");
@@ -462,12 +465,23 @@ async fn flush_outbox(db: &SharedDb) {
         let Ok(payload) = serde_json::from_str::<Value>(&payload_str) else {
             continue;
         };
-        match peer_http::peer_request(ip, port as u16, "/v1/deliver", Some(payload), fp).await {
-            Ok((resp, _)) if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            peer_http::peer_request(&ip, port as u16, "/v1/deliver", Some(payload), fp),
+        )
+        .await;
+
+        match result {
+            Err(_elapsed) => {
+                let conn = db.lock();
+                let _ = db::bump_outbox_error(&conn, &id, "request timed out after 10 s");
+            }
+            Ok(Ok((resp, _))) if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
                 let conn = db.lock();
                 let _ = db::mark_outbox_delivered(&conn, &id);
             }
-            Ok((resp, _)) => {
+            Ok(Ok((resp, _))) => {
                 let err = resp
                     .get("error")
                     .and_then(|v| v.as_str())
@@ -476,12 +490,72 @@ async fn flush_outbox(db: &SharedDb) {
                 let conn = db.lock();
                 let _ = db::bump_outbox_error(&conn, &id, &err);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
+                // Classify TLS fingerprint mismatch as a security failure so the UI can
+                // surface it distinctly from ordinary network errors.
+                let msg = if e.contains("tls fingerprint mismatch") {
+                    "[SECURITY] TLS fingerprint mismatch — peer identity may have changed. \
+                     Go to People and accept or reject the new identity.".to_string()
+                } else {
+                    e
+                };
                 let conn = db.lock();
-                let _ = db::bump_outbox_error(&conn, &id, &e);
+                let _ = db::bump_outbox_error(&conn, &id, &msg);
             }
         }
     }
+}
+
+/// Drain all due outbox items, delivering to each peer concurrently (up to 8 peers at once).
+/// Items for the same peer are delivered sequentially to preserve ordering.
+async fn flush_outbox(db: &SharedDb) {
+    let pending = {
+        let conn = db.lock();
+        db::pending_outbox(&conn).unwrap_or_default()
+    };
+
+    // Group by recipient so we can deliver to multiple peers in parallel while
+    // keeping per-peer message ordering intact.
+    let mut by_peer: std::collections::HashMap<String, Vec<Value>> = Default::default();
+    for item in pending {
+        let recipient = item["recipient_id"].as_str().unwrap_or("").to_string();
+        by_peer.entry(recipient).or_default().push(item);
+    }
+
+    const MAX_CONCURRENT_PEERS: usize = 8;
+    let mut set = tokio::task::JoinSet::new();
+
+    for (_peer_id, items) in by_peer {
+        // Bound concurrency: wait for a slot before spawning a new peer task.
+        if set.len() >= MAX_CONCURRENT_PEERS {
+            let _ = set.join_next().await;
+        }
+        let db2 = db.clone();
+        set.spawn(async move {
+            deliver_peer_items(&db2, items).await;
+        });
+    }
+    // Drain remaining tasks.
+    while set.join_next().await.is_some() {}
+}
+
+/// Immediately attempt delivery of all pending items for a single peer.
+/// Clears the backoff window first so newly reachable peers are not held back.
+fn kick_flush_for_peer(state: &AppState, recipient_id: String) {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn(async move {
+        {
+            let conn = db.lock();
+            let _ = db::clear_peer_outbox_backoff(&conn, &recipient_id);
+        }
+        let items = {
+            let conn = db.lock();
+            db::pending_outbox_for_peer(&conn, &recipient_id).unwrap_or_default()
+        };
+        if !items.is_empty() {
+            deliver_peer_items(&db, items).await;
+        }
+    });
 }
 
 #[tauri::command]
@@ -512,27 +586,36 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
     }
     let mut out = Vec::new();
     let online_ids: Vec<String> = map.keys().cloned().collect();
+    // Collect peers whose reachable address changed so we can kick delivery after releasing
+    // the DB lock (avoid deadlock: kick_flush_for_peer spawns tasks that also lock the DB).
+    let mut peers_to_kick: Vec<String> = Vec::new();
     {
         let conn = state.db.lock();
         for p in map.values() {
+            // Read existing row once — used for pinned-key preservation and IP-change detection.
+            let existing = db::get_peer(&conn, &p.user_id).ok().flatten();
+            let old_ip = existing.as_ref().and_then(|e| e["last_ip"].as_str().map(|s| s.to_string()));
+            let ip_changed = old_ip.as_deref() != Some(p.ip.as_str())
+                && discovery::is_usable_lan_ip(&p.ip);
+
             // Pinned peers: freeze identity keys / TLS fingerprint on change.
-            if let Ok(Some(existing)) = db::get_peer(&conn, &p.user_id) {
-                let pinned = existing["pinned"].as_bool().unwrap_or(false);
+            if let Some(ref ex) = existing {
+                let pinned = ex["pinned"].as_bool().unwrap_or(false);
                 if pinned {
-                    let same_fp = existing["tls_fingerprint"].as_str() == Some(p.fingerprint.as_str());
-                    let same_x = existing["x25519_public"].as_str() == Some(p.x25519_public.as_str());
-                    let same_e = existing["ed25519_public"].as_str() == Some(p.ed25519_public.as_str());
+                    let same_fp = ex["tls_fingerprint"].as_str() == Some(p.fingerprint.as_str());
+                    let same_x = ex["x25519_public"].as_str() == Some(p.x25519_public.as_str());
+                    let same_e = ex["ed25519_public"].as_str() == Some(p.ed25519_public.as_str());
                     if !(same_fp && same_x && same_e) {
                         // Keep old keys; still refresh IP/online for delivery.
                         db::upsert_peer(
                             &conn,
                             &p.user_id,
-                            existing["display_name"].as_str().unwrap_or(&p.display_name),
-                            existing["x25519_public"].as_str().unwrap_or(&p.x25519_public),
-                            existing["ed25519_public"].as_str().unwrap_or(&p.ed25519_public),
+                            ex["display_name"].as_str().unwrap_or(&p.display_name),
+                            ex["x25519_public"].as_str().unwrap_or(&p.x25519_public),
+                            ex["ed25519_public"].as_str().unwrap_or(&p.ed25519_public),
                             Some(&p.ip),
                             Some(p.port as i64),
-                            existing["tls_fingerprint"].as_str(),
+                            ex["tls_fingerprint"].as_str(),
                             true,
                         )?;
                         let _ = db::set_peer_pending_identity(
@@ -542,11 +625,14 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
                             &p.x25519_public,
                             &p.ed25519_public,
                         );
+                        if ip_changed {
+                            peers_to_kick.push(p.user_id.clone());
+                        }
                         out.push(json!({
                             "user_id": p.user_id,
-                            "display_name": existing["display_name"],
-                            "x25519_public": existing["x25519_public"],
-                            "ed25519_public": existing["ed25519_public"],
+                            "display_name": ex["display_name"],
+                            "x25519_public": ex["x25519_public"],
+                            "ed25519_public": ex["ed25519_public"],
                             "last_ip": p.ip,
                             "last_port": p.port,
                             "tls_fingerprint": p.fingerprint,
@@ -568,6 +654,9 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
                 Some(&p.fingerprint),
                 true,
             )?;
+            if ip_changed {
+                peers_to_kick.push(p.user_id.clone());
+            }
             out.push(json!({
                 "user_id": p.user_id,
                 "display_name": p.display_name,
@@ -582,6 +671,11 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
         }
         let _ = db::mark_peers_offline_except(&conn, &online_ids);
         let _ = db::mark_stale_peers_offline(&conn, 45);
+    }
+    // Kick delivery for peers that came online or moved to a new address.
+    // Done after releasing conn to avoid any potential lock ordering issue.
+    for peer_id in peers_to_kick {
+        kick_flush_for_peer(&state, peer_id);
     }
     Ok(out)
 }
