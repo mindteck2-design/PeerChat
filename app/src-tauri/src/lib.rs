@@ -21,6 +21,8 @@ struct AppState {
     stop_tx: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     fingerprint: Mutex<String>,
     started: Mutex<bool>,
+    /// Live discovery beacon display name (updated on rename).
+    live_display_name: Arc<Mutex<String>>,
 }
 
 fn now() -> String {
@@ -97,6 +99,32 @@ fn enqueue_group_event(
     op: &str,
     subject_user_id: Option<&str>,
 ) -> Result<(), String> {
+    enqueue_group_event_extra(
+        conn,
+        from_peer,
+        conversation_id,
+        recipient_id,
+        title,
+        wrapped_for_recipient,
+        members,
+        op,
+        subject_user_id,
+        None,
+    )
+}
+
+fn enqueue_group_event_extra(
+    conn: &Connection,
+    from_peer: &Value,
+    conversation_id: &str,
+    recipient_id: &str,
+    title: &str,
+    wrapped_for_recipient: Option<String>,
+    members: &Value,
+    op: &str,
+    subject_user_id: Option<&str>,
+    extra: Option<Value>,
+) -> Result<(), String> {
     let oid = format!("gev-{}:{}", uuid::Uuid::new_v4(), recipient_id);
     let mut event = json!({
         "op": op,
@@ -106,6 +134,13 @@ fn enqueue_group_event(
     });
     if let Some(uid) = subject_user_id {
         event["user_id"] = json!(uid);
+    }
+    if let Some(ex) = extra {
+        if let Some(obj) = ex.as_object() {
+            for (k, v) in obj {
+                event[k] = v.clone();
+            }
+        }
     }
     let payload = json!({
         "from_peer": from_peer,
@@ -132,6 +167,7 @@ fn get_profile(state: State<AppState>) -> Result<Option<Value>, String> {
 
 #[tauri::command]
 fn setup_profile(
+    app: AppHandle,
     state: State<AppState>,
     display_name: String,
     user_id: String,
@@ -153,6 +189,7 @@ fn setup_profile(
         )?;
     }
     start_runtime_inner(
+        &app,
         &state,
         &user_id,
         &display_name,
@@ -170,18 +207,42 @@ fn update_display_name(state: State<AppState>, display_name: String) -> Result<V
     if name.is_empty() {
         return Err("display name required".into());
     }
-    let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
-    let id = profile["id"].as_str().unwrap_or("");
-    db::upsert_profile(
-        &conn,
-        id,
-        name,
-        profile["x25519_public"].as_str().unwrap_or(""),
-        profile["ed25519_public"].as_str().unwrap_or(""),
-        profile["listen_port"].as_i64().unwrap_or(9876),
-    )?;
-    db::get_profile(&conn)?.ok_or_else(|| "profile missing".into())
+    let (profile, fingerprint) = {
+        let conn = state.db.lock();
+        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let id = profile["id"].as_str().unwrap_or("");
+        db::upsert_profile(
+            &conn,
+            id,
+            name,
+            profile["x25519_public"].as_str().unwrap_or(""),
+            profile["ed25519_public"].as_str().unwrap_or(""),
+            profile["listen_port"].as_i64().unwrap_or(9876),
+        )?;
+        let updated = db::get_profile(&conn)?.ok_or_else(|| "profile missing".to_string())?;
+        let fp = state.fingerprint.lock().clone();
+        // Fan-out name to known peers so lists update without waiting for chat traffic.
+        let me = updated["id"].as_str().unwrap_or("").to_string();
+        let from_peer = from_peer_json(&updated, &fp);
+        let peers = db::list_peers(&conn).unwrap_or_default();
+        for p in peers {
+            let rid = p["user_id"].as_str().unwrap_or("");
+            if rid.is_empty() || rid == me {
+                continue;
+            }
+            let oid = format!("profile-{}:{}", uuid::Uuid::new_v4(), rid);
+            let payload = json!({
+                "from_peer": from_peer,
+                "profile_update": true,
+            });
+            let _ = db::enqueue_outbox(&conn, &oid, rid, "", &payload.to_string());
+        }
+        (updated, fp)
+    };
+    let _ = fingerprint;
+    *state.live_display_name.lock() = name.to_string();
+    kick_flush(&state);
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -234,6 +295,7 @@ fn conversation_is_muted(state: State<AppState>, conversation_id: String) -> Res
 }
 
 fn start_runtime_inner(
+    app: &AppHandle,
     state: &AppState,
     user_id: &str,
     display_name: &str,
@@ -257,11 +319,19 @@ fn start_runtime_inner(
     }
     let cert = tls_cert::ensure(&state.data_dir)?;
     *state.fingerprint.lock() = cert.fingerprint.clone();
-    peer_http::spawn_listener(cert.clone(), port, state.db.clone(), user_id.to_string())?;
+    *state.live_display_name.lock() = display_name.to_string();
+    peer_http::spawn_listener(
+        cert.clone(),
+        port,
+        state.db.clone(),
+        user_id.to_string(),
+        app.clone(),
+    )?;
 
     let (tx, rx) = tokio::sync::watch::channel(false);
     *state.stop_tx.lock() = Some(tx);
     let hub = state.discovery.clone();
+    let live_name = state.live_display_name.clone();
     let beacon = PeerBeacon {
         magic: "LANMSG".into(),
         v: "4".into(),
@@ -276,14 +346,14 @@ fn start_runtime_inner(
         ts: 0.0,
     };
     tauri::async_runtime::spawn(async move {
-        discovery::run_beacon(hub, port, 41234, rx, beacon).await;
+        discovery::run_beacon(hub, port, 41234, rx, beacon, live_name).await;
     });
 
     // outbox flusher
     let db = state.db.clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             flush_outbox(&db).await;
         }
     });
@@ -309,14 +379,27 @@ async fn flush_outbox(db: &SharedDb) {
             continue;
         };
         let Some(ip) = peer["last_ip"].as_str() else {
+            let conn = db.lock();
+            let _ = db::bump_outbox_error(&conn, &id, "peer has no LAN IP yet — refresh People");
             continue;
         };
-        let Some(port) = peer["last_port"].as_u64() else {
-            continue;
-        };
-        if !peer["online"].as_bool().unwrap_or(false) && peer["last_ip"].is_null() {
+        if !discovery::is_usable_lan_ip(ip) {
+            let conn = db.lock();
+            let _ = db::bump_outbox_error(
+                &conn,
+                &id,
+                "peer IP is loopback/invalid — ask them to update PeerTalk and Refresh People",
+            );
             continue;
         }
+        let port = peer["last_port"]
+            .as_u64()
+            .or_else(|| peer["last_port"].as_i64().map(|p| p as u64));
+        let Some(port) = port else {
+            let conn = db.lock();
+            let _ = db::bump_outbox_error(&conn, &id, "peer has no listen port");
+            continue;
+        };
         let pinned = peer["pinned"].as_bool().unwrap_or(false);
         let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
         // Pinned peers must present a known TLS fingerprint.
@@ -333,10 +416,18 @@ async fn flush_outbox(db: &SharedDb) {
                 let conn = db.lock();
                 let _ = db::mark_outbox_delivered(&conn, &id);
             }
-            Ok(_) | Err(_) => {
-                let err = "deliver failed".to_string();
+            Ok((resp, _)) => {
+                let err = resp
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("deliver rejected")
+                    .to_string();
                 let conn = db.lock();
                 let _ = db::bump_outbox_error(&conn, &id, &err);
+            }
+            Err(e) => {
+                let conn = db.lock();
+                let _ = db::bump_outbox_error(&conn, &id, &e);
             }
         }
     }
@@ -689,16 +780,32 @@ fn mark_conversation_read(state: State<AppState>, conversation_id: String) -> Re
 }
 
 #[tauri::command]
-fn send_message(state: State<AppState>, conversation_id: String, message: Value, recipient_ids: Vec<String>) -> Result<Value, String> {
+fn send_message(
+    state: State<AppState>,
+    conversation_id: String,
+    message: Value,
+    recipient_ids: Vec<String>,
+    edit: Option<bool>,
+) -> Result<Value, String> {
+    let is_edit = edit.unwrap_or(false);
     let mut msg = message;
     if msg.get("id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if is_edit {
+            return Err("edit requires message id".into());
+        }
         msg["id"] = json!(uuid::Uuid::new_v4().to_string());
     }
     if msg.get("created_at").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
         msg["created_at"] = json!(now());
     }
+    if is_edit {
+        msg["edited_at"] = json!(now());
+    }
     msg["conversation_id"] = json!(conversation_id);
     msg["delivered"] = json!(false);
+    if msg.get("sort_at").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        msg["sort_at"] = msg["created_at"].clone();
+    }
 
     let fingerprint = state.fingerprint.lock().clone();
     let profile = {
@@ -706,7 +813,11 @@ fn send_message(state: State<AppState>, conversation_id: String, message: Value,
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| e.to_string())?;
         let result = (|| -> Result<Value, String> {
-            db::insert_message(&conn, &msg)?;
+            if is_edit {
+                db::apply_message_edit(&conn, &msg)?;
+            } else {
+                db::insert_message(&conn, &msg)?;
+            }
             let profile = db::get_profile(&conn)?.ok_or("no profile")?;
             let from_peer = json!({
                 "user_id": profile["id"],
@@ -731,12 +842,19 @@ fn send_message(state: State<AppState>, conversation_id: String, message: Value,
                     continue;
                 }
                 let out_id = msg["id"].as_str().unwrap_or("").to_string();
-                let oid = format!("{out_id}:{rid}");
+                let oid = if is_edit {
+                    format!("edit-{}:{}:{}", out_id, uuid::Uuid::new_v4(), rid)
+                } else {
+                    format!("{out_id}:{rid}")
+                };
                 let mut payload = json!({
                     "message": msg,
                     "from_peer": from_peer,
                     "conversation_id": conversation_id,
                 });
+                if is_edit {
+                    payload["edit"] = json!(true);
+                }
                 if let Ok(Some(w)) = db::get_wrapped_group_key(&conn, conversation_id.as_str(), rid) {
                     payload["wrapped_group_key"] = json!(w);
                 }
@@ -803,8 +921,12 @@ fn add_group_members(
     let conn = state.db.lock();
     let profile = db::get_profile(&conn)?.ok_or("no profile")?;
     let me = profile["id"].as_str().unwrap_or("").to_string();
-    if !db::is_group_admin(&conn, &conversation_id, &me)? {
-        return Err("Only group admins can add members".into());
+    let is_admin = db::is_group_admin(&conn, &conversation_id, &me)?;
+    let can_add = is_admin
+        || (db::is_conversation_member(&conn, &conversation_id, &me).unwrap_or(false)
+            && db::members_can_add(&conn, &conversation_id)?);
+    if !can_add {
+        return Err("Only admins can add members in this group".into());
     }
     let title = db::conversation_title(&conn, &conversation_id)?
         .unwrap_or_else(|| "Group".into());
@@ -962,6 +1084,199 @@ fn leave_group(
     Ok(())
 }
 
+#[tauri::command]
+fn rename_group(
+    state: State<AppState>,
+    conversation_id: String,
+    title: String,
+) -> Result<(), String> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("title required".into());
+    }
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    if !db::is_group_admin(&conn, &conversation_id, &me)? {
+        return Err("Only group admins can rename".into());
+    }
+    db::set_conversation_title(&conn, &conversation_id, &title)?;
+    let roster = Value::Array(db::list_members(&conn, &conversation_id)?);
+    let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+    for rid in db::member_ids(&conn, &conversation_id)? {
+        if rid == me {
+            continue;
+        }
+        enqueue_group_event(
+            &conn,
+            &from_peer,
+            &conversation_id,
+            &rid,
+            &title,
+            None,
+            &roster,
+            "rename",
+            None,
+        )?;
+    }
+    drop(conn);
+    kick_flush(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_group(state: State<AppState>, conversation_id: String) -> Result<(), String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    if !db::is_group_admin(&conn, &conversation_id, &me)? {
+        return Err("Only group admins can delete the group".into());
+    }
+    let title = db::conversation_title(&conn, &conversation_id)?.unwrap_or_else(|| "Group".into());
+    let notify = db::member_ids(&conn, &conversation_id)?;
+    let roster = Value::Array(db::list_members(&conn, &conversation_id)?);
+    let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+    for rid in &notify {
+        if rid == &me {
+            continue;
+        }
+        enqueue_group_event(
+            &conn,
+            &from_peer,
+            &conversation_id,
+            rid,
+            &title,
+            None,
+            &roster,
+            "delete",
+            None,
+        )?;
+    }
+    db::delete_conversation_local(&conn, &conversation_id)?;
+    drop(conn);
+    kick_flush(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_group_members_can_add(
+    state: State<AppState>,
+    conversation_id: String,
+    allowed: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    if !db::is_group_admin(&conn, &conversation_id, &me)? {
+        return Err("Only group admins can change this setting".into());
+    }
+    db::set_members_can_add(&conn, &conversation_id, allowed)?;
+    let title = db::conversation_title(&conn, &conversation_id)?.unwrap_or_else(|| "Group".into());
+    let roster = Value::Array(db::list_members(&conn, &conversation_id)?);
+    let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+    for rid in db::member_ids(&conn, &conversation_id)? {
+        if rid == me {
+            continue;
+        }
+        enqueue_group_event_extra(
+            &conn,
+            &from_peer,
+            &conversation_id,
+            &rid,
+            &title,
+            None,
+            &roster,
+            "settings",
+            None,
+            Some(json!({ "members_can_add": allowed })),
+        )?;
+    }
+    drop(conn);
+    kick_flush(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_group_member_role(
+    state: State<AppState>,
+    conversation_id: String,
+    user_id: String,
+    role: String,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    if !db::is_group_admin(&conn, &conversation_id, &me)? {
+        return Err("Only group admins can change roles".into());
+    }
+    db::set_member_role(&conn, &conversation_id, &user_id, &role)?;
+    let title = db::conversation_title(&conn, &conversation_id)?.unwrap_or_else(|| "Group".into());
+    let roster = Value::Array(db::list_members(&conn, &conversation_id)?);
+    let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+    for rid in db::member_ids(&conn, &conversation_id)? {
+        if rid == me {
+            continue;
+        }
+        enqueue_group_event_extra(
+            &conn,
+            &from_peer,
+            &conversation_id,
+            &rid,
+            &title,
+            None,
+            &roster,
+            "role",
+            Some(user_id.as_str()),
+            Some(json!({ "role": role })),
+        )?;
+    }
+    drop(conn);
+    kick_flush(&state);
+    Ok(())
+}
+
+#[tauri::command]
+async fn send_typing(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    recipient_ids: Vec<String>,
+) -> Result<(), String> {
+    let (from_peer, me) = {
+        let conn = state.db.lock();
+        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let me = profile["id"].as_str().unwrap_or("").to_string();
+        let fp = state.fingerprint.lock().clone();
+        (from_peer_json(&profile, &fp), me)
+    };
+    let body = json!({
+        "conversation_id": conversation_id,
+        "user_id": me,
+        "display_name": from_peer["display_name"],
+    });
+    for rid in recipient_ids {
+        if rid == me {
+            continue;
+        }
+        let peer = {
+            let conn = state.db.lock();
+            db::get_peer(&conn, &rid).ok().flatten()
+        };
+        let Some(peer) = peer else { continue };
+        let Some(ip) = peer["last_ip"].as_str().filter(|s| discovery::is_usable_lan_ip(s)) else {
+            continue;
+        };
+        let Some(port) = peer["last_port"]
+            .as_u64()
+            .or_else(|| peer["last_port"].as_i64().map(|p| p as u64))
+        else {
+            continue;
+        };
+        let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
+        let _ = peer_http::peer_request(ip, port as u16, "/v1/typing", Some(body.clone()), fp).await;
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct FileCreateResult {
     file_id: String,
@@ -1080,6 +1395,7 @@ fn send_file_notice(
     let mut outbound_file = file.clone();
     outbound_file["staging_dir"] = Value::Null;
     outbound_file["local_path"] = Value::Null;
+    let created = now();
     let msg = json!({
         "id": uuid::Uuid::new_v4().to_string(),
         "conversation_id": conversation_id,
@@ -1090,7 +1406,8 @@ fn send_file_notice(
         "wrapped_keys": {},
         "signature": "",
         "file_id": file_id,
-        "created_at": now(),
+        "created_at": created,
+        "sort_at": created,
         "delivered": false,
     });
     {
@@ -1156,11 +1473,26 @@ async fn fetch_file_chunk(
         let conn = state.db.lock();
         db::get_peer(&conn, &uploader_id)?.ok_or("uploader offline/unknown")?
     };
-    let ip = peer["last_ip"].as_str().ok_or("no ip")?;
-    let port = peer["last_port"].as_u64().ok_or("no port")? as u16;
+    let ip = peer["last_ip"]
+        .as_str()
+        .filter(|s| discovery::is_usable_lan_ip(s))
+        .ok_or("no ip")?;
+    let port = peer["last_port"]
+        .as_u64()
+        .or_else(|| peer["last_port"].as_i64().map(|p| p as u64))
+        .ok_or("no port")? as u16;
     let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
     let body = json!({"file_id": file_id, "index": index});
-    let (resp, _) = peer_http::peer_request(ip, port, "/v1/file/chunk", Some(body), fp).await?;
+    let (resp, _) = peer_http::peer_request(ip, port, "/v1/file/chunk", Some(body), fp)
+        .await
+        .map_err(|e| format!("connect to sender failed: {e}"))?;
+    if resp.get("error").is_some() {
+        return Err(resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("missing chunk")
+            .to_string());
+    }
     Ok(resp)
 }
 
@@ -1216,12 +1548,11 @@ async fn save_downloaded_file(
         return Err("decoded file exceeds size limit".into());
     }
     let name = safe_download_name(&filename);
-    let base = app
+    let dir = app
         .path()
         .download_dir()
         .or_else(|_| app.path().app_data_dir())
         .map_err(|e| e.to_string())?;
-    let dir = base.join("PeerTalk");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut path = dir.join(&name);
     if path.exists() {
@@ -1229,7 +1560,13 @@ async fn save_downloaded_file(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        path = dir.join(format!("{name}-{stamp}"));
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        path = dir.join(format!("{stem}-{stamp}{ext}"));
     }
     // Reject path escape even after join.
     if !path.starts_with(&dir) {
@@ -1320,12 +1657,11 @@ fn finalize_file_receive(
         return Err("temp file missing".into());
     }
     let name = safe_download_name(&filename);
-    let base = app
+    let dir = app
         .path()
         .download_dir()
         .or_else(|_| app.path().app_data_dir())
         .map_err(|e| e.to_string())?;
-    let dir = base.join("PeerTalk");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut path = dir.join(&name);
     if path.exists() {
@@ -1333,7 +1669,13 @@ fn finalize_file_receive(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        path = dir.join(format!("{name}-{stamp}"));
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        path = dir.join(format!("{stem}-{stamp}{ext}"));
     }
     if !path.starts_with(&dir) {
         return Err("invalid download path".into());
@@ -1373,10 +1715,16 @@ fn open_local_file(state: State<AppState>, file_id: String) -> Result<(), String
         return Err("The local file has been moved or deleted".into());
     }
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer.exe")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // `start` opens the file with the default app (explorer alone often fails on files).
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path.display().to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
         .arg(&path)
@@ -1436,6 +1784,7 @@ pub fn run() {
                 stop_tx: Mutex::new(None),
                 fingerprint: Mutex::new(String::new()),
                 started: Mutex::new(false),
+                live_display_name: Arc::new(Mutex::new(String::new())),
             });
             // auto-start if profile exists (drop DB lock before starting runtime —
             // holding it across start_runtime_inner deadlocks on the same Mutex).
@@ -1446,6 +1795,7 @@ pub fn run() {
             if let Some(p) = existing {
                 let state = app.state::<AppState>();
                 let _ = start_runtime_inner(
+                    &app.handle().clone(),
                     &state,
                     p["id"].as_str().unwrap_or(""),
                     p["display_name"].as_str().unwrap_or(""),
@@ -1487,6 +1837,11 @@ pub fn run() {
             add_group_members,
             remove_group_member,
             leave_group,
+            rename_group,
+            delete_group,
+            set_group_members_can_add,
+            set_group_member_role,
+            send_typing,
             create_outgoing_file,
             write_file_chunk,
             set_file_content_hash,

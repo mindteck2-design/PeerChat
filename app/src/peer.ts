@@ -32,6 +32,8 @@ export type Conversation = {
   created_at: string;
   pinned_at?: string | null;
   muted?: boolean;
+  members_can_add?: boolean;
+  unread_count?: number;
 };
 
 export type Member = {
@@ -72,6 +74,8 @@ export type Message = {
   last_error?: string | null;
   reactions?: ReactionGroup[];
   pinned?: boolean;
+  edited_at?: string | null;
+  sort_at?: string | null;
 };
 
 async function inv<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -130,8 +134,20 @@ export const peerApi = {
   abortOutgoingFile: (fileId: string) => inv<void>("abort_outgoing_file", { fileId }),
   markConversationRead: (conversationId: string) =>
     inv<void>("mark_conversation_read", { conversationId }),
-  sendMessage: (conversationId: string, message: any, recipientIds: string[]) =>
-    inv<Message>("send_message", { conversationId, message, recipientIds }),
+  sendMessage: (
+    conversationId: string,
+    message: any,
+    recipientIds: string[],
+    edit?: boolean
+  ) =>
+    inv<Message>("send_message", {
+      conversationId,
+      message,
+      recipientIds,
+      edit: edit ?? null,
+    }),
+  sendTyping: (conversationId: string, recipientIds: string[]) =>
+    inv<void>("send_typing", { conversationId, recipientIds }),
   getGroupKey: (conversationId: string) =>
     inv<string | null>("get_group_key", { conversationId }),
   memberIds: (conversationId: string) => inv<string[]>("member_ids", { conversationId }),
@@ -154,6 +170,14 @@ export const peerApi = {
       conversationId,
       wrappedGroupKeys: wrappedGroupKeys ?? null,
     }),
+  renameGroup: (conversationId: string, title: string) =>
+    inv<void>("rename_group", { conversationId, title }),
+  deleteGroup: (conversationId: string) =>
+    inv<void>("delete_group", { conversationId }),
+  setGroupMembersCanAdd: (conversationId: string, allowed: boolean) =>
+    inv<void>("set_group_members_can_add", { conversationId, allowed }),
+  setGroupMemberRole: (conversationId: string, userId: string, role: string) =>
+    inv<void>("set_group_member_role", { conversationId, userId, role }),
   createOutgoingFile: (body: {
     conversationId: string;
     encFilename: string;

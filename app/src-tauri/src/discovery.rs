@@ -1,11 +1,26 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
+
+/// Avoid flashing a console window when spawning `ipconfig` / `arp` on Windows.
+fn silent_command(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+static LAN_IP_CACHE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+const LAN_IP_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerBeacon {
@@ -28,15 +43,96 @@ pub struct DiscoveryHub {
     pub peers: Arc<RwLock<HashMap<String, PeerBeacon>>>,
 }
 
+/// True if this IP is usable for peer delivery on a LAN (not loopback / unspecified).
+pub fn is_usable_lan_ip(ip: &str) -> bool {
+    let Ok(addr) = ip.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match addr {
+        std::net::IpAddr::V4(v4) => {
+            !v4.is_loopback()
+                && !v4.is_unspecified()
+                && !v4.is_broadcast()
+                && !v4.is_multicast()
+                && !v4.is_link_local()
+        }
+        std::net::IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unspecified() && !v6.is_multicast(),
+    }
+}
+
+/// Local IPv4 used in beacons / from_peer. Must work offline (no dependency on 8.8.8.8).
 pub fn lan_ip() -> String {
-    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if sock.connect("8.8.8.8:80").is_ok() {
-            if let Ok(addr) = sock.local_addr() {
-                return addr.ip().to_string();
+    if let Ok(guard) = LAN_IP_CACHE.lock() {
+        if let Some((ip, at)) = guard.as_ref() {
+            if at.elapsed() < LAN_IP_TTL {
+                return ip.clone();
             }
         }
     }
+    let ip = resolve_lan_ip();
+    if let Ok(mut guard) = LAN_IP_CACHE.lock() {
+        *guard = Some((ip.clone(), Instant::now()));
+    }
+    ip
+}
+
+fn resolve_lan_ip() -> String {
+    // UDP "connect" only selects a route; destinations need not be reachable.
+    // Prefer private probes so intranet PCs without internet still get a real NIC IP.
+    const PROBES: &[&str] = &[
+        "172.195.0.1:1",
+        "172.16.0.1:1",
+        "10.0.0.1:1",
+        "192.168.0.1:1",
+        "8.8.8.8:80",
+    ];
+    for dest in PROBES {
+        if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            if sock.connect(dest).is_ok() {
+                if let Ok(addr) = sock.local_addr() {
+                    let ip = addr.ip().to_string();
+                    if is_usable_lan_ip(&ip) {
+                        return ip;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ip) = lan_ip_from_os() {
+        return ip;
+    }
     "127.0.0.1".into()
+}
+
+fn lan_ip_from_os() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let out = silent_command("ipconfig").output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut best: Option<String> = None;
+        for line in text.lines() {
+            let lower = line.to_ascii_lowercase();
+            if !lower.contains("ipv4") {
+                continue;
+            }
+            if let Some(pos) = line.rfind(':') {
+                let candidate = line[pos + 1..].trim().to_string();
+                if is_usable_lan_ip(&candidate) {
+                    // Prefer Mindteck-style intranet / RFC1918 ranges.
+                    if candidate.starts_with("172.") || candidate.starts_with("10.") || candidate.starts_with("192.168.")
+                    {
+                        return Some(candidate);
+                    }
+                    best = Some(candidate);
+                }
+            }
+        }
+        return best;
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 pub async fn run_beacon(
@@ -45,6 +141,7 @@ pub async fn run_beacon(
     discovery_port: u16,
     stop: tokio::sync::watch::Receiver<bool>,
     mut beacon: PeerBeacon,
+    live_display_name: Arc<parking_lot::Mutex<String>>,
 ) {
     let sock = match UdpSocket::bind(format!("0.0.0.0:{discovery_port}")).await {
         Ok(s) => s,
@@ -64,6 +161,7 @@ pub async fn run_beacon(
             _ = ticker.tick() => {
                 beacon.ip = lan_ip();
                 beacon.port = listen_port;
+                beacon.display_name = live_display_name.lock().clone();
                 beacon.ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs_f64())
@@ -111,8 +209,13 @@ async fn handle_packet(
     if peer.user_id == self_beacon.user_id {
         return;
     }
-    if peer.ip.is_empty() || peer.ip == "0.0.0.0" {
-        peer.ip = addr.ip().to_string();
+    // Always prefer the UDP source address — self-reported IP is often 127.0.0.1
+    // on offline intranet PCs (old lan_ip fallback) and breaks reverse delivery.
+    let src = addr.ip().to_string();
+    if is_usable_lan_ip(&src) {
+        peer.ip = src;
+    } else if !is_usable_lan_ip(&peer.ip) {
+        peer.ip = src;
     }
     hub.peers.write().await.insert(peer.user_id.clone(), peer);
 }
@@ -145,17 +248,14 @@ pub fn lan_hosts_without_app(exclude_ips: &[String]) -> Vec<LanHost> {
     let output = {
         #[cfg(windows)]
         {
-            std::process::Command::new("arp")
-                .arg("-a")
-                .output()
-                .ok()
+            silent_command("arp").arg("-a").output().ok()
         }
         #[cfg(not(windows))]
         {
-            std::process::Command::new("ip")
+            silent_command("ip")
                 .args(["neigh"])
                 .output()
-                .or_else(|_| std::process::Command::new("arp").arg("-an").output())
+                .or_else(|_| silent_command("arp").arg("-an").output())
                 .ok()
         }
     };
@@ -231,8 +331,11 @@ pub async fn scan(discovery_port: u16, self_id: &str) -> Result<Vec<PeerBeacon>,
                 if peer.user_id == self_id {
                     continue;
                 }
-                if peer.ip.is_empty() {
-                    peer.ip = addr.ip().to_string();
+                let src = addr.ip().to_string();
+                if is_usable_lan_ip(&src) {
+                    peer.ip = src;
+                } else if !is_usable_lan_ip(&peer.ip) {
+                    peer.ip = src;
                 }
                 found.insert(peer.user_id.clone(), peer);
             }

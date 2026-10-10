@@ -9,7 +9,7 @@ export const theme = createTheme({
     success: { main: "#1B9E6E" },
     text: { primary: "#14201C", secondary: "#4A5C55" },
   },
-  shape: { borderRadius: 16 },
+  shape: { borderRadius: 12 },
   typography: {
     fontFamily: '"Source Sans 3", "Segoe UI", sans-serif',
     h1: { fontFamily: "Fraunces, Georgia, serif", fontWeight: 700 },
@@ -23,12 +23,26 @@ export const theme = createTheme({
   components: {
     MuiButton: {
       styleOverrides: {
-        root: { borderRadius: 999, paddingInline: 18 },
+        root: { borderRadius: 999, paddingInline: 16 },
       },
     },
     MuiPaper: {
       styleOverrides: {
         root: { backgroundImage: "none" },
+      },
+    },
+    MuiListItemButton: {
+      styleOverrides: {
+        root: {
+          borderRadius: 12,
+          marginInline: 8,
+          "&.Mui-selected": {
+            backgroundColor: "rgba(15, 107, 92, 0.10)",
+          },
+          "&.Mui-selected:hover": {
+            backgroundColor: "rgba(15, 107, 92, 0.14)",
+          },
+        },
       },
     },
   },

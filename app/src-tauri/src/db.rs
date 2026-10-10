@@ -245,6 +245,300 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         conn.pragma_update(None, "user_version", 3)
             .map_err(|e| e.to_string())?;
     }
+
+    if version < 4 {
+        // One DM thread per peer; deterministic ids (see dm_conversation_id).
+        let _ = conn.execute_batch(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_dm_peer
+              ON conversations(peer_id) WHERE kind='dm' AND peer_id IS NOT NULL;
+            "#,
+        );
+        conn.pragma_update(None, "user_version", 4)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if version < 5 {
+        // Clear poisoned loopback IPs from older lan_ip() fallback (broke reverse delivery).
+        let _ = conn.execute_batch(
+            r#"
+            UPDATE peers SET last_ip=NULL
+             WHERE last_ip IN ('127.0.0.1','::1','0.0.0.0','localhost');
+            "#,
+        );
+        conn.pragma_update(None, "user_version", 5)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if version < 6 {
+        // Stop defaulting to on — requestPermission in a poll loop was flashing WebView2 prompts.
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO app_settings(key, value) VALUES ('notifications_enabled', '1')",
+            [],
+        );
+        conn.pragma_update(None, "user_version", 6)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN sort_at TEXT", []);
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN edited_at TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE conversations ADD COLUMN members_can_add INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
+
+    if version < 7 {
+        // Backfill: use created_at so existing rows keep relative order.
+        let _ = conn.execute(
+            "UPDATE messages SET sort_at = created_at WHERE sort_at IS NULL OR sort_at = ''",
+            [],
+        );
+        conn.pragma_update(None, "user_version", 7)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if version < 8 {
+        conn.pragma_update(None, "user_version", 8)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Stable DM conversation id shared by both peers (must match encryption AD).
+pub fn dm_conversation_id(user_a: &str, user_b: &str) -> String {
+    let (a, b) = if user_a <= user_b {
+        (user_a, user_b)
+    } else {
+        (user_b, user_a)
+    };
+    format!("dm:{a}:{b}")
+}
+
+fn dm_id_for_peer(conn: &Connection, peer: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT id FROM conversations WHERE kind='dm' AND peer_id=?1 LIMIT 1",
+        params![peer],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+fn conversation_message_count(conn: &Connection, conversation_id: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id=?1",
+        params![conversation_id],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn rekey_conversation_id(conn: &Connection, old: &str, new: &str) -> Result<(), String> {
+    if old == new {
+        return Ok(());
+    }
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM conversations WHERE id=?1",
+            params![new],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(|e| e.to_string())?;
+    let tables = [
+        "conversation_members",
+        "messages",
+        "outbox",
+        "files",
+        "message_pins",
+    ];
+    for table in tables {
+        conn.execute(
+            &format!("UPDATE {table} SET conversation_id=?1 WHERE conversation_id=?2"),
+            params![new, old],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    conn.execute(
+        "UPDATE conversations SET id=?1 WHERE id=?2",
+        params![new, old],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn ensure_dm_row(conn: &Connection, id: &str, peer: &str, me: &str) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    // Insert without peer_id first so a unique peer index on another row cannot block us.
+    conn.execute(
+        "INSERT OR IGNORE INTO conversations(id, kind, peer_id, created_at) VALUES (?1,'dm',NULL,?2)",
+        params![id, now],
+    )
+    .map_err(|e| e.to_string())?;
+    detach_dm_peer_links(conn, peer, Some(id))?;
+    conn.execute(
+        "UPDATE conversations SET peer_id=?1 WHERE id=?2 AND kind='dm'",
+        params![peer, id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR IGNORE INTO conversation_members(conversation_id, user_id, role, joined_at) VALUES (?1,?2,'member',?3)",
+        params![id, me, now],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR IGNORE INTO conversation_members(conversation_id, user_id, role, joined_at) VALUES (?1,?2,'member',?3)",
+        params![id, peer, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn detach_dm_peer_links(conn: &Connection, peer: &str, keep_id: Option<&str>) -> Result<(), String> {
+    if let Some(keep) = keep_id {
+        conn.execute(
+            "UPDATE conversations SET peer_id=NULL WHERE kind='dm' AND peer_id=?1 AND id!=?2",
+            params![peer, keep],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        conn.execute(
+            "UPDATE conversations SET peer_id=NULL WHERE kind='dm' AND peer_id=?1",
+            params![peer],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Conversation ids that belong to the same 1:1 thread (legacy random UUIDs + canonical).
+fn dm_related_conversation_ids(
+    conn: &Connection,
+    conversation_id: &str,
+    me: &str,
+) -> Result<Vec<String>, String> {
+    let mut ids = vec![conversation_id.to_string()];
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT kind, peer_id FROM conversations WHERE id=?1",
+            params![conversation_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((kind, peer_id)) = row else {
+        return Ok(ids);
+    };
+    if kind != "dm" {
+        return Ok(ids);
+    }
+    let peer = peer_id.or_else(|| {
+        // Canonical form dm:{a}:{b}
+        let rest = conversation_id.strip_prefix("dm:")?;
+        let (a, b) = rest.split_once(':')?;
+        if a == me {
+            Some(b.to_string())
+        } else if b == me {
+            Some(a.to_string())
+        } else {
+            None
+        }
+    });
+    let Some(peer) = peer else {
+        return Ok(ids);
+    };
+
+    let mut stmt = conn
+        .prepare(
+            r#"SELECT DISTINCT cm.conversation_id
+               FROM conversation_members cm
+               JOIN conversations c ON c.id = cm.conversation_id
+               WHERE c.kind = 'dm'
+                 AND cm.user_id = ?1
+                 AND cm.conversation_id IN (
+                   SELECT conversation_id FROM conversation_members WHERE user_id = ?2
+                 )"#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![peer.as_str(), me], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    for r in rows {
+        let id = r.map_err(|e| e.to_string())?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    // Detached legacy rows may still hold messages under old ids.
+    let mut stmt2 = conn
+        .prepare(
+            "SELECT id FROM conversations WHERE kind='dm' AND (peer_id=?1 OR id=?2)",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows2 = stmt2
+        .query_map(params![peer.as_str(), conversation_id], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    for r in rows2 {
+        let id = r.map_err(|e| e.to_string())?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Align local DM metadata with an inbound message's conversation_id (crypto AD must match row).
+pub fn reconcile_dm_on_deliver(
+    conn: &Connection,
+    me: &str,
+    sender_id: &str,
+    incoming_conv_id: &str,
+) -> Result<(), String> {
+    if sender_id.is_empty() || incoming_conv_id.is_empty() || sender_id == me {
+        return Ok(());
+    }
+    if let Ok(kind) = conn.query_row(
+        "SELECT kind FROM conversations WHERE id=?1",
+        params![incoming_conv_id],
+        |r| r.get::<_, String>(0),
+    ) {
+        if kind == "group" {
+            return Ok(());
+        }
+    }
+
+    // Keep inbound conversation_id for crypto AD; prefer canonical as the People/open link.
+    let canonical = dm_conversation_id(me, sender_id);
+    ensure_dm_row(conn, incoming_conv_id, sender_id, me)?;
+    if canonical != incoming_conv_id {
+        // Members on inbound id (already), plus a canonical row linked for UI/send.
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO conversations(id, kind, peer_id, created_at) VALUES (?1,'dm',NULL,?2)",
+            params![canonical.as_str(), now],
+        );
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO conversation_members(conversation_id, user_id, role, joined_at) VALUES (?1,?2,'member',?3)",
+            params![canonical.as_str(), me, now],
+        );
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO conversation_members(conversation_id, user_id, role, joined_at) VALUES (?1,?2,'member',?3)",
+            params![canonical.as_str(), sender_id, now],
+        );
+        detach_dm_peer_links(conn, sender_id, Some(&canonical))?;
+        let _ = conn.execute(
+            "UPDATE conversations SET peer_id=?1 WHERE id=?2",
+            params![sender_id, canonical.as_str()],
+        );
+    }
     Ok(())
 }
 
@@ -355,6 +649,8 @@ pub fn upsert_peer(
     online: bool,
 ) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
+    // Never persist loopback / garbage — that poisons reverse delivery.
+    let ip = ip.filter(|s| crate::discovery::is_usable_lan_ip(s));
     conn.execute(
         r#"INSERT INTO peers(user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, last_seen_at, online)
            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
@@ -481,31 +777,41 @@ pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, Strin
 }
 
 pub fn ensure_dm(conn: &Connection, me: &str, peer: &str) -> Result<String, String> {
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT id FROM conversations WHERE kind='dm' AND peer_id=?1",
-            params![peer],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if let Some(id) = existing {
-        return Ok(id);
+    let canonical = dm_conversation_id(me, peer);
+    // Always send/open on the shared canonical id. Legacy random UUID threads stay readable
+    // via dm_related_conversation_ids in list_messages (crypto AD must keep old ids on rows).
+    detach_dm_peer_links(conn, peer, Some(&canonical))?;
+    if let Some(existing) = dm_id_for_peer(conn, peer)? {
+        if existing != canonical {
+            detach_dm_peer_links(conn, peer, None)?;
+        }
     }
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    conn.execute(
-        "INSERT INTO conversations(id, kind, peer_id, created_at) VALUES (?1,'dm',?2,?3)",
-        params![id, peer, now],
-    )
-    .map_err(|e| e.to_string())?;
-    let now_m = chrono::Utc::now().to_rfc3339();
-    conn.execute(
-        "INSERT INTO conversation_members(conversation_id, user_id, role, joined_at) VALUES (?1,?2,'member',?4), (?1,?3,'member',?4)",
-        params![id, me, peer, now_m],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(id)
+    // Re-link any empty legacy row by rekey when safe (no messages / no id clash).
+    let legacy: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT c.id FROM conversations c
+                   JOIN conversation_members m1 ON m1.conversation_id=c.id AND m1.user_id=?1
+                   JOIN conversation_members m2 ON m2.conversation_id=c.id AND m2.user_id=?2
+                   WHERE c.kind='dm' AND c.id!=?3"#,
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![me, peer, canonical.as_str()], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(r.map_err(|e| e.to_string())?);
+        }
+        v
+    };
+    for old in legacy {
+        if conversation_message_count(conn, &old)? == 0 {
+            let _ = rekey_conversation_id(conn, &old, &canonical);
+        }
+    }
+    ensure_dm_row(conn, &canonical, peer, me)?;
+    Ok(canonical)
 }
 
 pub fn create_group(
@@ -534,9 +840,12 @@ pub fn create_group(
 }
 
 pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
+    let me = get_profile(conn)?
+        .and_then(|p| p["id"].as_str().map(|s| s.to_string()))
+        .unwrap_or_default();
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, title, peer_id, created_at, pinned_at, COALESCE(muted,0) FROM conversations ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC",
+            "SELECT id, kind, title, peer_id, created_at, pinned_at, COALESCE(muted,0), COALESCE(members_can_add,1) FROM conversations ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -549,13 +858,18 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
                 r.get::<_, String>(4)?,
                 r.get::<_, Option<String>>(5)?,
                 r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, kind, title, peer_id, created_at, pinned_at, muted) =
+        let (id, kind, title, peer_id, created_at, pinned_at, muted, members_can_add) =
             row.map_err(|e| e.to_string())?;
+        // Hide detached legacy DM shells (peer_id cleared after canonical migration).
+        if kind == "dm" && peer_id.is_none() {
+            continue;
+        }
         let peer_name = peer_id.as_ref().and_then(|pid| {
             conn.query_row(
                 "SELECT display_name FROM peers WHERE user_id=?1",
@@ -564,6 +878,11 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
             )
             .ok()
         });
+        let unread = if me.is_empty() {
+            0
+        } else {
+            unread_count(conn, &id, &me).unwrap_or(0)
+        };
         out.push(serde_json::json!({
             "id": id,
             "kind": kind,
@@ -573,6 +892,8 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
             "created_at": created_at,
             "pinned_at": pinned_at,
             "muted": muted == 1,
+            "members_can_add": members_can_add == 1,
+            "unread_count": unread,
         }));
     }
     Ok(out)
@@ -598,24 +919,33 @@ pub fn insert_message(conn: &Connection, msg: &Value) -> Result<(), String> {
             return Ok(());
         }
     }
+    let created = msg["created_at"].as_str().unwrap_or("");
+    // sort_at: local timeline so skewed peer clocks cannot reorder the chat.
+    // Incoming delivers should pass local "now"; outbound uses created_at.
+    let sort_at = msg
+        .get("sort_at")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(created);
     if incoming_kind == "deleted" {
         // Ensure tombstone row exists even if original never arrived.
         conn.execute(
-            r#"INSERT OR REPLACE INTO messages(id, conversation_id, sender_id, kind, ciphertext, nonce, wrapped_keys, signature, file_id, created_at, delivered, reply_to)
-               VALUES (?1,?2,?3,'deleted','','','{}','',NULL,?4,0,NULL)"#,
+            r#"INSERT OR REPLACE INTO messages(id, conversation_id, sender_id, kind, ciphertext, nonce, wrapped_keys, signature, file_id, created_at, delivered, reply_to, sort_at)
+               VALUES (?1,?2,?3,'deleted','','','{}','',NULL,?4,0,NULL,?5)"#,
             params![
                 id,
                 msg["conversation_id"].as_str().unwrap_or(""),
                 msg["sender_id"].as_str().unwrap_or(""),
-                msg["created_at"].as_str().unwrap_or(""),
+                created,
+                sort_at,
             ],
         )
         .map_err(|e| e.to_string())?;
         return Ok(());
     }
     conn.execute(
-        r#"INSERT INTO messages(id, conversation_id, sender_id, kind, ciphertext, nonce, wrapped_keys, signature, file_id, created_at, delivered, reply_to)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"#,
+        r#"INSERT INTO messages(id, conversation_id, sender_id, kind, ciphertext, nonce, wrapped_keys, signature, file_id, created_at, delivered, reply_to, sort_at)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)"#,
         params![
             id,
             msg["conversation_id"].as_str().unwrap_or(""),
@@ -626,14 +956,188 @@ pub fn insert_message(conn: &Connection, msg: &Value) -> Result<(), String> {
             msg.get("wrapped_keys").map(|v| v.to_string()).unwrap_or_else(|| "{}".into()),
             msg["signature"].as_str().unwrap_or(""),
             msg.get("file_id").and_then(|v| v.as_str()),
-            msg["created_at"].as_str().unwrap_or(""),
+            created,
             msg.get("delivered").and_then(|v| v.as_bool()).unwrap_or(false) as i64,
             msg.get("reply_to").and_then(|v| v.as_str()),
+            sort_at,
         ],
     )
     .map_err(|e| e.to_string())?;
     // Side-effects for reaction / pin sync messages.
     apply_control_message(conn, msg)?;
+    Ok(())
+}
+
+/// Replace ciphertext for an existing text message (edit sync).
+pub fn apply_message_edit(conn: &Connection, msg: &Value) -> Result<(), String> {
+    let id = msg["id"].as_str().unwrap_or("");
+    if id.is_empty() {
+        return Err("missing message id".into());
+    }
+    let kind: Option<String> = conn
+        .query_row("SELECT kind FROM messages WHERE id=?1", params![id], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(kind) = kind else {
+        // Original never arrived — insert as normal.
+        return insert_message(conn, msg);
+    };
+    if kind == "deleted" || kind != "text" {
+        return Ok(());
+    }
+    let edited_at = msg
+        .get("edited_at")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            msg.get("created_at")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    conn.execute(
+        r#"UPDATE messages SET ciphertext=?2, nonce=?3, wrapped_keys=?4, signature=?5, edited_at=?6
+           WHERE id=?1"#,
+        params![
+            id,
+            msg["ciphertext"].as_str().unwrap_or(""),
+            msg["nonce"].as_str().unwrap_or(""),
+            msg.get("wrapped_keys")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "{}".into()),
+            msg["signature"].as_str().unwrap_or(""),
+            edited_at,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn update_peer_display_name_everywhere(
+    conn: &Connection,
+    user_id: &str,
+    display_name: &str,
+) -> Result<(), String> {
+    let _ = conn.execute(
+        "UPDATE conversation_members SET display_name=?2 WHERE user_id=?1",
+        params![user_id, display_name],
+    );
+    Ok(())
+}
+
+pub fn set_member_role(
+    conn: &Connection,
+    conversation_id: &str,
+    user_id: &str,
+    role: &str,
+) -> Result<(), String> {
+    if role != "admin" && role != "member" {
+        return Err("role must be admin or member".into());
+    }
+    if role == "member" {
+        let admins: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_members WHERE conversation_id=?1 AND role='admin'",
+                params![conversation_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let is_admin: bool = is_group_admin(conn, conversation_id, user_id)?;
+        if is_admin && admins <= 1 {
+            return Err("cannot demote the last admin".into());
+        }
+    }
+    let n = conn
+        .execute(
+            "UPDATE conversation_members SET role=?3 WHERE conversation_id=?1 AND user_id=?2",
+            params![conversation_id, user_id, role],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("not a member".into());
+    }
+    Ok(())
+}
+
+pub fn set_conversation_title(
+    conn: &Connection,
+    conversation_id: &str,
+    title: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE conversations SET title=?2 WHERE id=?1 AND kind='group'",
+        params![conversation_id, title],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn set_members_can_add(
+    conn: &Connection,
+    conversation_id: &str,
+    allowed: bool,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE conversations SET members_can_add=?2 WHERE id=?1 AND kind='group'",
+        params![conversation_id, allowed as i64],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn members_can_add(conn: &Connection, conversation_id: &str) -> Result<bool, String> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COALESCE(members_can_add,1) FROM conversations WHERE id=?1",
+            params![conversation_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(1);
+    Ok(n == 1)
+}
+
+/// Wipe a group conversation and related rows for this device.
+pub fn delete_conversation_local(conn: &Connection, conversation_id: &str) -> Result<(), String> {
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(|e| e.to_string())?;
+    let _ = conn.execute(
+        "DELETE FROM message_pins WHERE conversation_id=?1",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE conversation_id=?1)",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM hidden_messages WHERE message_id IN (SELECT id FROM messages WHERE conversation_id=?1)",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM message_reads WHERE message_id IN (SELECT id FROM messages WHERE conversation_id=?1)",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM messages WHERE conversation_id=?1",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM files WHERE conversation_id=?1",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM outbox WHERE conversation_id=?1",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM conversation_members WHERE conversation_id=?1",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM conversations WHERE id=?1",
+        params![conversation_id],
+    );
+    conn.execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -713,31 +1217,41 @@ pub fn list_messages(
     conversation_id: &str,
     viewer_id: &str,
 ) -> Result<Vec<Value>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"SELECT m.id, m.conversation_id, m.sender_id, m.kind, m.ciphertext,
-                      m.nonce, m.wrapped_keys, m.signature, m.file_id, m.created_at,
-                      m.delivered, m.reply_to,
-                      CASE
-                        WHEN (SELECT COUNT(*) FROM outbox o
-                              WHERE o.id LIKE m.id || ':%') > 0
-                         AND (SELECT COUNT(*) FROM message_reads mr
-                              WHERE mr.message_id=m.id) >=
-                             (SELECT COUNT(*) FROM outbox o
-                              WHERE o.id LIKE m.id || ':%')
-                        THEN 1 ELSE 0
-                      END AS is_read
-               FROM messages m
-               LEFT JOIN hidden_messages h
-                 ON h.message_id=m.id AND h.user_id=?2
-               WHERE m.conversation_id=?1
-                 AND h.message_id IS NULL
-                 AND m.kind NOT IN ('reaction','pin','unpin')
-               ORDER BY m.created_at ASC"#,
-        )
-        .map_err(|e| e.to_string())?;
+    let related = dm_related_conversation_ids(conn, conversation_id, viewer_id)?;
+    let placeholders = related
+        .iter()
+        .map(|_| "?".to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        r#"SELECT m.id, m.conversation_id, m.sender_id, m.kind, m.ciphertext,
+                  m.nonce, m.wrapped_keys, m.signature, m.file_id, m.created_at,
+                  m.delivered, m.reply_to, m.edited_at,
+                  CASE
+                    WHEN (SELECT COUNT(*) FROM outbox o
+                          WHERE o.id LIKE m.id || ':%') > 0
+                     AND (SELECT COUNT(*) FROM message_reads mr
+                          WHERE mr.message_id=m.id) >=
+                         (SELECT COUNT(*) FROM outbox o
+                          WHERE o.id LIKE m.id || ':%')
+                    THEN 1 ELSE 0
+                  END AS is_read
+           FROM messages m
+           LEFT JOIN hidden_messages h
+             ON h.message_id=m.id AND h.user_id=?1
+           WHERE m.conversation_id IN ({placeholders})
+             AND h.message_id IS NULL
+             AND m.kind NOT IN ('reaction','pin','unpin')
+           ORDER BY COALESCE(NULLIF(m.sort_at,''), m.created_at) ASC, m.created_at ASC, m.id ASC"#
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + related.len());
+    params_vec.push(&viewer_id);
+    for id in &related {
+        params_vec.push(id);
+    }
     let rows = stmt
-        .query_map(params![conversation_id, viewer_id], |r| {
+        .query_map(params_vec.as_slice(), |r| {
             let wraps: String = r.get(6)?;
             let wrapped_keys: Value = serde_json::from_str(&wraps).unwrap_or(serde_json::json!({}));
             Ok(serde_json::json!({
@@ -753,7 +1267,8 @@ pub fn list_messages(
                 "created_at": r.get::<_, String>(9)?,
                 "delivered": r.get::<_, i64>(10)? == 1,
                 "reply_to": r.get::<_, Option<String>>(11)?,
-                "read": r.get::<_, i64>(12)? == 1,
+                "edited_at": r.get::<_, Option<String>>(12)?,
+                "read": r.get::<_, i64>(13)? == 1,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -761,6 +1276,10 @@ pub fn list_messages(
     for row in rows {
         let mut msg = row.map_err(|e| e.to_string())?;
         let mid = msg["id"].as_str().unwrap_or("").to_string();
+        let msg_cid = msg["conversation_id"]
+            .as_str()
+            .unwrap_or(conversation_id)
+            .to_string();
         let (attempts, last_error): (i64, Option<String>) = conn
             .query_row(
                 "SELECT COALESCE(MAX(attempts),0), MAX(last_error) FROM outbox WHERE delivered_at IS NULL AND (id=?1 OR id LIKE ?2)",
@@ -774,7 +1293,7 @@ pub fn list_messages(
         msg["last_error"] = serde_json::json!(last_error);
         msg["reactions"] = serde_json::json!(list_reactions_for(conn, &mid).unwrap_or_default());
         msg["pinned"] =
-            serde_json::json!(is_message_pinned(conn, conversation_id, &mid).unwrap_or(false));
+            serde_json::json!(is_message_pinned(conn, &msg_cid, &mid).unwrap_or(false));
         out.push(msg);
     }
     Ok(out)
@@ -966,30 +1485,48 @@ pub fn mark_message_read(conn: &Connection, message_id: &str, user_id: &str) -> 
     Ok(())
 }
 
+fn unread_message_filter_sql() -> &'static str {
+    // User-visible chat items only (skip reactions / pin control / deletes).
+    "m.kind IN ('text','file_notice','system')"
+}
+
+pub fn unread_count(
+    conn: &Connection,
+    conversation_id: &str,
+    my_user_id: &str,
+) -> Result<i64, String> {
+    Ok(unread_incoming(conn, conversation_id, my_user_id)?.len() as i64)
+}
+
 pub fn unread_incoming(
     conn: &Connection,
     conversation_id: &str,
     my_user_id: &str,
 ) -> Result<Vec<(String, String)>, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"SELECT m.id, m.sender_id
-               FROM messages m
-               LEFT JOIN message_reads r
-                 ON r.message_id=m.id AND r.user_id=?2
-               WHERE m.conversation_id=?1
-                 AND m.sender_id<>?2
-                 AND r.message_id IS NULL"#,
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![conversation_id, my_user_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
-        .map_err(|e| e.to_string())?;
+    let related = dm_related_conversation_ids(conn, conversation_id, my_user_id)?;
     let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| e.to_string())?);
+    for cid in related {
+        let mut stmt = conn
+            .prepare(&format!(
+                r#"SELECT m.id, m.sender_id
+                   FROM messages m
+                   LEFT JOIN message_reads r
+                     ON r.message_id=m.id AND r.user_id=?2
+                   WHERE m.conversation_id=?1
+                     AND m.sender_id<>?2
+                     AND r.message_id IS NULL
+                     AND {}"#,
+                unread_message_filter_sql()
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![cid.as_str(), my_user_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())?);
+        }
     }
     Ok(out)
 }
@@ -1364,7 +1901,116 @@ mod tests {
     fn migrate_sets_user_version() {
         let conn = mem();
         let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert!(v >= 3);
+        assert!(v >= 8);
+    }
+
+    #[test]
+    fn dm_conversation_id_is_symmetric_and_stable() {
+        let a = "user-aaa";
+        let b = "user-bbb";
+        assert_eq!(dm_conversation_id(a, b), dm_conversation_id(b, a));
+        assert_eq!(dm_conversation_id(a, b), "dm:user-aaa:user-bbb");
+    }
+
+    #[test]
+    fn ensure_dm_uses_shared_id() {
+        let conn = mem();
+        let id_a = ensure_dm(&conn, "alice", "bob").unwrap();
+        let id_b = ensure_dm(&conn, "bob", "alice").unwrap();
+        assert_eq!(id_a, id_b);
+        assert_eq!(id_a, dm_conversation_id("alice", "bob"));
+    }
+
+    #[test]
+    fn reconcile_dm_on_deliver_creates_thread_for_inbound() {
+        let conn = mem();
+        let cid = "dm:alice:bob";
+        reconcile_dm_on_deliver(&conn, "bob", "alice", cid).unwrap();
+        let peer_row: String = conn
+            .query_row(
+                "SELECT id FROM conversations WHERE kind='dm' AND peer_id='alice'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(peer_row, cid);
+    }
+
+    #[test]
+    fn legacy_dm_uuid_still_lists_under_canonical() {
+        let conn = mem();
+        let legacy = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO conversations(id, kind, peer_id, created_at) VALUES (?1,'dm','bob',?2)",
+            params![legacy, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_members(conversation_id, user_id, role, joined_at) VALUES (?1,'alice','member',?2), (?1,'bob','member',?2)",
+            params![legacy, now],
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            &serde_json::json!({
+                "id": "m-legacy",
+                "conversation_id": legacy,
+                "sender_id": "bob",
+                "kind": "text",
+                "ciphertext": "x",
+                "nonce": "n",
+                "wrapped_keys": {},
+                "signature": "s",
+                "created_at": now,
+                "delivered": true
+            }),
+        )
+        .unwrap();
+
+        let canonical = ensure_dm(&conn, "alice", "bob").unwrap();
+        assert_eq!(canonical, dm_conversation_id("alice", "bob"));
+        assert_ne!(canonical, legacy);
+
+        let msgs = list_messages(&conn, &canonical, "alice").unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["id"], "m-legacy");
+        assert_eq!(msgs[0]["conversation_id"], legacy);
+    }
+
+    #[test]
+    fn ensure_dm_prefers_canonical_even_if_legacy_has_messages() {
+        let conn = mem();
+        let legacy = "11111111-2222-3333-4444-555555555555";
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO conversations(id, kind, peer_id, created_at) VALUES (?1,'dm','bob',?2)",
+            params![legacy, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_members(conversation_id, user_id, joined_at) VALUES (?1,'alice',?2), (?1,'bob',?2)",
+            params![legacy, now],
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            &serde_json::json!({
+                "id": "m1",
+                "conversation_id": legacy,
+                "sender_id": "alice",
+                "kind": "text",
+                "ciphertext": "x",
+                "nonce": "n",
+                "wrapped_keys": {},
+                "signature": "s",
+                "created_at": now,
+                "delivered": false
+            }),
+        )
+        .unwrap();
+        let id = ensure_dm(&conn, "alice", "bob").unwrap();
+        assert_eq!(id, dm_conversation_id("alice", "bob"));
     }
 
     #[test]

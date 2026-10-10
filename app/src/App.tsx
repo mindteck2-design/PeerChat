@@ -1,4 +1,7 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { APP_VERSION_FALLBACK, appVersion } from "./version";
 import {
   Alert,
   AppBar,
@@ -11,9 +14,7 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
-  Drawer,
   Fade,
-  FormControlLabel,
   Grow,
   IconButton,
   InputAdornment,
@@ -27,13 +28,12 @@ import {
   Popover,
   Stack,
   Switch,
-  Tab,
-  Tabs,
   TextField,
   Toolbar,
   Tooltip,
   Typography,
   CircularProgress,
+  FormControlLabel,
   LinearProgress,
 } from "@mui/material";
 import ChatIcon from "@mui/icons-material/ForumRounded";
@@ -46,6 +46,7 @@ import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFileRounded";
 import DownloadIcon from "@mui/icons-material/DownloadRounded";
 import GroupIcon from "@mui/icons-material/GroupRounded";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemoveRounded";
+import PeopleAltIcon from "@mui/icons-material/PeopleAltRounded";
 import DoneIcon from "@mui/icons-material/DoneRounded";
 import DoneAllIcon from "@mui/icons-material/DoneAllRounded";
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
@@ -56,6 +57,7 @@ import StopCircleIcon from "@mui/icons-material/StopCircleRounded";
 import ReplyIcon from "@mui/icons-material/ReplyRounded";
 import ForwardIcon from "@mui/icons-material/ForwardRounded";
 import ContentCopyIcon from "@mui/icons-material/ContentCopyRounded";
+import EditIcon from "@mui/icons-material/EditRounded";
 import PushPinIcon from "@mui/icons-material/PushPinRounded";
 import PushPinOutlinedIcon from "@mui/icons-material/PushPinOutlined";
 import EmojiEmotionsIcon from "@mui/icons-material/EmojiEmotionsRounded";
@@ -63,28 +65,14 @@ import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettingsRounde
 import VolumeUpIcon from "@mui/icons-material/VolumeUpRounded";
 import VolumeOffIcon from "@mui/icons-material/VolumeOffRounded";
 import SearchIcon from "@mui/icons-material/SearchRounded";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import DriveFileRenameOutlineIcon from "@mui/icons-material/DriveFileRenameOutlineRounded";
+import SendIcon from "@mui/icons-material/SendRounded";
 
-async function ensureBrowserNotifyPermission(): Promise<boolean> {
-  if (typeof Notification === "undefined") return false;
-  if (Notification.permission === "granted") return true;
-  if (Notification.permission === "denied") return false;
-  try {
-    const res = await Notification.requestPermission();
-    return res === "granted";
-  } catch {
-    return false;
-  }
-}
-
-function showDesktopToast(title: string, body: string) {
-  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
-  try {
-    new Notification(title, { body, silent: false });
-  } catch {
-    /* ignore */
-  }
-}
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import {
   peerApi,
   type Conversation,
@@ -144,6 +132,13 @@ function formatDay(iso: string) {
     month: "short",
     year: d.getFullYear() === now.getFullYear() ? undefined : "numeric",
   });
+}
+
+function avatarColor(name: string) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  const colors = ["#0F6B5C", "#C45C26", "#2F6FED", "#7B5EA7", "#B45309", "#0E7490", "#BE185D"];
+  return colors[h % colors.length];
 }
 
 function formatClock(iso: string) {
@@ -243,9 +238,17 @@ export default function App() {
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [error, setError] = useState("");
+  const [version, setVersion] = useState(APP_VERSION_FALLBACK);
 
   useEffect(() => {
     (async () => {
+      const ver = await appVersion();
+      setVersion(ver);
+      try {
+        await getCurrentWindow().setTitle(`PeerTalk ${ver}`);
+      } catch {
+        /* browser preview */
+      }
       const id = await getOrCreateIdentity();
       setIdentity(id);
       try {
@@ -275,6 +278,7 @@ export default function App() {
         identity={identity}
         error={error}
         setError={setError}
+        version={version}
         onReady={(p) => {
           setProfile(p);
           setScreen("chat");
@@ -288,6 +292,7 @@ export default function App() {
       <SettingsScreen
         profile={profile}
         identity={identity}
+        version={version}
         onBack={() => setScreen("chat")}
         onNameUpdated={(p) => setProfile(p)}
       />
@@ -295,7 +300,12 @@ export default function App() {
   }
 
   return (
-    <ChatScreen profile={profile} identity={identity} onSettings={() => setScreen("settings")} />
+    <ChatScreen
+      profile={profile}
+      identity={identity}
+      version={version}
+      onSettings={() => setScreen("settings")}
+    />
   );
 }
 
@@ -303,6 +313,7 @@ function SetupScreen(props: {
   identity: Identity;
   error: string;
   setError: (s: string) => void;
+  version: string;
   onReady: (p: Profile) => void;
 }) {
   const [name, setName] = useState("");
@@ -345,9 +356,14 @@ function SetupScreen(props: {
     >
       <Fade in timeout={500}>
         <Paper elevation={0} sx={{ width: "min(440px, 100%)", p: 4, border: "1px solid #D5E3DD" }}>
-          <Typography variant="overline" color="primary" letterSpacing={2}>
-            PeerTalk
-          </Typography>
+          <Stack direction="row" alignItems="baseline" spacing={1}>
+            <Typography variant="overline" color="primary" letterSpacing={2}>
+              PeerTalk
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              v{props.version}
+            </Typography>
+          </Stack>
           <Typography variant="h4" sx={{ mt: 0.5, mb: 1 }}>
             Your desk identity
           </Typography>
@@ -384,10 +400,12 @@ function ChatScreen({
   profile,
   identity,
   onSettings,
+  version,
 }: {
   profile: Profile;
   identity: Identity;
   onSettings: () => void;
+  version: string;
 }) {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [lanHosts, setLanHosts] = useState<LanHost[]>([]);
@@ -401,12 +419,15 @@ function ChatScreen({
 
   const [text, setText] = useState("");
   const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  const [typingLabel, setTypingLabel] = useState<string | null>(null);
   const [emojiAnchor, setEmojiAnchor] = useState<HTMLElement | null>(null);
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
 
   const [groupOpen, setGroupOpen] = useState(false);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPick, setGroupPick] = useState<string[]>([]);
+  const [renameDraft, setRenameDraft] = useState("");
 
   const [status, setStatus] = useState("");
   const [pinOpen, setPinOpen] = useState<Peer | null>(null);
@@ -426,7 +447,6 @@ function ChatScreen({
   const [forwardPick, setForwardPick] = useState("");
 
   const [fileNames, setFileNames] = useState<Record<string, string>>({});
-  const [notifEnabled, setNotifEnabled] = useState(true);
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLInputElement | null>(null);
@@ -437,15 +457,16 @@ function ChatScreen({
   const abortOpenRef = useRef(false);
   const queueAbortRef = useRef(false);
   const activeRef = useRef<Conversation | null>(null);
-  const notifEnabledRef = useRef(true);
-  const lastMsgIdRef = useRef<Record<string, string>>({});
-
+  const textRef = useRef("");
+  const draftsRef = useRef<Record<string, string>>({});
+  const typingDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const typingTtlRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     activeRef.current = active;
   }, [active]);
   useEffect(() => {
-    notifEnabledRef.current = notifEnabled;
-  }, [notifEnabled]);
+    textRef.current = text;
+  }, [text]);
 
   const others = useMemo(
     () => peers.filter((p) => p.user_id !== profile.id),
@@ -472,9 +493,11 @@ function ChatScreen({
   const inGroup =
     active?.kind !== "group" || !membersLoaded || members.some((m) => m.user_id === profile.id);
 
-  async function ensureNotifPermission() {
-    return ensureBrowserNotifyPermission();
-  }
+  const canAddMembers =
+    !!active &&
+    active.kind === "group" &&
+    inGroup &&
+    (isAdmin || active.members_can_add !== false);
 
   async function ensureGroupKey(convId: string) {
     const existing = groupKeysRef.current[convId];
@@ -492,65 +515,6 @@ function ChatScreen({
     return peerApi.memberIds(conv.id);
   }
 
-  async function pollNotifications(conversations: Conversation[]) {
-    if (!notifEnabledRef.current) return;
-    for (const conv of conversations) {
-      try {
-        const msgs = await peerApi.listMessages(conv.id);
-        const last = msgs[msgs.length - 1];
-        const prevId = lastMsgIdRef.current[conv.id];
-        if (prevId === undefined) {
-          lastMsgIdRef.current[conv.id] = last?.id ?? "";
-          continue;
-        }
-        if (!last || last.id === prevId) continue;
-        const prevIdx = msgs.findIndex((m) => m.id === prevId);
-        const newOnes = prevIdx === -1 ? [last] : msgs.slice(prevIdx + 1);
-        lastMsgIdRef.current[conv.id] = last.id;
-        const incoming = newOnes.filter((m) => m.sender_id !== profile.id);
-        if (!incoming.length || conv.muted) continue;
-        let focused = false;
-        if (activeRef.current?.id === conv.id) {
-          try {
-            focused = await getCurrentWindow().isFocused();
-          } catch {
-            focused = false;
-          }
-        }
-        if (activeRef.current?.id === conv.id && focused) continue;
-        const granted = await ensureNotifPermission();
-        if (!granted) continue;
-        for (const m of incoming) {
-          let body = "";
-          if (m.kind === "file_notice") {
-            body = "Sent a file";
-          } else if (m.kind === "text") {
-            try {
-              if (conv.kind === "group") {
-                const gk = await ensureGroupKey(conv.id);
-                body = await decryptWithGroupKey(m, gk);
-              } else {
-                body = await decryptMessage(
-                  { ...m, wrapped_keys: m.wrapped_keys || {} },
-                  profile.id,
-                  identity
-                );
-              }
-            } catch {
-              body = "New message";
-            }
-          } else {
-            continue;
-          }
-          const title = conv.kind === "dm" ? conv.peer_name || "PeerTalk" : conv.title || "Group";
-          showDesktopToast(title, body.slice(0, 80));
-        }
-      } catch {
-        /* ignore this conversation this cycle */
-      }
-    }
-  }
-
   async function refresh() {
     try {
       await peerApi.discoverPeers();
@@ -565,12 +529,12 @@ function ChatScreen({
     setPeers(p);
     setConvs(c);
     setLanHosts(hosts);
-    pollNotifications(c).catch(() => {});
+    setActive((prev) => {
+      if (!prev) return prev;
+      const fresh = c.find((x) => x.id === prev.id);
+      return fresh ?? prev;
+    });
   }
-
-  useEffect(() => {
-    peerApi.getNotificationsEnabled().then(setNotifEnabled).catch(() => {});
-  }, []);
 
   useEffect(() => {
     refresh().catch(console.error);
@@ -591,6 +555,77 @@ function ChatScreen({
   }, []);
 
   useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{
+      conversation_id?: string;
+      from_name?: string;
+      from_id?: string;
+      kind?: string;
+    }>("inbox-updated", (ev) => {
+      refresh().catch(() => {});
+      const p = ev.payload || {};
+      const cid = p.conversation_id || "";
+      if (!cid) return;
+      if (p.from_id === profile.id) return;
+      const kind = p.kind || "";
+      if (kind === "reaction" || kind === "pin" || kind === "unpin" || kind === "deleted") return;
+      // Native OS toast (not Web Notification — that flash-prompted on WebView2).
+      void (async () => {
+        try {
+          const enabled = await peerApi.getNotificationsEnabled();
+          if (!enabled) return;
+          const muted = await peerApi.conversationIsMuted(cid).catch(() => false);
+          if (muted) return;
+          const focused = await getCurrentWindow().isFocused().catch(() => true);
+          const viewing = activeRef.current?.id === cid;
+          if (focused && viewing) return;
+          let granted = await isPermissionGranted();
+          if (!granted) {
+            granted = (await requestPermission()) === "granted";
+          }
+          if (!granted) return;
+          const title = (p.from_name || "PeerTalk").trim() || "PeerTalk";
+          const body =
+            kind === "file_notice"
+              ? "Sent a file"
+              : kind === "system" || kind === "group_event"
+                ? "Group update"
+                : "New message";
+          sendNotification({ title, body });
+        } catch (err) {
+          console.error("notify", err);
+        }
+      })();
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [profile.id]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ conversation_id?: string; user_id?: string; display_name?: string }>(
+      "peer-typing",
+      (ev) => {
+        const p = ev.payload;
+        if (!p?.conversation_id || p.conversation_id !== activeRef.current?.id) return;
+        if (p.user_id === profile.id) return;
+        const name = (p.display_name || "Someone").trim() || "Someone";
+        setTypingLabel(`${name} is typing…`);
+        if (typingTtlRef.current) clearTimeout(typingTtlRef.current);
+        typingTtlRef.current = setTimeout(() => setTypingLabel(null), 3000);
+      }
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+      if (typingTtlRef.current) clearTimeout(typingTtlRef.current);
+      if (typingDebounceRef.current) clearTimeout(typingDebounceRef.current);
+    };
+  }, [profile.id]);
+
+  useEffect(() => {
     if (!active) return;
     const conv = active;
     let cancel = false;
@@ -601,6 +636,10 @@ function ChatScreen({
     setMembersOpen(false);
     setAddPick([]);
     setReplyTo(null);
+    setEditingMessage(null);
+    setTypingLabel(null);
+    setRenameDraft(conv.title || "");
+    setText(draftsRef.current[conv.id] ?? "");
     clearStagedFiles();
 
     async function pull() {
@@ -632,10 +671,18 @@ function ChatScreen({
     }
 
     pull().catch(console.error);
-    const t = setInterval(() => pull().catch(() => {}), 2000);
+    const t = setInterval(() => pull().catch(() => {}), 750);
+    let unlisten: (() => void) | undefined;
+    listen("inbox-updated", () => {
+      pull().catch(() => {});
+    }).then((fn) => {
+      if (cancel) fn();
+      else unlisten = fn;
+    });
     return () => {
       cancel = true;
       clearInterval(t);
+      unlisten?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.id]);
@@ -658,7 +705,11 @@ function ChatScreen({
       if (active.kind === "group" && !gk) return;
       const next: Record<string, string> = {};
       for (const m of messages) {
-        if (m.conversation_id !== active.id || m.kind === "file_notice" || m.kind === "deleted") {
+        if (
+          m.conversation_id !== active.id ||
+          m.kind === "file_notice" ||
+          m.kind === "deleted"
+        ) {
           continue;
         }
         try {
@@ -708,10 +759,33 @@ function ChatScreen({
   }, [messages, active?.id]);
 
   function selectConversation(c: Conversation) {
+    const prev = activeRef.current;
+    if (prev && prev.id !== c.id) {
+      draftsRef.current[prev.id] = textRef.current;
+    }
     setMessages([]);
     setPlain({});
     setReplyTo(null);
+    setEditingMessage(null);
+    setTypingLabel(null);
+    setText(draftsRef.current[c.id] ?? "");
+    clearStagedFiles();
     setActive(c);
+  }
+
+  function notifyTyping() {
+    if (!active) return;
+    if (typingDebounceRef.current) clearTimeout(typingDebounceRef.current);
+    typingDebounceRef.current = setTimeout(() => {
+      resolveMemberIds(active)
+        .then((ids) =>
+          peerApi.sendTyping(
+            active.id,
+            ids.filter((id) => id !== profile.id)
+          )
+        )
+        .catch(() => {});
+    }, 400);
   }
 
   async function openDm(peer: Peer) {
@@ -794,8 +868,24 @@ function ChatScreen({
 
   function startReply(message: Message) {
     setReplyTo(message);
+    setEditingMessage(null);
     setMsgMenu(null);
     requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  function startEdit(message: Message) {
+    if (message.kind !== "text" || message.sender_id !== profile.id) return;
+    setEditingMessage(message);
+    setReplyTo(null);
+    setText(plain[message.id] || "");
+    setMsgMenu(null);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  function cancelEdit() {
+    setEditingMessage(null);
+    const draft = active ? draftsRef.current[active.id] ?? "" : "";
+    setText(draft);
   }
 
   async function copyMessage(message: Message) {
@@ -875,8 +965,24 @@ function ChatScreen({
     }
   }
 
+  async function sendGroupSystemNotice(
+    conv: Conversation,
+    body: string,
+    recipientIds?: string[]
+  ) {
+    const gk = await ensureGroupKey(conv.id);
+    const enc = await encryptWithGroupKey(body, conv.id, profile.id, gk, identity);
+    const members = recipientIds ?? (await peerApi.memberIds(conv.id));
+    await peerApi.sendMessage(
+      conv.id,
+      { kind: "system", sender_id: profile.id, ...enc },
+      members.filter((id) => id !== profile.id)
+    );
+  }
+
   async function sendText(body: string, replyToId?: string) {
     if (!active || !body.trim()) return;
+    const editing = editingMessage;
     let message: any;
     if (active.kind === "dm" && active.peer_id) {
       const peer = peers.find((p) => p.user_id === active.peer_id);
@@ -889,32 +995,50 @@ function ChatScreen({
         [profile.id]: exportPublic(identity).x25519_public,
       };
       const enc = await encryptMessage(body.trim(), active.id, profile.id, identity, pubs);
-      message = { kind: "text", sender_id: profile.id, ...enc, reply_to: replyToId ?? null };
+      message = {
+        kind: "text",
+        sender_id: profile.id,
+        ...enc,
+        reply_to: editing ? editing.reply_to ?? null : replyToId ?? null,
+      };
     } else {
       const gk = await ensureGroupKey(active.id);
       const enc = await encryptWithGroupKey(body.trim(), active.id, profile.id, gk, identity);
-      message = { kind: "text", sender_id: profile.id, ...enc, reply_to: replyToId ?? null };
+      message = {
+        kind: "text",
+        sender_id: profile.id,
+        ...enc,
+        reply_to: editing ? editing.reply_to ?? null : replyToId ?? null,
+      };
+    }
+    if (editing) {
+      message.id = editing.id;
+      message.created_at = editing.created_at;
     }
     const memberIds = await resolveMemberIds(active);
     await peerApi.sendMessage(
       active.id,
       message,
-      memberIds.filter((id) => id !== profile.id)
+      memberIds.filter((id) => id !== profile.id),
+      !!editing
     );
+    setEditingMessage(null);
     setMessages(await peerApi.listMessages(active.id));
   }
 
   async function submitComposer() {
     if (!active) return;
-    const files = stagedFiles;
+    const files = editingMessage ? [] : stagedFiles;
     const body = text.trim();
     const replyId = replyTo?.id;
     if (!files.length && !body) return;
+    if (active) draftsRef.current[active.id] = "";
     setText("");
     setReplyTo(null);
     setStagedFiles([]);
     for (const f of files) if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
     if (body) await sendText(body, replyId);
+    else setEditingMessage(null);
     queueAbortRef.current = false;
     for (const sf of files) {
       if (queueAbortRef.current) break;
@@ -1162,7 +1286,7 @@ function ChatScreen({
 
   async function savePreviewedFile() {
     if (!filePreview) return;
-    setStatus("Saving…");
+    setStatus("Saving to Downloads…");
     try {
       const path = await peerApi.saveDownloadedFile(
         filePreview.name,
@@ -1173,9 +1297,38 @@ function ChatScreen({
         await peerApi.ackFileDownload(filePreview.fileId, filePreview.uploaderId);
       }
       setFilePreview((p) => (p ? { ...p, localPath: path } : p));
-      setStatus("");
+      setStatus(`Saved to Downloads: ${filePreview.name}`);
     } catch (err: any) {
       setStatus(err?.message || String(err));
+    }
+  }
+
+  /** One-click: fetch from peer (sender must be online) → save under Downloads. */
+  async function downloadFileToDownloads(fileId: string, uploaderId: string) {
+    setPreviewBusy(true);
+    setStatus("Downloading…");
+    try {
+      const { file, name, data } = await decryptFile(fileId, uploaderId);
+      if (abortOpenRef.current) return;
+      const path = await peerApi.saveDownloadedFile(name, b64(data), fileId);
+      if (uploaderId !== profile.id) {
+        await peerApi.ackFileDownload(fileId, uploaderId).catch(() => {});
+      }
+      setStatus(`Saved to Downloads: ${path}`);
+    } catch (err: any) {
+      const raw = String(err?.message || err);
+      if (raw === "aborted") return;
+      if (/offline|no ip|no port|uploader|connect|tls|fingerprint|forbidden|missing chunk/i.test(raw)) {
+        setStatus(
+          "Can't download yet — the sender must keep PeerTalk open on the same LAN, then try again."
+        );
+      } else {
+        setStatus(raw);
+      }
+    } finally {
+      setIncomingFile(null);
+      setPreviewBusy(false);
+      abortOpenRef.current = false;
     }
   }
 
@@ -1209,6 +1362,16 @@ function ChatScreen({
       await peerApi.removeGroupMember(active.id, userId, wraps);
       setGroupKeys((g) => ({ ...g, [active.id]: newKey }));
       groupKeysRef.current = { ...groupKeysRef.current, [active.id]: newKey };
+      const remainingIds = remaining.map((m) => m.user_id);
+      try {
+        await sendGroupSystemNotice(
+          active,
+          `${profile.display_name} removed ${displayName}`,
+          remainingIds
+        );
+      } catch (e) {
+        console.error(e);
+      }
       setMembers(await peerApi.listMembers(active.id));
       setMessages(await peerApi.listMessages(active.id));
       setStatus(
@@ -1266,6 +1429,61 @@ function ChatScreen({
     }
   }
 
+  async function handleRenameGroup() {
+    if (!active || active.kind !== "group") return;
+    const title = renameDraft.trim();
+    if (!title || title === active.title) return;
+    try {
+      await peerApi.renameGroup(active.id, title);
+      setActive({ ...active, title });
+      await refresh();
+      setStatus("Group renamed");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function handleDeleteGroup() {
+    if (!active || active.kind !== "group") return;
+    if (
+      !window.confirm(
+        "Delete this group for everyone? Chats and membership will be removed on all devices."
+      )
+    ) {
+      return;
+    }
+    try {
+      await peerApi.deleteGroup(active.id);
+      setMembersOpen(false);
+      setActive(null);
+      await refresh();
+      setStatus("Group deleted");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function handleToggleMembersCanAdd(allowed: boolean) {
+    if (!active || active.kind !== "group") return;
+    try {
+      await peerApi.setGroupMembersCanAdd(active.id, allowed);
+      setActive({ ...active, members_can_add: allowed });
+      await refresh();
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function handleSetMemberRole(userId: string, role: "admin" | "member") {
+    if (!active || active.kind !== "group") return;
+    try {
+      await peerApi.setGroupMemberRole(active.id, userId, role);
+      setMembers(await peerApi.listMembers(active.id));
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
   async function createGroup() {
     if (!groupTitle.trim() || !groupPick.length) return;
     try {
@@ -1281,16 +1499,9 @@ function ChatScreen({
       const conversation = await peerApi.createGroup(groupTitle.trim(), groupPick, wraps);
       setGroupKeys((g) => ({ ...g, [conversation.id]: gk }));
       groupKeysRef.current = { ...groupKeysRef.current, [conversation.id]: gk };
-      const enc = await encryptWithGroupKey(
+      await sendGroupSystemNotice(
+        conversation,
         `${profile.display_name} started the group`,
-        conversation.id,
-        profile.id,
-        gk,
-        identity
-      );
-      await peerApi.sendMessage(
-        conversation.id,
-        { kind: "text", sender_id: profile.id, ...enc },
         groupPick
       );
       setGroupOpen(false);
@@ -1304,6 +1515,12 @@ function ChatScreen({
     }
   }
 
+  const activeTitle = active
+    ? active.kind === "dm"
+      ? active.peer_name || "Direct"
+      : active.title || "Group"
+    : "";
+
   return (
     <Box
       sx={{
@@ -1314,72 +1531,160 @@ function ChatScreen({
         bgcolor: "background.default",
       }}
     >
-      <Drawer
-        variant="permanent"
+      {/* Icon rail */}
+      <Box
         sx={{
-          width: 320,
+          width: 64,
           flexShrink: 0,
-          [`& .MuiDrawer-paper`]: {
-            width: 320,
-            height: "100%",
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-            borderRight: "1px solid #D5E3DD",
-            background: "linear-gradient(180deg,#F7FBFA 0%, #FFFFFF 40%)",
-          },
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          py: 1.5,
+          gap: 0.5,
+          borderRight: "1px solid #D5E3DD",
+          bgcolor: "#EEF4F2",
         }}
       >
-        <Toolbar sx={{ gap: 1 }}>
-          <ChatIcon color="primary" />
+        <Tooltip title="Chats" placement="right">
+          <IconButton
+            color={tab === 1 ? "primary" : "default"}
+            onClick={() => setTab(1)}
+            sx={{
+              bgcolor: tab === 1 ? "rgba(15,107,92,0.14)" : "transparent",
+              borderRadius: 2.5,
+            }}
+          >
+            <ChatIcon />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title="People" placement="right">
+          <IconButton
+            color={tab === 0 ? "primary" : "default"}
+            onClick={() => setTab(0)}
+            sx={{
+              bgcolor: tab === 0 ? "rgba(15,107,92,0.14)" : "transparent",
+              borderRadius: 2.5,
+            }}
+          >
+            <PeopleAltIcon />
+          </IconButton>
+        </Tooltip>
+        <Box flex={1} />
+        <Tooltip title="Settings" placement="right">
+          <IconButton onClick={onSettings} sx={{ borderRadius: 2.5 }}>
+            <SettingsIcon />
+          </IconButton>
+        </Tooltip>
+      </Box>
+
+      {/* List pane */}
+      <Box
+        sx={{
+          width: 300,
+          flexShrink: 0,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          borderRight: "1px solid #D5E3DD",
+          bgcolor: "#FFFFFF",
+        }}
+      >
+        <Box sx={{ px: 2, pt: 1.75, pb: 1, display: "flex", alignItems: "center", gap: 1 }}>
           <Box flex={1} minWidth={0}>
-            <Typography variant="subtitle1" fontWeight={700}>
-              PeerTalk
+            <Typography variant="subtitle1" fontWeight={700} lineHeight={1.2}>
+              PeerTalk{" "}
+              <Typography component="span" variant="caption" color="text.secondary" fontWeight={500}>
+                v{version}
+              </Typography>
             </Typography>
             <Typography variant="caption" color="text.secondary" noWrap display="block">
               {profile.display_name}
             </Typography>
           </Box>
-          <IconButton aria-label="Refresh peers" onClick={() => refresh()}>
-            <RefreshIcon />
+          <IconButton size="small" aria-label="Refresh peers" onClick={() => refresh()}>
+            <RefreshIcon fontSize="small" />
           </IconButton>
-        </Toolbar>
-        <Divider />
-        <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="fullWidth">
-          <Tab label="People" />
-          <Tab label="Chats" />
-        </Tabs>
-        <Box sx={{ flex: 1, overflow: "auto", minHeight: 0 }}>
+        </Box>
+        <Box sx={{ px: 1.5, pb: 1 }}>
+          <TextField
+            inputRef={chatSearchRef}
+            size="small"
+            fullWidth
+            placeholder={tab === 1 ? "Search chats… (Ctrl/Cmd+K)" : "Search people…"}
+            value={chatSearch}
+            onChange={(e) => setChatSearch(e.target.value)}
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon fontSize="small" />
+                </InputAdornment>
+              ),
+              endAdornment:
+                tab === 1 ? (
+                  <InputAdornment position="end">
+                    <Tooltip title="New group">
+                      <IconButton
+                        size="small"
+                        edge="end"
+                        aria-label="New group"
+                        onClick={() => setGroupOpen(true)}
+                      >
+                        <GroupAddIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </InputAdornment>
+                ) : undefined,
+              sx: { borderRadius: 999, bgcolor: "#F3F6F4" },
+            }}
+          />
+        </Box>
+        <Box sx={{ flex: 1, overflow: "auto", minHeight: 0, pb: 1 }}>
           {tab === 0 && (
-            <List dense>
-              {others.map((p) => (
-                <ListItemButton key={p.user_id} onClick={() => openDm(p)}>
-                  <Avatar sx={{ width: 36, height: 36, mr: 1.5, bgcolor: "primary.main" }}>
-                    {p.display_name.slice(0, 1).toUpperCase()}
-                  </Avatar>
-                  <ListItemText
-                    primary={p.display_name}
-                    secondary={p.online ? "Online" : lastSeenLabel(p.last_seen_at)}
-                  />
-                  <Box
-                    sx={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: "50%",
-                      bgcolor: p.online ? "success.main" : "grey.400",
-                    }}
-                  />
-                </ListItemButton>
-              ))}
+            <List dense disablePadding>
+              {others
+                .filter((p) => {
+                  const q = chatSearch.trim().toLowerCase();
+                  if (!q) return true;
+                  return p.display_name.toLowerCase().includes(q);
+                })
+                .map((p) => (
+                  <ListItemButton key={p.user_id} onClick={() => openDm(p)} sx={{ py: 0.85 }}>
+                    <Avatar
+                      sx={{
+                        width: 40,
+                        height: 40,
+                        mr: 1.25,
+                        bgcolor: avatarColor(p.display_name),
+                        fontSize: 15,
+                      }}
+                    >
+                      {p.display_name.slice(0, 1).toUpperCase()}
+                    </Avatar>
+                    <ListItemText
+                      primary={p.display_name}
+                      secondary={p.online ? "Online" : lastSeenLabel(p.last_seen_at)}
+                      primaryTypographyProps={{ fontWeight: 600, fontSize: 14, noWrap: true }}
+                      secondaryTypographyProps={{ fontSize: 12 }}
+                    />
+                    <Box
+                      sx={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: "50%",
+                        bgcolor: p.online ? "success.main" : "grey.400",
+                      }}
+                    />
+                  </ListItemButton>
+                ))}
               {!others.length && (
-                <Typography sx={{ p: 2 }} color="text.secondary">
+                <Typography sx={{ p: 2 }} color="text.secondary" variant="body2">
                   No peers yet. Start PeerTalk on another PC on this LAN and hit refresh.
                 </Typography>
               )}
               {lanHosts.length > 0 && (
                 <>
-                  <Divider sx={{ my: 1 }} />
-                  <Typography variant="overline" color="text.secondary" sx={{ px: 2 }}>
+                  <Divider sx={{ my: 1, mx: 2 }} />
+                  <Typography variant="overline" color="text.secondary" sx={{ px: 2.5 }}>
                     Other devices on this network
                   </Typography>
                   {lanHosts.map((h) => (
@@ -1388,17 +1693,19 @@ function ChatScreen({
                       sx={{
                         display: "flex",
                         alignItems: "center",
-                        gap: 1.5,
-                        px: 2,
-                        py: 1,
-                        opacity: 0.5,
+                        gap: 1.25,
+                        px: 2.5,
+                        py: 0.85,
+                        opacity: 0.55,
                       }}
                     >
-                      <Avatar sx={{ width: 36, height: 36, bgcolor: "grey.300", color: "grey.600" }}>
+                      <Avatar sx={{ width: 40, height: 40, bgcolor: "grey.300", color: "grey.600", fontSize: 15 }}>
                         {h.label.slice(0, 1).toUpperCase()}
                       </Avatar>
                       <Box flex={1} minWidth={0}>
-                        <Typography noWrap>{h.label}</Typography>
+                        <Typography noWrap fontSize={14} fontWeight={600}>
+                          {h.label}
+                        </Typography>
                         <Typography variant="caption" color="text.secondary">
                           {h.ip} · No PeerTalk
                         </Typography>
@@ -1410,100 +1717,118 @@ function ChatScreen({
             </List>
           )}
           {tab === 1 && (
-            <>
-              <Box px={2} py={1} display="flex" flexDirection="column" gap={1}>
-                <Button
-                  startIcon={<GroupAddIcon />}
-                  fullWidth
-                  variant="outlined"
-                  onClick={() => setGroupOpen(true)}
-                >
-                  New group
-                </Button>
-                <TextField
-                  inputRef={chatSearchRef}
-                  size="small"
-                  fullWidth
-                  placeholder="Search chats… (Ctrl/Cmd+K)"
-                  value={chatSearch}
-                  onChange={(e) => setChatSearch(e.target.value)}
-                  InputProps={{
-                    startAdornment: (
-                      <InputAdornment position="start">
-                        <SearchIcon fontSize="small" />
-                      </InputAdornment>
-                    ),
-                  }}
-                />
-              </Box>
-              <List dense>
-                {filteredConvs.map((c) => {
-                  const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
-                  return (
-                    <Box key={c.id} sx={{ display: "flex", alignItems: "center", pr: 0.5 }}>
-                      <ListItemButton
-                        selected={active?.id === c.id}
-                        onClick={() => selectConversation(c)}
-                        sx={{ flex: 1, minWidth: 0 }}
-                      >
-                        <Avatar
-                          sx={{
-                            width: 36,
-                            height: 36,
-                            mr: 1.5,
-                            bgcolor: c.kind === "group" ? "secondary.main" : "primary.main",
+            <List dense disablePadding>
+              {filteredConvs.map((c) => {
+                const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
+                return (
+                  <ListItemButton
+                    key={c.id}
+                    selected={active?.id === c.id}
+                    onClick={() => selectConversation(c)}
+                    sx={{
+                      py: 0.9,
+                      alignItems: "flex-start",
+                      "& .chat-row-actions": {
+                        opacity: 0,
+                        pointerEvents: "none",
+                        transition: "opacity 0.12s ease",
+                      },
+                      "&:hover .chat-row-actions, &:focus-within .chat-row-actions": {
+                        opacity: 1,
+                        pointerEvents: "auto",
+                      },
+                    }}
+                  >
+                    <Avatar
+                      sx={{
+                        width: 42,
+                        height: 42,
+                        mr: 1.25,
+                        mt: 0.25,
+                        bgcolor: avatarColor(title),
+                        fontSize: 16,
+                      }}
+                    >
+                      {title.slice(0, 1).toUpperCase()}
+                    </Avatar>
+                    <ListItemText
+                      primary={
+                        <Box display="flex" alignItems="center" gap={0.5}>
+                          <Typography
+                            fontWeight={c.unread_count ? 800 : 700}
+                            fontSize={14}
+                            noWrap
+                            flex={1}
+                          >
+                            {title}
+                          </Typography>
+                          {c.muted && <VolumeOffIcon sx={{ fontSize: 14, color: "text.disabled" }} />}
+                          {c.pinned_at && <PushPinIcon sx={{ fontSize: 13, color: "primary.main" }} />}
+                        </Box>
+                      }
+                      secondary={c.kind === "group" ? "Group" : "Direct message"}
+                      secondaryTypographyProps={{ fontSize: 12, noWrap: true }}
+                    />
+                    {!!c.unread_count && active?.id !== c.id && (
+                      <Chip
+                        size="small"
+                        label={c.unread_count > 99 ? "99+" : c.unread_count}
+                        color="primary"
+                        sx={{
+                          height: 22,
+                          minWidth: 22,
+                          mt: 0.85,
+                          mr: 0.25,
+                          fontWeight: 800,
+                          fontSize: 11,
+                          "& .MuiChip-label": { px: 0.75 },
+                        }}
+                      />
+                    )}
+                    <Stack direction="row" spacing={0} className="chat-row-actions" sx={{ mt: 0.2 }}>
+                      <Tooltip title={c.pinned_at ? "Unpin" : "Pin"}>
+                        <IconButton
+                          size="small"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            togglePinChat(c);
                           }}
                         >
-                          {title.slice(0, 1).toUpperCase()}
-                        </Avatar>
-                        <ListItemText
-                          primary={title}
-                          secondary={c.kind === "group" ? "Group" : undefined}
-                          primaryTypographyProps={{ noWrap: true }}
-                        />
-                      </ListItemButton>
-                      <Tooltip title={c.pinned_at ? "Unpin chat" : "Pin chat"}>
-                        <IconButton size="small" onClick={() => togglePinChat(c)}>
                           {c.pinned_at ? (
-                            <PushPinIcon fontSize="small" color="primary" />
+                            <PushPinIcon sx={{ fontSize: 15 }} color="primary" />
                           ) : (
-                            <PushPinOutlinedIcon fontSize="small" />
+                            <PushPinOutlinedIcon sx={{ fontSize: 15, opacity: 0.55 }} />
                           )}
                         </IconButton>
                       </Tooltip>
-                      <Tooltip title={c.muted ? "Unmute chat" : "Mute chat"}>
-                        <IconButton size="small" onClick={() => toggleMuteChat(c)}>
+                      <Tooltip title={c.muted ? "Unmute" : "Mute"}>
+                        <IconButton
+                          size="small"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleMuteChat(c);
+                          }}
+                        >
                           {c.muted ? (
-                            <VolumeOffIcon fontSize="small" color="disabled" />
+                            <VolumeOffIcon sx={{ fontSize: 15 }} color="disabled" />
                           ) : (
-                            <VolumeUpIcon fontSize="small" sx={{ opacity: 0.4 }} />
+                            <VolumeUpIcon sx={{ fontSize: 15, opacity: 0.55 }} />
                           )}
                         </IconButton>
                       </Tooltip>
-                    </Box>
-                  );
-                })}
-                {!filteredConvs.length && (
-                  <Typography sx={{ p: 2 }} color="text.secondary">
-                    {chatSearch ? "No chats match your search." : "No chats yet. Start one from People."}
-                  </Typography>
-                )}
-              </List>
-            </>
+                    </Stack>
+                  </ListItemButton>
+                );
+              })}
+              {!filteredConvs.length && (
+                <Typography sx={{ p: 2 }} color="text.secondary" variant="body2">
+                  {chatSearch ? "No chats match your search." : "No chats yet. Start one from People."}
+                </Typography>
+              )}
+            </List>
           )}
         </Box>
-        <Box sx={{ mt: "auto", borderTop: "1px solid #D5E3DD", p: 1.5 }}>
-          <Button
-            fullWidth
-            color="inherit"
-            startIcon={<SettingsIcon />}
-            onClick={onSettings}
-            sx={{ justifyContent: "flex-start", color: "text.primary" }}
-          >
-            Settings
-          </Button>
-        </Box>
-      </Drawer>
+      </Box>
 
       <Box
         flex={1}
@@ -1525,18 +1850,31 @@ function ChatScreen({
             zIndex: 2,
           }}
         >
-          <Toolbar sx={{ gap: 1 }}>
+          <Toolbar sx={{ gap: 1, minHeight: 64 }}>
+            {active && (
+              <Avatar
+                sx={{
+                  width: 40,
+                  height: 40,
+                  bgcolor: avatarColor(activeTitle),
+                  fontSize: 16,
+                }}
+              >
+                {activeTitle.slice(0, 1).toUpperCase()}
+              </Avatar>
+            )}
             <Box flex={1} minWidth={0}>
-              <Typography variant="h6" noWrap>
-                {active
-                  ? active.kind === "dm"
-                    ? active.peer_name
-                    : active.title
-                  : "Select a conversation"}
+              <Typography variant="subtitle1" fontWeight={700} noWrap>
+                {active ? activeTitle : "Select a conversation"}
               </Typography>
-              {active?.kind === "group" && membersLoaded && (
+              {active?.kind === "group" && membersLoaded && !typingLabel && (
                 <Typography variant="caption" color="text.secondary">
                   {members.length} {members.length === 1 ? "member" : "members"}
+                </Typography>
+              )}
+              {typingLabel && (
+                <Typography variant="caption" color="primary" display="block">
+                  {typingLabel}
                 </Typography>
               )}
             </Box>
@@ -1551,7 +1889,13 @@ function ChatScreen({
             )}
             {status && <Chip size="small" label={status} onDelete={() => setStatus("")} />}
             {active?.kind === "group" && (
-              <IconButton aria-label="Group members" onClick={() => setMembersOpen(true)}>
+              <IconButton
+                aria-label="Group members"
+                onClick={() => {
+                  setRenameDraft(active.title || "");
+                  setMembersOpen(true);
+                }}
+              >
                 <GroupIcon />
               </IconButton>
             )}
@@ -1562,12 +1906,18 @@ function ChatScreen({
           ref={scroller}
           flex={1}
           minHeight={0}
-          p={2}
+          px={2}
+          py={1.5}
           overflow="auto"
           display="flex"
           flexDirection="column"
-          gap={1}
-          sx={{ bgcolor: "background.default" }}
+          gap={0.75}
+          sx={{
+            bgcolor: "#F3F6F4",
+            backgroundImage:
+              "radial-gradient(rgba(15,107,92,0.06) 1px, transparent 1px)",
+            backgroundSize: "18px 18px",
+          }}
         >
           {!active && (
             <Box m="auto" textAlign="center" maxWidth={360}>
@@ -1581,184 +1931,313 @@ function ChatScreen({
             </Box>
           )}
           {dayGroups.map((group) => (
-            <Box key={group.day} display="flex" flexDirection="column" gap={1}>
-              <Box display="flex" justifyContent="center" my={0.5}>
+            <Box key={group.day} display="flex" flexDirection="column" gap={0.65}>
+              <Box display="flex" justifyContent="center" my={0.75}>
                 <Chip
                   label={group.label}
                   size="small"
                   sx={{
                     height: 22,
-                    px: 0.5,
-                    bgcolor: "rgba(15,107,92,0.12)",
-                    color: "primary.dark",
-                    fontWeight: 700,
-                    fontSize: 12,
+                    px: 0.75,
+                    bgcolor: "rgba(255,255,255,0.92)",
+                    color: "text.secondary",
+                    fontWeight: 600,
+                    fontSize: 11,
+                    border: "1px solid #D5E3DD",
                   }}
                 />
               </Box>
               {group.items.map((m) => {
                 const mine = m.sender_id === profile.id;
                 const quoted = m.reply_to ? messages.find((x) => x.id === m.reply_to) : undefined;
+                const label = senderLabel(m.sender_id);
+                const isGroup = active?.kind === "group";
+                if (m.kind === "system") {
+                  return (
+                    <Grow in key={m.id} timeout={180}>
+                      <Box display="flex" justifyContent="center" my={0.35}>
+                        <Chip
+                          size="small"
+                          label={plain[m.id] || "…"}
+                          sx={{
+                            height: "auto",
+                            py: 0.55,
+                            px: 0.5,
+                            maxWidth: "85%",
+                            bgcolor: "rgba(255,255,255,0.92)",
+                            border: "1px solid #D5E3DD",
+                            color: "text.secondary",
+                            fontWeight: 600,
+                            fontSize: 12,
+                            "& .MuiChip-label": {
+                              whiteSpace: "normal",
+                              textAlign: "center",
+                              lineHeight: 1.35,
+                            },
+                          }}
+                        />
+                      </Box>
+                    </Grow>
+                  );
+                }
                 return (
-                  <Grow in key={m.id} timeout={220}>
-                    <Box sx={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "70%" }}>
-                      <Paper
-                        elevation={0}
-                        sx={{
-                          p: 1.5,
-                          bgcolor:
-                            m.kind === "deleted" ? "#F1F4F3" : mine ? "#DCEFE9" : "#FFFFFF",
-                          border: "1px solid #D5E3DD",
-                          position: "relative",
-                        }}
-                      >
-                        {m.pinned && (
-                          <PushPinIcon
-                            sx={{
-                              position: "absolute",
-                              top: -8,
-                              left: -8,
-                              fontSize: 16,
-                              color: "secondary.main",
-                              bgcolor: "background.paper",
-                              borderRadius: "50%",
-                              p: 0.2,
-                            }}
-                          />
-                        )}
-                        {m.kind !== "deleted" && (
-                          <IconButton
-                            size="small"
-                            aria-label="Message options"
-                            onClick={(e) => setMsgMenu({ anchor: e.currentTarget, message: m })}
-                            sx={{ position: "absolute", top: 2, right: 2, opacity: 0.55 }}
-                          >
-                            <MoreVertIcon sx={{ fontSize: 16 }} />
-                          </IconButton>
-                        )}
-                        {active?.kind === "group" && !mine && m.kind !== "deleted" && (
-                          <Typography variant="caption" color="primary" fontWeight={700} display="block">
-                            {senderLabel(m.sender_id)}
-                          </Typography>
-                        )}
-                        {quoted && m.kind !== "deleted" && (
+                  <Grow in key={m.id} timeout={180}>
+                    <Box
+                      sx={{
+                        alignSelf: mine ? "flex-end" : "flex-start",
+                        maxWidth: "min(68%, 460px)",
+                      }}
+                    >
+                        <Paper
+                          elevation={0}
+                          onContextMenu={(e) => {
+                            if (m.kind === "deleted") return;
+                            e.preventDefault();
+                            setMsgMenu({ anchor: e.currentTarget as HTMLElement, message: m });
+                          }}
+                          sx={{
+                            px: 1,
+                            py: 0.4,
+                            bgcolor:
+                              m.kind === "deleted"
+                                ? "#F1F4F3"
+                                : mine
+                                  ? "#DCEFE9"
+                                  : "#FFFFFF",
+                            border:
+                              m.kind === "deleted"
+                                ? "1px solid #C8D5CF"
+                                : mine
+                                  ? "1px solid #C5DFD6"
+                                  : "1px solid #D5E3DD",
+                            borderRadius: mine ? "10px 10px 3px 10px" : "10px 10px 10px 3px",
+                            position: "relative",
+                            boxShadow: "0 1px 1px rgba(20,32,28,0.04)",
+                          }}
+                        >
+                          {m.pinned && (
+                            <PushPinIcon
+                              sx={{
+                                position: "absolute",
+                                top: -7,
+                                left: mine ? undefined : -7,
+                                right: mine ? -7 : undefined,
+                                fontSize: 14,
+                                color: "secondary.main",
+                                bgcolor: "background.paper",
+                                borderRadius: "50%",
+                                p: 0.15,
+                              }}
+                            />
+                          )}
+                          {m.kind !== "deleted" && (
+                            <IconButton
+                              size="small"
+                              aria-label="Message options"
+                              onClick={(e) => setMsgMenu({ anchor: e.currentTarget, message: m })}
+                              sx={{
+                                position: "absolute",
+                                top: 0,
+                                right: 0,
+                                opacity: 0.4,
+                                p: 0.35,
+                              }}
+                            >
+                              <MoreVertIcon sx={{ fontSize: 14 }} />
+                            </IconButton>
+                          )}
+                          {isGroup && m.kind !== "deleted" && (
+                            <Typography
+                              variant="caption"
+                              color="primary"
+                              fontWeight={700}
+                              display="block"
+                              noWrap
+                              title={label}
+                              sx={{
+                                fontSize: 11,
+                                lineHeight: 1.2,
+                                mb: 0.15,
+                                pr: 2,
+                                maxWidth: 200,
+                              }}
+                            >
+                              {truncate(label, 22)}
+                            </Typography>
+                          )}
+                          {quoted && m.kind !== "deleted" && (
+                            <Box
+                              sx={{
+                                borderLeft: "3px solid",
+                                borderColor: "primary.main",
+                                pl: 0.85,
+                                mb: 0.4,
+                                opacity: 0.85,
+                              }}
+                            >
+                              <Typography
+                                variant="caption"
+                                fontWeight={700}
+                                color="primary"
+                                display="block"
+                                sx={{ fontSize: 11 }}
+                              >
+                                {senderLabel(quoted.sender_id)}
+                              </Typography>
+                              <Typography
+                                variant="caption"
+                                color="text.secondary"
+                                noWrap
+                                display="block"
+                                sx={{ maxWidth: 200, fontSize: 11 }}
+                              >
+                                {quoted.kind === "file_notice"
+                                  ? "📎 File"
+                                  : quoted.kind === "deleted"
+                                    ? "Deleted message"
+                                    : truncate(plain[quoted.id] || "…", 80)}
+                              </Typography>
+                            </Box>
+                          )}
+                          {m.kind === "deleted" ? (
+                            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ pr: 0.5 }}>
+                              <DeleteOutlineIcon sx={{ fontSize: 15, color: "text.secondary" }} />
+                              <Typography
+                                fontStyle="italic"
+                                color="text.secondary"
+                                sx={{ fontSize: 13, lineHeight: 1.35 }}
+                              >
+                                This message was deleted
+                              </Typography>
+                            </Stack>
+                          ) : m.kind === "file_notice" ? (
+                            <Stack direction="row" spacing={0.25} alignItems="center">
+                              <Button
+                                size="small"
+                                startIcon={<DownloadIcon sx={{ fontSize: 16 }} />}
+                                disabled={previewBusy || !!incomingFile || !m.file_id}
+                                onClick={() =>
+                                  m.file_id && downloadFileToDownloads(m.file_id, m.sender_id)
+                                }
+                                sx={{
+                                  textTransform: "none",
+                                  fontWeight: 700,
+                                  fontSize: 13,
+                                  py: 0.25,
+                                  minHeight: 0,
+                                }}
+                              >
+                                {(m.file_id && fileNames[m.file_id]) || "Encrypted file"}
+                              </Button>
+                              <Tooltip title="Preview">
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    disabled={previewBusy || !!incomingFile || !m.file_id}
+                                    onClick={() => m.file_id && previewFile(m.file_id, m.sender_id)}
+                                    aria-label="Preview file"
+                                    sx={{ p: 0.4 }}
+                                  >
+                                    <OpenInNewIcon sx={{ fontSize: 16 }} />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                            </Stack>
+                          ) : (
+                            <Typography
+                              whiteSpace="pre-wrap"
+                              sx={{ pr: 1.5, fontSize: 14, lineHeight: 1.35 }}
+                            >
+                              {plain[m.id] || "…"}
+                            </Typography>
+                          )}
                           <Box
                             sx={{
-                              borderLeft: "3px solid",
-                              borderColor: "primary.main",
-                              pl: 1,
-                              mb: 0.5,
-                              opacity: 0.85,
+                              mt: 0.2,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "flex-end",
+                              gap: 0.35,
+                              color: "text.secondary",
                             }}
                           >
-                            <Typography variant="caption" fontWeight={700} color="primary" display="block">
-                              {senderLabel(quoted.sender_id)}
-                            </Typography>
-                            <Typography
-                              variant="caption"
-                              color="text.secondary"
-                              noWrap
-                              display="block"
-                              sx={{ maxWidth: 220 }}
-                            >
-                              {quoted.kind === "file_notice"
-                                ? "📎 File"
-                                : quoted.kind === "deleted"
-                                  ? "Deleted message"
-                                  : truncate(plain[quoted.id] || "…", 80)}
-                            </Typography>
-                          </Box>
-                        )}
-                        {m.kind === "deleted" ? (
-                          <Typography fontStyle="italic" color="text.secondary" sx={{ pr: 2 }}>
-                            This message was deleted
-                          </Typography>
-                        ) : m.kind === "file_notice" ? (
-                          <Button
-                            size="small"
-                            startIcon={<InsertDriveFileIcon />}
-                            endIcon={<OpenInNewIcon />}
-                            disabled={previewBusy || !!incomingFile}
-                            onClick={() => m.file_id && previewFile(m.file_id, m.sender_id)}
-                            sx={{
-                              textTransform: "none",
-                              fontWeight: 700,
-                              justifyContent: "flex-start",
-                              pr: 3,
-                            }}
-                          >
-                            {(m.file_id && fileNames[m.file_id]) || "Encrypted file"}
-                          </Button>
-                        ) : (
-                          <Typography whiteSpace="pre-wrap" sx={{ pr: 2 }}>
-                            {plain[m.id] || "…"}
-                          </Typography>
-                        )}
-                        <Box
-                          sx={{
-                            mt: 0.5,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "flex-end",
-                            gap: 0.4,
-                            color: "text.secondary",
-                          }}
-                        >
-                          {m.failed ? (
-                            <Typography
-                              variant="caption"
-                              color="error"
-                              sx={{ display: "flex", alignItems: "center", gap: 0.5 }}
-                            >
-                              Failed ·
-                              <Box
-                                component="span"
-                                sx={{ cursor: "pointer", textDecoration: "underline" }}
-                                onClick={() => retrySend(m)}
+                            {m.edited_at && m.kind === "text" && (
+                              <Typography
+                                variant="caption"
+                                sx={{ fontStyle: "italic", fontSize: 10, mr: 0.25 }}
                               >
-                                Retry
-                              </Box>
-                            </Typography>
-                          ) : (
-                            <Typography variant="caption">{formatClock(m.created_at)}</Typography>
-                          )}
-                          {mine && m.kind !== "deleted" && !m.failed && (
-                            m.read ? (
-                              <DoneAllIcon
-                                titleAccess="Read"
-                                sx={{ fontSize: 16, color: "success.main" }}
-                              />
-                            ) : m.delivered ? (
-                              <DoneAllIcon titleAccess="Received" sx={{ fontSize: 16 }} />
+                                edited
+                              </Typography>
+                            )}
+                            {m.failed ? (
+                              <Tooltip
+                                title={
+                                  m.last_error ||
+                                  "Could not reach the other PC (offline / no LAN IP). Keep PeerTalk open on both sides, then Retry."
+                                }
+                              >
+                                <Typography
+                                  variant="caption"
+                                  color="error"
+                                  sx={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 0.5,
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  Failed ·
+                                  <Box
+                                    component="span"
+                                    sx={{ cursor: "pointer", textDecoration: "underline" }}
+                                    onClick={() => retrySend(m)}
+                                  >
+                                    Retry
+                                  </Box>
+                                </Typography>
+                              </Tooltip>
                             ) : (
-                              <DoneIcon titleAccess="Queued" sx={{ fontSize: 16 }} />
-                            )
-                          )}
-                        </Box>
-                      </Paper>
-                      {!!m.reactions?.length && (
-                        <Stack
-                          direction="row"
-                          spacing={0.5}
-                          sx={{
-                            mt: 0.5,
-                            flexWrap: "wrap",
-                            justifyContent: mine ? "flex-end" : "flex-start",
-                          }}
-                        >
-                          {m.reactions.map((r) => (
-                            <Chip
-                              key={r.emoji}
-                              size="small"
-                              label={`${r.emoji} ${r.count}`}
-                              onClick={() => reactToMessage(m, r.emoji)}
-                              variant={r.users.includes(profile.id) ? "filled" : "outlined"}
-                              color={r.users.includes(profile.id) ? "primary" : "default"}
-                              sx={{ height: 22 }}
-                            />
-                          ))}
-                        </Stack>
-                      )}
+                              <Typography variant="caption" sx={{ fontSize: 10.5 }}>
+                                {formatClock(m.created_at)}
+                              </Typography>
+                            )}
+                            {mine && m.kind !== "deleted" && !m.failed && (
+                              m.read ? (
+                                <DoneAllIcon
+                                  titleAccess="Read"
+                                  sx={{ fontSize: 14, color: "success.main" }}
+                                />
+                              ) : m.delivered ? (
+                                <DoneAllIcon titleAccess="Received" sx={{ fontSize: 14 }} />
+                              ) : (
+                                <DoneIcon titleAccess="Queued" sx={{ fontSize: 14 }} />
+                              )
+                            )}
+                          </Box>
+                        </Paper>
+                        {!!m.reactions?.length && (
+                          <Stack
+                            direction="row"
+                            spacing={0.4}
+                            sx={{
+                              mt: 0.35,
+                              flexWrap: "wrap",
+                              justifyContent: mine ? "flex-end" : "flex-start",
+                            }}
+                          >
+                            {m.reactions.map((r) => (
+                              <Chip
+                                key={r.emoji}
+                                size="small"
+                                label={`${r.emoji} ${r.count}`}
+                                onClick={() => reactToMessage(m, r.emoji)}
+                                variant={r.users.includes(profile.id) ? "filled" : "outlined"}
+                                color={r.users.includes(profile.id) ? "primary" : "default"}
+                                sx={{ height: 20, fontSize: 11 }}
+                              />
+                            ))}
+                          </Stack>
+                        )}
                     </Box>
                   </Grow>
                 );
@@ -1872,16 +2351,43 @@ function ChatScreen({
             elevation={0}
             sx={{
               flexShrink: 0,
-              p: 1.5,
+              px: 1.5,
+              py: 1.25,
               borderTop: "1px solid #D5E3DD",
               display: "flex",
               flexDirection: "column",
-              gap: 1,
+              gap: 0.85,
               bgcolor: "#FFFFFF",
               zIndex: 2,
             }}
           >
-            {replyTo && (
+            {editingMessage && (
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 1,
+                  p: 1,
+                  border: "1px solid #D5E3DD",
+                  borderRadius: 2,
+                  bgcolor: "#F7FBFA",
+                }}
+              >
+                <EditIcon fontSize="small" color="primary" />
+                <Box flex={1} minWidth={0}>
+                  <Typography variant="caption" fontWeight={700} color="primary" display="block">
+                    Editing message
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" noWrap display="block">
+                    {truncate(plain[editingMessage.id] || "…", 90)}
+                  </Typography>
+                </Box>
+                <IconButton size="small" aria-label="Cancel edit" onClick={cancelEdit}>
+                  <CloseIcon fontSize="small" />
+                </IconButton>
+              </Box>
+            )}
+            {replyTo && !editingMessage && (
               <Box
                 sx={{
                   display: "flex",
@@ -1907,7 +2413,7 @@ function ChatScreen({
                 </IconButton>
               </Box>
             )}
-            {stagedFiles.length > 0 && (
+            {stagedFiles.length > 0 && !editingMessage && (
               <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                 {stagedFiles.map((sf) => (
                   <Box
@@ -1951,21 +2457,38 @@ function ChatScreen({
                 ))}
               </Stack>
             )}
-            <Box display="flex" gap={1} alignItems="flex-end">
+            <Box
+              display="flex"
+              gap={0.5}
+              alignItems="flex-end"
+              sx={{
+                border: "1px solid #D5E3DD",
+                borderRadius: 999,
+                bgcolor: "#F7FBFA",
+                px: 0.75,
+                py: 0.35,
+              }}
+            >
               <IconButton
                 aria-label="Emoji picker"
                 disabled={!!outgoingFile}
                 onClick={(e) => setEmojiAnchor(e.currentTarget)}
+                size="small"
               >
-                <EmojiEmotionsIcon />
+                <EmojiEmotionsIcon fontSize="small" />
               </IconButton>
-              <IconButton component="label" aria-label="Attach files" disabled={!!outgoingFile}>
-                <AttachFileIcon />
+              <IconButton
+                component="label"
+                aria-label="Attach files"
+                disabled={!!outgoingFile || !!editingMessage}
+                size="small"
+              >
+                <AttachFileIcon fontSize="small" />
                 <input
                   hidden
                   type="file"
                   multiple
-                  disabled={!!outgoingFile}
+                  disabled={!!outgoingFile || !!editingMessage}
                   onChange={(e) => {
                     const files = Array.from(e.target.files || []);
                     if (files.length) stageFiles(files);
@@ -1979,28 +2502,57 @@ function ChatScreen({
                 size="small"
                 multiline
                 minRows={1}
-                maxRows={6}
-                placeholder="Encrypted message… (Shift+Enter for newline)"
+                maxRows={5}
+                placeholder={
+                  editingMessage ? "Edit message… (Esc to cancel)" : "Type a message…"
+                }
                 value={text}
                 disabled={!!outgoingFile}
-                onChange={(e) => setText(e.target.value)}
+                variant="standard"
+                InputProps={{ disableUnderline: true }}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setText(v);
+                  if (active && !editingMessage) draftsRef.current[active.id] = v;
+                  if (v.trim() && !editingMessage) notifyTyping();
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     submitComposer();
+                  } else if (e.key === "Escape" && editingMessage) {
+                    e.preventDefault();
+                    cancelEdit();
                   } else if (e.key === "Escape" && replyTo) {
                     e.preventDefault();
                     setReplyTo(null);
                   }
                 }}
+                sx={{
+                  mx: 0.5,
+                  "& .MuiInputBase-root": { fontSize: 14, py: 0.6 },
+                }}
               />
-              <Button
-                variant="contained"
-                disabled={!!outgoingFile || (!text.trim() && !stagedFiles.length)}
+              <IconButton
+                color="primary"
+                disabled={
+                  !!outgoingFile ||
+                  (!text.trim() && !stagedFiles.length) ||
+                  (!!editingMessage && !text.trim())
+                }
                 onClick={submitComposer}
+                aria-label={editingMessage ? "Save edit" : "Send"}
+                sx={{
+                  bgcolor: "primary.main",
+                  color: "primary.contrastText",
+                  width: 36,
+                  height: 36,
+                  "&:hover": { bgcolor: "primary.dark" },
+                  "&.Mui-disabled": { bgcolor: "#C5D5CF", color: "#FFFFFF" },
+                }}
               >
-                Send
-              </Button>
+                {editingMessage ? <EditIcon fontSize="small" /> : <SendIcon fontSize="small" />}
+              </IconButton>
             </Box>
           </Paper>
         )}
@@ -2092,6 +2644,16 @@ function ChatScreen({
             Copy text
           </MenuItem>
         )}
+        {msgMenu?.message.kind === "text" &&
+          msgMenu.message.sender_id === profile.id &&
+          !msgMenu.message.failed && (
+            <MenuItem onClick={() => msgMenu && startEdit(msgMenu.message)}>
+              <ListItemIcon>
+                <EditIcon fontSize="small" />
+              </ListItemIcon>
+              Edit
+            </MenuItem>
+          )}
         <MenuItem onClick={() => msgMenu && togglePinMessage(msgMenu.message)}>
           <ListItemIcon>
             <PushPinIcon fontSize="small" />
@@ -2288,7 +2850,7 @@ function ChatScreen({
             {filePreview?.localPath ? "Available on this computer" : "Encrypted chat copy"}
           </Typography>
           <Button startIcon={<DownloadIcon />} onClick={savePreviewedFile}>
-            {filePreview?.localPath ? "Save a copy" : "Save"}
+            {filePreview?.localPath ? "Save another copy" : "Save to Downloads"}
           </Button>
           <Button variant="contained" startIcon={<OpenInNewIcon />} onClick={openPreviewedFile}>
             Open
@@ -2299,67 +2861,169 @@ function ChatScreen({
       <Dialog open={membersOpen && active?.kind === "group"} onClose={() => setMembersOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>{active?.title || "Group"}</DialogTitle>
         <DialogContent>
-          <Typography variant="overline" color="text.secondary">
-            Members
-          </Typography>
-          <List dense>
-            {members.map((m) => (
-              <ListItemButton key={m.user_id} disableRipple sx={{ cursor: "default" }}>
-                <Avatar sx={{ width: 32, height: 32, mr: 1.5, bgcolor: "primary.main", fontSize: 14 }}>
-                  {m.display_name.slice(0, 1).toUpperCase()}
-                </Avatar>
-                <ListItemText
-                  primary={m.user_id === profile.id ? `${m.display_name} (you)` : m.display_name}
-                />
-                {m.role === "admin" && (
-                  <Chip
-                    size="small"
-                    label="Admin"
-                    icon={<AdminPanelSettingsIcon fontSize="small" />}
-                    sx={{ mr: 1 }}
-                  />
-                )}
-                {isAdmin && m.user_id !== profile.id && (
-                  <IconButton
-                    aria-label={`Remove ${m.display_name}`}
-                    size="small"
-                    onClick={() => handleRemoveMember(m.user_id, m.display_name)}
-                  >
-                    <PersonRemoveIcon fontSize="small" />
-                  </IconButton>
-                )}
-              </ListItemButton>
-            ))}
-          </List>
-          {isAdmin && (
-            <>
-              <Typography variant="overline" color="text.secondary">
-                Add people
-              </Typography>
-              <List dense>
-                {others
-                  .filter((p) => !members.some((m) => m.user_id === p.user_id))
-                  .map((p) => (
-                    <ListItemButton
-                      key={p.user_id}
-                      selected={addPick.includes(p.user_id)}
-                      onClick={() =>
-                        setAddPick((g) =>
-                          g.includes(p.user_id) ? g.filter((x) => x !== p.user_id) : [...g, p.user_id]
-                        )
-                      }
+          <Stack spacing={1.5} sx={{ mt: 0.5 }}>
+            {isAdmin && (
+              <>
+                <Paper
+                  variant="outlined"
+                  sx={{ p: 1.5, borderColor: "#D5E3DD", borderRadius: 2 }}
+                >
+                  <Typography variant="overline" color="text.secondary" display="block" mb={1}>
+                    Group name
+                  </Typography>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <TextField
+                      size="small"
+                      fullWidth
+                      value={renameDraft}
+                      onChange={(e) => setRenameDraft(e.target.value)}
+                      placeholder="Group name"
+                    />
+                    <Button
+                      variant="outlined"
+                      startIcon={<DriveFileRenameOutlineIcon />}
+                      disabled={!renameDraft.trim() || renameDraft.trim() === (active?.title || "")}
+                      onClick={handleRenameGroup}
+                      sx={{ flexShrink: 0 }}
                     >
-                      <ListItemText primary={p.display_name} secondary={p.online ? "Online" : "Offline"} />
-                    </ListItemButton>
-                  ))}
+                      Rename
+                    </Button>
+                  </Stack>
+                </Paper>
+
+                <Paper
+                  variant="outlined"
+                  sx={{ px: 1.5, py: 0.75, borderColor: "#D5E3DD", borderRadius: 2 }}
+                >
+                  <FormControlLabel
+                    sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
+                    labelPlacement="start"
+                    control={
+                      <Switch
+                        checked={active?.members_can_add !== false}
+                        onChange={(_, v) => handleToggleMembersCanAdd(v)}
+                      />
+                    }
+                    label="Members can add others"
+                  />
+                </Paper>
+
+                <Button
+                  color="error"
+                  variant="outlined"
+                  fullWidth
+                  size="large"
+                  onClick={handleDeleteGroup}
+                  sx={{ borderRadius: 2, py: 1.1 }}
+                >
+                  Delete group for everyone
+                </Button>
+              </>
+            )}
+
+            <Paper variant="outlined" sx={{ borderColor: "#D5E3DD", borderRadius: 2, overflow: "hidden" }}>
+              <Typography variant="overline" color="text.secondary" sx={{ px: 1.5, pt: 1.25, display: "block" }}>
+                Members
+              </Typography>
+              <List dense disablePadding>
+                {members.map((m) => (
+                  <ListItemButton key={m.user_id} disableRipple sx={{ cursor: "default", py: 0.85 }}>
+                    <ListItemText
+                      primary={m.user_id === profile.id ? `${m.display_name} (you)` : m.display_name}
+                      secondary={m.role === "admin" ? "Admin" : "Member"}
+                      primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }}
+                    />
+                    {m.role === "admin" && (
+                      <Chip
+                        size="small"
+                        label="Admin"
+                        icon={<AdminPanelSettingsIcon fontSize="small" />}
+                        sx={{ mr: 1 }}
+                      />
+                    )}
+                    {isAdmin && m.user_id !== profile.id && (
+                      <>
+                        <Button
+                          size="small"
+                          sx={{ mr: 0.5, textTransform: "none" }}
+                          onClick={() =>
+                            handleSetMemberRole(
+                              m.user_id,
+                              m.role === "admin" ? "member" : "admin"
+                            )
+                          }
+                        >
+                          {m.role === "admin" ? "Demote" : "Make admin"}
+                        </Button>
+                        <IconButton
+                          aria-label={`Remove ${m.display_name}`}
+                          size="small"
+                          onClick={() => handleRemoveMember(m.user_id, m.display_name)}
+                        >
+                          <PersonRemoveIcon fontSize="small" />
+                        </IconButton>
+                      </>
+                    )}
+                  </ListItemButton>
+                ))}
               </List>
-              {!others.filter((p) => !members.some((m) => m.user_id === p.user_id)).length && (
-                <Typography color="text.secondary" variant="body2" sx={{ px: 1, pb: 1 }}>
-                  No other people on the LAN to add.
-                </Typography>
-              )}
-            </>
-          )}
+            </Paper>
+
+            {canAddMembers && (
+              <Paper variant="outlined" sx={{ borderColor: "#D5E3DD", borderRadius: 2, overflow: "hidden" }}>
+                <Box
+                  sx={{
+                    px: 1.5,
+                    pt: 1.25,
+                    pb: 0.5,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 1,
+                  }}
+                >
+                  <Typography variant="overline" color="text.secondary" sx={{ flex: 1 }}>
+                    Add people
+                  </Typography>
+                  <Button
+                    size="small"
+                    variant="contained"
+                    disabled={!addPick.length}
+                    onClick={handleAddMembers}
+                  >
+                    Add{addPick.length ? ` (${addPick.length})` : ""}
+                  </Button>
+                </Box>
+                <List dense disablePadding>
+                  {others
+                    .filter((p) => !members.some((m) => m.user_id === p.user_id))
+                    .map((p) => (
+                      <ListItemButton
+                        key={p.user_id}
+                        selected={addPick.includes(p.user_id)}
+                        onClick={() =>
+                          setAddPick((g) =>
+                            g.includes(p.user_id)
+                              ? g.filter((x) => x !== p.user_id)
+                              : [...g, p.user_id]
+                          )
+                        }
+                      >
+                        <ListItemText
+                          primary={p.display_name}
+                          secondary={p.online ? "Online" : "Offline"}
+                          primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }}
+                        />
+                      </ListItemButton>
+                    ))}
+                </List>
+                {!others.filter((p) => !members.some((m) => m.user_id === p.user_id)).length && (
+                  <Typography color="text.secondary" variant="body2" sx={{ px: 1.5, pb: 1.5 }}>
+                    No other people on the LAN to add.
+                  </Typography>
+                )}
+              </Paper>
+            )}
+          </Stack>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           {inGroup && (
@@ -2369,11 +3033,6 @@ function ChatScreen({
           )}
           <Box flex={1} />
           <Button onClick={() => setMembersOpen(false)}>Close</Button>
-          {isAdmin && (
-            <Button variant="contained" disabled={!addPick.length} onClick={handleAddMembers}>
-              Add
-            </Button>
-          )}
         </DialogActions>
       </Dialog>
     </Box>
@@ -2383,20 +3042,47 @@ function ChatScreen({
 function SettingsScreen(props: {
   profile: Profile;
   identity: Identity;
+  version: string;
   onBack: () => void;
   onNameUpdated: (p: Profile) => void;
 }) {
   const [fp, setFp] = useState("");
   const [name, setName] = useState(props.profile.display_name);
   const [savingName, setSavingName] = useState(false);
-  const [notifEnabled, setNotifEnabled] = useState(true);
   const [status, setStatus] = useState("");
+  const [notifOn, setNotifOn] = useState(true);
+  const [notifBusy, setNotifBusy] = useState(false);
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
 
   useEffect(() => {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
-    peerApi.getNotificationsEnabled().then(setNotifEnabled).catch(() => {});
+    peerApi.getNotificationsEnabled().then(setNotifOn).catch(() => setNotifOn(true));
   }, []);
+
+  async function toggleNotifications(enabled: boolean) {
+    setNotifBusy(true);
+    try {
+      if (enabled) {
+        let granted = await isPermissionGranted();
+        if (!granted) {
+          granted = (await requestPermission()) === "granted";
+        }
+        if (!granted) {
+          setStatus("Windows blocked notification permission");
+          setNotifOn(false);
+          await peerApi.setNotificationsEnabled(false);
+          return;
+        }
+      }
+      await peerApi.setNotificationsEnabled(enabled);
+      setNotifOn(enabled);
+      setStatus(enabled ? "Desktop notifications on" : "Desktop notifications off");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    } finally {
+      setNotifBusy(false);
+    }
+  }
 
   async function saveName() {
     const trimmed = name.trim();
@@ -2410,19 +3096,6 @@ function SettingsScreen(props: {
       setStatus(err?.message || String(err));
     } finally {
       setSavingName(false);
-    }
-  }
-
-  async function toggleNotifications(checked: boolean) {
-    setNotifEnabled(checked);
-    try {
-      await peerApi.setNotificationsEnabled(checked);
-      if (checked) {
-        const granted = await ensureBrowserNotifyPermission();
-        if (!granted) setStatus("Notifications are blocked in the browser/OS");
-      }
-    } catch (err: any) {
-      setStatus(err?.message || String(err));
     }
   }
 
@@ -2440,8 +3113,41 @@ function SettingsScreen(props: {
       <Stack direction="row" alignItems="center" spacing={1} mb={3}>
         <Button onClick={props.onBack}>Back</Button>
         <Typography variant="h5">Settings</Typography>
+        <Chip size="small" label={`v${props.version}`} sx={{ ml: "auto" }} />
       </Stack>
       <Stack spacing={3}>
+        <Paper sx={{ p: 2.5 }} variant="outlined">
+          <Typography variant="h6" gutterBottom>
+            About
+          </Typography>
+          <Typography variant="body1" fontWeight={600}>
+            PeerTalk {props.version}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+            Installed builds update in place — run a newer Install-PeerTalk.bat (or setup.exe) to
+            upgrade. Chat data stays in your Windows app data folder.
+          </Typography>
+        </Paper>
+
+        <Paper sx={{ p: 2.5 }} variant="outlined">
+          <Typography variant="h6" gutterBottom>
+            Notifications
+          </Typography>
+          <FormControlLabel
+            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
+            labelPlacement="start"
+            disabled={notifBusy}
+            control={
+              <Switch checked={notifOn} onChange={(_, v) => toggleNotifications(v)} />
+            }
+            label="Desktop notifications for new messages"
+          />
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Uses Windows toast notifications (not the browser prompt). Muted chats stay quiet.
+            Toasts appear when the chat is not open or PeerTalk is in the background.
+          </Typography>
+        </Paper>
+
         <Paper sx={{ p: 2.5 }} variant="outlined">
           <Typography variant="h6" gutterBottom>
             Profile
@@ -2484,24 +3190,6 @@ function SettingsScreen(props: {
           </Stack>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             Listening port: Managed automatically
-          </Typography>
-        </Paper>
-
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Notifications
-          </Typography>
-          <FormControlLabel
-            control={
-              <Switch
-                checked={notifEnabled}
-                onChange={(e) => toggleNotifications(e.target.checked)}
-              />
-            }
-            label="Desktop notifications for new messages"
-          />
-          <Typography variant="body2" color="text.secondary">
-            Muted chats never notify, even when this is on.
           </Typography>
         </Paper>
 
