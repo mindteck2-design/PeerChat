@@ -1985,6 +1985,183 @@ fn delete_bundle_file(app: AppHandle, path: String) -> Result<(), String> {
     std::fs::remove_file(path).map_err(explain_io)
 }
 
+// ─── Virus scanning ──────────────────────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+struct ScanResult {
+    clean: bool,
+    engine: String,
+    detail: String,
+    skipped: bool,
+}
+
+/// Scan a file path with the system AV (Windows Defender on Windows).
+/// Returns {clean, engine, detail, skipped}. Never returns Err — on failure
+/// the result is skipped=true so the caller can decide how to proceed.
+#[tauri::command]
+fn scan_file(path: String) -> ScanResult {
+    scan_file_inner(&path)
+}
+
+fn scan_file_inner(path: &str) -> ScanResult {
+    #[cfg(target_os = "windows")]
+    {
+        windows_defender_scan(path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ScanResult {
+            clean: true,
+            engine: "none".to_string(),
+            detail: "Virus scanning requires Windows (Windows Defender). Not available on this platform.".to_string(),
+            skipped: true,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_defender_scan(path: &str) -> ScanResult {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
+    let pf86 = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+    let candidates = [
+        format!(r"{pf}\Windows Defender\MpCmdRun.exe"),
+        format!(r"{pf86}\Windows Defender\MpCmdRun.exe"),
+    ];
+    let exe = match candidates.iter().find(|p| std::path::Path::new(p.as_str()).exists()) {
+        Some(e) => e,
+        None => {
+            return ScanResult {
+                clean: true,
+                engine: "none".to_string(),
+                detail: "Windows Defender (MpCmdRun.exe) not found — scan skipped".to_string(),
+                skipped: true,
+            };
+        }
+    };
+
+    match std::process::Command::new(exe)
+        .args(["-Scan", "-ScanType", "3", "-File", path])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(out) => match out.status.code().unwrap_or(-1) {
+            0 => ScanResult {
+                clean: true,
+                engine: "Windows Defender".to_string(),
+                detail: "No threats detected".to_string(),
+                skipped: false,
+            },
+            2 => ScanResult {
+                clean: false,
+                engine: "Windows Defender".to_string(),
+                detail: "Threat detected — Windows Defender flagged this file as malicious".to_string(),
+                skipped: false,
+            },
+            c => ScanResult {
+                clean: true,
+                engine: "Windows Defender".to_string(),
+                detail: format!("Scan inconclusive (exit {c}) — treating file as safe"),
+                skipped: true,
+            },
+        },
+        Err(e) => ScanResult {
+            clean: true,
+            engine: "Windows Defender".to_string(),
+            detail: format!("Scan error: {e} — treating file as safe"),
+            skipped: true,
+        },
+    }
+}
+
+// ─── Windows shell integration ("Share in PeerChat" right-click) ──────────────
+
+/// Write HKCU shell verb so "Share in PeerChat" appears on right-click for all files.
+/// exe_path should be the full path to PeerChat.exe.
+#[tauri::command]
+fn install_shell_extension(exe_path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        shell_verb_write(&exe_path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Shell integration is only available on Windows".into())
+    }
+}
+
+/// Remove the HKCU shell verb.
+#[tauri::command]
+fn uninstall_shell_extension() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        shell_verb_remove()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Shell integration is only available on Windows".into())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn shell_verb_write(exe_path: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let verb_key = r"HKCU\Software\Classes\*\shell\ShareInPeerChat";
+    let cmd_key = format!(r"{verb_key}\command");
+
+    let run = |args: &[&str]| -> bool {
+        std::process::Command::new("reg")
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+
+    run(&["add", verb_key, "/ve", "/d", "Share in PeerChat", "/f"]);
+    run(&["add", verb_key, "/v", "Icon", "/d", &format!("{exe_path},0"), "/f"]);
+    let cmd_val = format!("\"{exe_path}\" --share \"%1\"");
+    run(&["add", &cmd_key, "/ve", "/d", &cmd_val, "/f"]);
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn shell_verb_remove() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let _ = std::process::Command::new("reg")
+        .args(["delete", r"HKCU\Software\Classes\*\shell\ShareInPeerChat", "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    Ok(())
+}
+
+/// Check whether the shell verb is currently registered.
+#[tauri::command]
+fn shell_extension_installed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("reg")
+            .args(["query", r"HKCU\Software\Classes\*\shell\ShareInPeerChat"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -2027,6 +2204,25 @@ pub fn run() {
                     p["listen_port"].as_u64().unwrap_or(9876) as u16,
                 );
             }
+
+            // Handle --share <file> [<file>...] launched from the right-click context menu.
+            // We delay the emit slightly so the React app has time to mount its listener.
+            let raw_args: Vec<String> = std::env::args().collect();
+            if let Some(pos) = raw_args.iter().position(|a| a == "--share") {
+                let files: Vec<String> = raw_args[pos + 1..]
+                    .iter()
+                    .take_while(|a| !a.starts_with("--"))
+                    .cloned()
+                    .collect();
+                if !files.is_empty() {
+                    let handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(900)).await;
+                        let _ = handle.emit("share-files", files);
+                    });
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2095,6 +2291,10 @@ pub fn run() {
             pack_bundle,
             read_bundle_chunk,
             delete_bundle_file,
+            scan_file,
+            install_shell_extension,
+            uninstall_shell_extension,
+            shell_extension_installed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PeerChat");

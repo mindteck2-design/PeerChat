@@ -127,7 +127,7 @@ import {
   TransfersPanel,
   type BundleItem,
 } from "./panels";
-import type { SavedItem, TransferLog } from "./peer";
+import type { SavedItem, ScanResult, TransferLog } from "./peer";
 import { ThemeMode } from "./theme";
 
 type Screen = "setup" | "chat" | "settings";
@@ -557,6 +557,8 @@ function ChatScreen({
   const [forwardPick, setForwardPick] = useState("");
 
   const [fileNames, setFileNames] = useState<Record<string, string>>({});
+  const [pendingShareFiles, setPendingShareFiles] = useState<string[]>([]);
+  const [scanWarn, setScanWarn] = useState<{ detail: string; onProceed: () => void } | null>(null);
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLInputElement | null>(null);
@@ -877,6 +879,28 @@ function ChatScreen({
       cancel = true;
     };
   }, [messages, active?.id]);
+
+  // Listen for --share <file> launched from the Windows right-click context menu.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen<string[]>("share-files", (event) => {
+      setPendingShareFiles(event.payload || []);
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
+
+  // When pendingShareFiles arrives, stage them as outgoing files on the active conversation.
+  // If no conversation is active, just keep them queued and let the user select one first.
+  useEffect(() => {
+    if (!pendingShareFiles.length || !active) return;
+    const files = pendingShareFiles;
+    setPendingShareFiles([]);
+    for (const path of files) {
+      const name = path.replace(/\\/g, "/").split("/").pop() || "shared-file";
+      sendFile({ path, name, size: 0 });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingShareFiles, active?.id]);
 
   function selectConversation(c: Conversation) {
     const prev = activeRef.current;
@@ -1329,6 +1353,33 @@ function ChatScreen({
     const name = file instanceof File ? file.name : file.name;
     const size = file instanceof File ? file.size : file.size;
     const conversationId = active.id;
+
+    // Virus scan outgoing file before encrypting.
+    const scanPath = file instanceof File
+      ? (file as File & { path?: string }).path ?? ""
+      : file.path;
+    if (scanPath) {
+      try {
+        const scan = await peerApi.scanFile(scanPath);
+        if (!scan.clean) {
+          // Threat found — require explicit confirmation before sending.
+          await new Promise<void>((resolve, reject) => {
+            setScanWarn({
+              detail: scan.detail,
+              onProceed: () => { setScanWarn(null); resolve(); },
+            });
+            // If user closes without confirming, reject after 60 s to avoid hanging.
+            setTimeout(() => { setScanWarn(null); reject(new Error("scan warning dismissed")); }, 60_000);
+          });
+        }
+      } catch (err: any) {
+        if (String(err?.message || err).includes("dismissed")) {
+          setStatus("File not sent (virus scan warning).");
+          return;
+        }
+        // scan infrastructure error — proceed (non-blocking for scanner failures)
+      }
+    }
     const chunkCount = Math.max(1, Math.ceil(size / CHUNK_SIZE));
     const transferId = `send-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const started = new Date().toISOString();
@@ -1695,9 +1746,22 @@ function ChatScreen({
       });
       const path = await peerApi.finalizeFileReceive(fileId, name);
       const check = await peerApi.verifyDownloadedFile(fileId);
+
+      // Virus scan the assembled file before accepting it.
+      const scanResult = await peerApi.scanFile(path).catch((): ScanResult => ({
+        clean: true, engine: "none", detail: "scan unavailable", skipped: true,
+      }));
+      if (!scanResult.clean) {
+        // Threat confirmed — delete the file and abort.
+        try { await import("@tauri-apps/api/path").then(() => peerApi.discardFileReceive(fileId)); } catch {}
+        try { await (await import("@tauri-apps/api/core")).invoke("plugin:fs|remove_file", { path }); } catch {}
+        throw new Error(`Blocked by virus scanner (${scanResult.engine}): ${scanResult.detail}`);
+      }
+
       if (uploaderId !== profile.id) {
         await peerApi.ackFileDownload(fileId, uploaderId).catch(() => {});
       }
+      const scanNote = scanResult.skipped ? null : `Scanned clean by ${scanResult.engine}`;
       await recordTransfer({
         id: transferId,
         filename: name,
@@ -1707,11 +1771,12 @@ function ChatScreen({
         bytes_done: Number(file.size_bytes) || 0,
         verified: !!check.verified,
         file_id: fileId,
-        error: check.verified ? null : check.reason || null,
+        error: check.verified ? null : (check.reason || null),
         peer_label: senderLabel(uploaderId),
         started_at: started,
       });
-      setStatus(check.verified ? `Saved and verified: ${path}` : `Saved (sender sent no hash): ${path}`);
+      const verifyNote = check.verified ? "verified ✓" : "sender sent no hash";
+      setStatus(`Saved (${verifyNote}${scanNote ? ` · ${scanNote}` : ""}): ${path}`);
     } catch (err: any) {
       const raw = String(err?.message || err);
       if (raw === "aborted") {
@@ -3781,6 +3846,44 @@ function ChatScreen({
         onClose={() => setHelpOpen(false)}
         ctx={commandCtx}
       />
+
+      {/* Virus scan warning — threat found on outgoing file */}
+      <Dialog open={!!scanWarn} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ color: "error.main" }}>⚠ Virus threat detected</DialogTitle>
+        <DialogContent>
+          <Alert severity="error" sx={{ mb: 1.5 }}>
+            {scanWarn?.detail}
+          </Alert>
+          <Typography variant="body2">
+            Windows Defender flagged this file before encryption. Sending it will still
+            encrypt and deliver it, but the recipient's scanner may also block it.
+          </Typography>
+          <Typography variant="body2" sx={{ mt: 1 }} color="text.secondary">
+            For most use cases you should <strong>not</strong> send this file.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => { setScanWarn(null); setStatus("File not sent (virus scan warning)."); }}>
+            Cancel — don't send
+          </Button>
+          <Button color="error" variant="contained" onClick={() => scanWarn?.onProceed()}>
+            Send anyway
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Pending share files notice — shown when launched via right-click Share */}
+      {pendingShareFiles.length > 0 && !active && (
+        <Alert
+          severity="info"
+          sx={{ position: "absolute", bottom: 80, left: 16, right: 16, zIndex: 10 }}
+          onClose={() => setPendingShareFiles([])}
+        >
+          {pendingShareFiles.length === 1
+            ? `Ready to share "${pendingShareFiles[0].split(/[/\\]/).pop()}" — select a conversation first.`
+            : `${pendingShareFiles.length} files ready to share — select a conversation first.`}
+        </Alert>
+      )}
     </Box>
   );
 }
@@ -3801,6 +3904,8 @@ function SettingsScreen(props: {
   const [notifBusy, setNotifBusy] = useState(false);
   const [downloadDir, setDownloadDir] = useState("");
   const [gamesEnabled, setGamesEnabled] = useState(true);
+  const [shellExt, setShellExt] = useState(false);
+  const [shellBusy, setShellBusy] = useState(false);
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
 
   useEffect(() => {
@@ -3808,6 +3913,7 @@ function SettingsScreen(props: {
     peerApi.getNotificationsEnabled().then(setNotifOn).catch(() => setNotifOn(true));
     peerApi.getAppSetting("download_dir").then((v) => setDownloadDir(v || "")).catch(() => {});
     peerApi.getAppSetting("games_enabled").then((v) => setGamesEnabled(v !== "0")).catch(() => setGamesEnabled(true));
+    peerApi.shellExtensionInstalled().then(setShellExt).catch(() => setShellExt(false));
   }, []);
 
   async function toggleNotifications(enabled: boolean) {
@@ -3983,6 +4089,52 @@ function SettingsScreen(props: {
               <ContentCopyIcon fontSize="small" />
             </IconButton>
           </Stack>
+        </Paper>
+
+        <Paper sx={{ p: 2.5 }} variant="outlined">
+          <Typography variant="h6" gutterBottom>
+            Windows shell integration
+          </Typography>
+          <FormControlLabel
+            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
+            labelPlacement="start"
+            disabled={shellBusy}
+            control={
+              <Switch
+                checked={shellExt}
+                onChange={async (_, v) => {
+                  setShellBusy(true);
+                  try {
+                    if (v) {
+                      // Pass the exe path so the registry command value is correct.
+                      // On Windows, process.argv[0] or Tauri's currentExe would work;
+                      // here we fall back to a known install path as a best-effort default.
+                      const exePath = (window as any).__TAURI_INTERNALS__?.metadata?.currentExe
+                        || (window as any).__TAURI__?.metadata?.currentExe
+                        || "PeerChat.exe";
+                      await peerApi.installShellExtension(exePath);
+                      setShellExt(true);
+                      setStatus("Right-click 'Share in PeerChat' registered");
+                    } else {
+                      await peerApi.uninstallShellExtension();
+                      setShellExt(false);
+                      setStatus("Right-click 'Share in PeerChat' removed");
+                    }
+                  } catch (err: any) {
+                    setStatus(err?.message || String(err));
+                  } finally {
+                    setShellBusy(false);
+                  }
+                }}
+              />
+            }
+            label="Add 'Share in PeerChat' to right-click menu"
+          />
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Right-clicking any file in Explorer will show "Share in PeerChat". The app
+            opens directly to the file ready to send. No admin rights required — stored
+            in your user registry (HKCU). The installer also sets this automatically.
+          </Typography>
         </Paper>
 
         <Paper sx={{ p: 2.5 }} variant="outlined">

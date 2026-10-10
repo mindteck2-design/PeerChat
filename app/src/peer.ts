@@ -255,6 +255,10 @@ export const peerApi = {
   readBundleChunk: (path: string, offset: number, len: number) =>
     inv<string>("read_bundle_chunk", { path, offset, len }),
   deleteBundleFile: (path: string) => inv<void>("delete_bundle_file", { path }),
+  scanFile: (path: string) => inv<ScanResult>("scan_file", { path }),
+  installShellExtension: (exePath: string) => inv<void>("install_shell_extension", { exePath }),
+  uninstallShellExtension: () => inv<void>("uninstall_shell_extension"),
+  shellExtensionInstalled: () => inv<boolean>("shell_extension_installed"),
 };
 
 export type TransferLog = {
@@ -272,6 +276,13 @@ export type TransferLog = {
   started_at: string;
   updated_at: string;
   finished_at?: string | null;
+};
+
+export type ScanResult = {
+  clean: boolean;
+  engine: string;
+  detail: string;
+  skipped: boolean;
 };
 
 export type SavedItem = {
