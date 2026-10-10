@@ -1,4 +1,4 @@
-# LanMsg installers / binaries
+# PeerTalk installers / binaries
 
 ## Windows (available now)
 
@@ -6,12 +6,12 @@ Portable app (no installer wrapper — NSIS download was blocked on the corporat
 
 | File | Path |
 |------|------|
-| **LanMsg.exe** | `dist/windows/LanMsg.exe` |
+| **PeerTalk.exe** | `dist/windows/PeerTalk.exe` |
 
 ### Use on two PCs
 
-1. Copy `LanMsg.exe` to the other PC (USB / share).
-2. On each PC: run `LanMsg.exe` (WebView2 required — already on most Windows 10/11).
+1. Copy `PeerTalk.exe` to the other PC (USB / share).
+2. On each PC: run `PeerTalk.exe` (WebView2 required — already on most Windows 10/11).
 3. Enter a **display name** → Start.
 4. Allow firewall prompts for **UDP 41234** and **TCP 9876** (or the port you chose).
 5. Open **People** → Refresh → accept TLS fingerprint → chat.

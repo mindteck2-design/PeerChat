@@ -12,7 +12,7 @@ echo Portable exe:
 dir /b src-tauri\target\release\lanmsg.exe 2>nul
 if exist src-tauri\target\release\lanmsg.exe (
   mkdir ..\dist\windows 2>nul
-  copy /Y src-tauri\target\release\lanmsg.exe ..\dist\windows\LanMsg.exe
-  echo Copied to dist\windows\LanMsg.exe
+  copy /Y src-tauri\target\release\lanmsg.exe ..\dist\windows\PeerTalk.exe
+  echo Copied to dist\windows\PeerTalk.exe
 )
 endlocal

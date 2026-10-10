@@ -4,7 +4,7 @@
 
 | Platform | Script | Output |
 |----------|--------|--------|
-| Windows | `client/build_windows.bat` | NSIS under `bundle/nsis/` + portable `dist/windows/LanMsg.exe` |
+| Windows | `client/build_windows.bat` | NSIS under `bundle/nsis/` + portable `dist/windows/PeerTalk.exe` |
 | Linux | `client/build_linux.sh` | `.deb` → `dist/linux/` |
 
 Targets in `app/src-tauri/tauri.conf.json`: `nsis` + `deb`.

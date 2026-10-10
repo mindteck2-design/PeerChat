@@ -13,27 +13,31 @@ import {
   Divider,
   Drawer,
   Fade,
+  FormControlLabel,
   Grow,
   IconButton,
+  InputAdornment,
   List,
   ListItemButton,
+  ListItemIcon,
   ListItemText,
+  Menu,
+  MenuItem,
   Paper,
+  Popover,
   Stack,
+  Switch,
   Tab,
   Tabs,
   TextField,
   Toolbar,
+  Tooltip,
   Typography,
   CircularProgress,
   LinearProgress,
-  Menu,
-  MenuItem,
-  ListItemIcon,
 } from "@mui/material";
 import ChatIcon from "@mui/icons-material/ForumRounded";
 import SettingsIcon from "@mui/icons-material/SettingsRounded";
-import LogoutIcon from "@mui/icons-material/LogoutRounded";
 import AttachFileIcon from "@mui/icons-material/AttachFileRounded";
 import GroupAddIcon from "@mui/icons-material/GroupAddRounded";
 import RefreshIcon from "@mui/icons-material/RefreshRounded";
@@ -49,9 +53,42 @@ import MoreVertIcon from "@mui/icons-material/MoreVertRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import DeleteForeverIcon from "@mui/icons-material/DeleteForeverRounded";
 import StopCircleIcon from "@mui/icons-material/StopCircleRounded";
+import ReplyIcon from "@mui/icons-material/ReplyRounded";
+import ForwardIcon from "@mui/icons-material/ForwardRounded";
+import ContentCopyIcon from "@mui/icons-material/ContentCopyRounded";
+import PushPinIcon from "@mui/icons-material/PushPinRounded";
+import PushPinOutlinedIcon from "@mui/icons-material/PushPinOutlined";
+import EmojiEmotionsIcon from "@mui/icons-material/EmojiEmotionsRounded";
+import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettingsRounded";
+import VolumeUpIcon from "@mui/icons-material/VolumeUpRounded";
+import VolumeOffIcon from "@mui/icons-material/VolumeOffRounded";
+import SearchIcon from "@mui/icons-material/SearchRounded";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
+async function ensureBrowserNotifyPermission(): Promise<boolean> {
+  if (typeof Notification === "undefined") return false;
+  if (Notification.permission === "granted") return true;
+  if (Notification.permission === "denied") return false;
+  try {
+    const res = await Notification.requestPermission();
+    return res === "granted";
+  } catch {
+    return false;
+  }
+}
+
+function showDesktopToast(title: string, body: string) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  try {
+    new Notification(title, { body, silent: false });
+  } catch {
+    /* ignore */
+  }
+}
 import {
   peerApi,
   type Conversation,
+  type LanHost,
   type Member,
   type Message,
   type Peer,
@@ -71,12 +108,14 @@ import {
   encryptWithGroupKey,
   exportPublic,
   fingerprintPublic,
+  fromB64,
   prepareFileEncryption,
   unwrapContentKey,
   unwrapGroupKey,
   wrapGroupKeyForMembers,
   type Identity,
 } from "./crypto";
+import { EMOJI_SET, QUICK_REACTIONS } from "./emoji";
 import { getOrCreateIdentity } from "./storage";
 
 type Screen = "setup" | "chat" | "settings";
@@ -84,13 +123,6 @@ type Screen = "setup" | "chat" | "settings";
 function newUserId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   return `u-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function fromB64(s: string): Uint8Array {
-  const bin = atob(s);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
 }
 
 function dayKey(iso: string) {
@@ -153,6 +185,26 @@ function mimeForName(name: string) {
   return (ext && types[ext]) || "application/octet-stream";
 }
 
+function lastSeenLabel(iso?: string | null) {
+  if (!iso) return "Offline";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "Offline";
+  const diffMs = Date.now() - d.getTime();
+  if (diffMs < 0) return "Offline";
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "Offline · last seen just now";
+  if (mins < 60) return `Offline · last seen ${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `Offline · last seen ${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `Offline · last seen ${days}d ago`;
+}
+
+function truncate(s: string, n: number) {
+  if (!s) return s;
+  return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
 type FilePreview = {
   fileId: string;
   uploaderId: string;
@@ -161,6 +213,28 @@ type FilePreview = {
   mime: string;
   data: Uint8Array;
   localPath?: string | null;
+};
+
+type StagedFile = {
+  id: string;
+  file: File;
+  previewUrl: string | null;
+};
+
+type OutgoingFileState = {
+  conversationId: string;
+  fileId?: string;
+  stagingDir?: string;
+  name: string;
+  done: number;
+  total: number;
+};
+
+type IncomingFileState = {
+  fileId: string;
+  name: string;
+  done: number;
+  total: number;
 };
 
 export default function App() {
@@ -215,20 +289,13 @@ export default function App() {
         profile={profile}
         identity={identity}
         onBack={() => setScreen("chat")}
-        onReset={() => {
-          setProfile(null);
-          setScreen("setup");
-        }}
+        onNameUpdated={(p) => setProfile(p)}
       />
     );
   }
 
   return (
-    <ChatScreen
-      profile={profile}
-      identity={identity}
-      onSettings={() => setScreen("settings")}
-    />
+    <ChatScreen profile={profile} identity={identity} onSettings={() => setScreen("settings")} />
   );
 }
 
@@ -239,20 +306,23 @@ function SetupScreen(props: {
   onReady: (p: Profile) => void;
 }) {
   const [name, setName] = useState("");
-  const [port, setPort] = useState(9876);
   const [busy, setBusy] = useState(false);
   const pubs = exportPublic(props.identity);
 
   async function create() {
     props.setError("");
+    const displayName = name.trim();
+    if (!displayName) {
+      props.setError("Please enter a display name");
+      return;
+    }
     setBusy(true);
     try {
       const p = await peerApi.setupProfile({
-        displayName: name.trim() || "LanMsg User",
+        displayName,
         userId: newUserId(),
         x25519Public: pubs.x25519_public,
         ed25519Public: pubs.ed25519_public,
-        listenPort: port,
       });
       props.onReady(p);
     } catch (e: any) {
@@ -276,14 +346,14 @@ function SetupScreen(props: {
       <Fade in timeout={500}>
         <Paper elevation={0} sx={{ width: "min(440px, 100%)", p: 4, border: "1px solid #D5E3DD" }}>
           <Typography variant="overline" color="primary" letterSpacing={2}>
-            LanMsg
+            PeerTalk
           </Typography>
           <Typography variant="h4" sx={{ mt: 0.5, mb: 1 }}>
             Your desk identity
           </Typography>
           <Typography color="text.secondary" sx={{ mb: 3 }}>
-            Peer-to-peer on your LAN. No central server — chats live on your PC (SQLite) and deliver
-            when peers are online.
+            Peer-to-peer on your LAN. No central server — chats live on your PC (SQLite) and
+            deliver when peers are online. Your listening port is managed automatically.
           </Typography>
           <Stack spacing={2}>
             <TextField
@@ -292,18 +362,16 @@ function SetupScreen(props: {
               value={name}
               onChange={(e) => setName(e.target.value)}
               autoFocus
-            />
-            <TextField
-              label="Listen port"
-              type="number"
-              fullWidth
-              value={port}
-              onChange={(e) => setPort(Number(e.target.value) || 9876)}
-              helperText="TCP HTTPS peer port (default 9876). UDP discovery uses 41234."
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  create();
+                }
+              }}
             />
             {props.error && <Alert severity="error">{props.error}</Alert>}
             <Button variant="contained" size="large" disabled={busy} onClick={create}>
-              {busy ? "Starting…" : "Start LanMsg"}
+              {busy ? "Starting…" : "Start PeerTalk"}
             </Button>
           </Stack>
         </Paper>
@@ -322,55 +390,166 @@ function ChatScreen({
   onSettings: () => void;
 }) {
   const [peers, setPeers] = useState<Peer[]>([]);
+  const [lanHosts, setLanHosts] = useState<LanHost[]>([]);
   const [convs, setConvs] = useState<Conversation[]>([]);
   const [active, setActive] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [text, setText] = useState("");
   const [plain, setPlain] = useState<Record<string, string>>({});
   const [groupKeys, setGroupKeys] = useState<Record<string, Uint8Array>>({});
   const [tab, setTab] = useState(0);
+  const [chatSearch, setChatSearch] = useState("");
+
+  const [text, setText] = useState("");
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [emojiAnchor, setEmojiAnchor] = useState<HTMLElement | null>(null);
+  const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
+
   const [groupOpen, setGroupOpen] = useState(false);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPick, setGroupPick] = useState<string[]>([]);
+
   const [status, setStatus] = useState("");
   const [pinOpen, setPinOpen] = useState<Peer | null>(null);
-  const [pendingFile, setPendingFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [fileNames, setFileNames] = useState<Record<string, string>>({});
+
   const [members, setMembers] = useState<Member[]>([]);
   const [membersLoaded, setMembersLoaded] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   const [addPick, setAddPick] = useState<string[]>([]);
+
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
-  const [outgoingFile, setOutgoingFile] = useState<{
-    conversationId: string;
-    fileId?: string;
-    stagingDir?: string;
-    name: string;
-    done: number;
-    total: number;
-  } | null>(null);
-  const [incomingFile, setIncomingFile] = useState<{
-    fileId: string;
-    name: string;
-    done: number;
-    total: number;
-  } | null>(null);
-  const [msgMenu, setMsgMenu] = useState<{
-    anchor: HTMLElement;
-    message: Message;
-  } | null>(null);
+  const [outgoingFile, setOutgoingFile] = useState<OutgoingFileState | null>(null);
+  const [incomingFile, setIncomingFile] = useState<IncomingFileState | null>(null);
+
+  const [msgMenu, setMsgMenu] = useState<{ anchor: HTMLElement; message: Message } | null>(null);
+  const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
+  const [forwardPick, setForwardPick] = useState("");
+
+  const [fileNames, setFileNames] = useState<Record<string, string>>({});
+  const [notifEnabled, setNotifEnabled] = useState(true);
+
   const scroller = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLInputElement | null>(null);
+  const chatSearchRef = useRef<HTMLInputElement | null>(null);
   const groupKeysRef = useRef(groupKeys);
   groupKeysRef.current = groupKeys;
   const abortSendRef = useRef(false);
   const abortOpenRef = useRef(false);
+  const queueAbortRef = useRef(false);
+  const activeRef = useRef<Conversation | null>(null);
+  const notifEnabledRef = useRef(true);
+  const lastMsgIdRef = useRef<Record<string, string>>({});
+
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
+  useEffect(() => {
+    notifEnabledRef.current = notifEnabled;
+  }, [notifEnabled]);
 
   const others = useMemo(
     () => peers.filter((p) => p.user_id !== profile.id),
     [peers, profile.id]
   );
+
+  const filteredConvs = useMemo(() => {
+    const q = chatSearch.trim().toLowerCase();
+    if (!q) return convs;
+    return convs.filter((c) => {
+      const title = (c.kind === "dm" ? c.peer_name : c.title) || "";
+      return title.toLowerCase().includes(q);
+    });
+  }, [convs, chatSearch]);
+
+  const isAdmin = useMemo(
+    () =>
+      !!active &&
+      active.kind === "group" &&
+      members.some((m) => m.user_id === profile.id && m.role === "admin"),
+    [active, members, profile.id]
+  );
+
+  const inGroup =
+    active?.kind !== "group" || !membersLoaded || members.some((m) => m.user_id === profile.id);
+
+  async function ensureNotifPermission() {
+    return ensureBrowserNotifyPermission();
+  }
+
+  async function ensureGroupKey(convId: string) {
+    const existing = groupKeysRef.current[convId];
+    if (existing) return existing;
+    const wrap = await peerApi.getGroupKey(convId);
+    if (!wrap) throw new Error("Missing group key");
+    const gk = unwrapGroupKey(wrap, identity);
+    setGroupKeys((g) => ({ ...g, [convId]: gk }));
+    groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
+    return gk;
+  }
+
+  async function resolveMemberIds(conv: Conversation): Promise<string[]> {
+    if (conv.kind === "dm" && conv.peer_id) return [conv.peer_id, profile.id];
+    return peerApi.memberIds(conv.id);
+  }
+
+  async function pollNotifications(conversations: Conversation[]) {
+    if (!notifEnabledRef.current) return;
+    for (const conv of conversations) {
+      try {
+        const msgs = await peerApi.listMessages(conv.id);
+        const last = msgs[msgs.length - 1];
+        const prevId = lastMsgIdRef.current[conv.id];
+        if (prevId === undefined) {
+          lastMsgIdRef.current[conv.id] = last?.id ?? "";
+          continue;
+        }
+        if (!last || last.id === prevId) continue;
+        const prevIdx = msgs.findIndex((m) => m.id === prevId);
+        const newOnes = prevIdx === -1 ? [last] : msgs.slice(prevIdx + 1);
+        lastMsgIdRef.current[conv.id] = last.id;
+        const incoming = newOnes.filter((m) => m.sender_id !== profile.id);
+        if (!incoming.length || conv.muted) continue;
+        let focused = false;
+        if (activeRef.current?.id === conv.id) {
+          try {
+            focused = await getCurrentWindow().isFocused();
+          } catch {
+            focused = false;
+          }
+        }
+        if (activeRef.current?.id === conv.id && focused) continue;
+        const granted = await ensureNotifPermission();
+        if (!granted) continue;
+        for (const m of incoming) {
+          let body = "";
+          if (m.kind === "file_notice") {
+            body = "Sent a file";
+          } else if (m.kind === "text") {
+            try {
+              if (conv.kind === "group") {
+                const gk = await ensureGroupKey(conv.id);
+                body = await decryptWithGroupKey(m, gk);
+              } else {
+                body = await decryptMessage(
+                  { ...m, wrapped_keys: m.wrapped_keys || {} },
+                  profile.id,
+                  identity
+                );
+              }
+            } catch {
+              body = "New message";
+            }
+          } else {
+            continue;
+          }
+          const title = conv.kind === "dm" ? conv.peer_name || "PeerTalk" : conv.title || "Group";
+          showDesktopToast(title, body.slice(0, 80));
+        }
+      } catch {
+        /* ignore this conversation this cycle */
+      }
+    }
+  }
 
   async function refresh() {
     try {
@@ -378,15 +557,37 @@ function ChatScreen({
     } catch {
       /* ignore */
     }
-    const [p, c] = await Promise.all([peerApi.listPeers(), peerApi.listConversations()]);
+    const [p, c, hosts] = await Promise.all([
+      peerApi.listPeers(),
+      peerApi.listConversations(),
+      peerApi.listLanHosts().catch(() => []),
+    ]);
     setPeers(p);
     setConvs(c);
+    setLanHosts(hosts);
+    pollNotifications(c).catch(() => {});
   }
+
+  useEffect(() => {
+    peerApi.getNotificationsEnabled().then(setNotifEnabled).catch(() => {});
+  }, []);
 
   useEffect(() => {
     refresh().catch(console.error);
     const t = setInterval(() => refresh().catch(() => {}), 5000);
     return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setTab(1);
+        requestAnimationFrame(() => chatSearchRef.current?.focus());
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   useEffect(() => {
@@ -399,7 +600,8 @@ function ChatScreen({
     setMembersLoaded(conv.kind !== "group");
     setMembersOpen(false);
     setAddPick([]);
-    clearStagedFile();
+    setReplyTo(null);
+    clearStagedFiles();
 
     async function pull() {
       if (conv.kind === "group" && !groupKeysRef.current[conv.id]) {
@@ -435,6 +637,7 @@ function ChatScreen({
       cancel = true;
       clearInterval(t);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.id]);
 
   useEffect(() => {
@@ -504,67 +707,195 @@ function ChatScreen({
     };
   }, [messages, active?.id]);
 
+  function selectConversation(c: Conversation) {
+    setMessages([]);
+    setPlain({});
+    setReplyTo(null);
+    setActive(c);
+  }
+
   async function openDm(peer: Peer) {
     if (!peer.pinned && peer.tls_fingerprint) {
       setPinOpen(peer);
       return;
     }
     const c = await peerApi.openDm(peer.user_id);
-    setMessages([]);
-    setPlain({});
-    setActive(c);
+    selectConversation(c);
+    setTab(1);
     await refresh();
   }
 
-  function stageFile(file: File) {
-    setPreviewUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return file.type.startsWith("image/") ? URL.createObjectURL(file) : null;
+  function stageFiles(files: File[]) {
+    const next = files.map((file) => ({
+      id: `${file.name}-${file.size}-${Math.random().toString(16).slice(2)}`,
+      file,
+      previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
+    }));
+    setStagedFiles((prev) => [...prev, ...next]);
+  }
+
+  function removeStagedFile(id: string) {
+    setStagedFiles((prev) => {
+      const found = prev.find((f) => f.id === id);
+      if (found?.previewUrl) URL.revokeObjectURL(found.previewUrl);
+      return prev.filter((f) => f.id !== id);
     });
-    setPendingFile(file);
   }
 
-  function clearStagedFile() {
-    setPreviewUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
+  function clearStagedFiles() {
+    setStagedFiles((prev) => {
+      for (const f of prev) if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
+      return [];
     });
-    setPendingFile(null);
   }
 
-  async function ensureGroupKey(convId: string) {
-    const existing = groupKeysRef.current[convId];
-    if (existing) return existing;
-    const wrap = await peerApi.getGroupKey(convId);
-    if (!wrap) throw new Error("Missing group key");
-    const gk = unwrapGroupKey(wrap, identity);
-    setGroupKeys((g) => ({ ...g, [convId]: gk }));
-    groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
-    return gk;
+  async function sendControlMessage(
+    conv: Conversation,
+    kind: "reaction" | "pin" | "unpin",
+    targetId: string,
+    emoji = ""
+  ) {
+    const memberIds = await resolveMemberIds(conv);
+    await peerApi.sendMessage(
+      conv.id,
+      {
+        kind,
+        sender_id: profile.id,
+        ciphertext: emoji,
+        nonce: "",
+        wrapped_keys: {},
+        signature: "",
+        reply_to: targetId,
+      },
+      memberIds.filter((id) => id !== profile.id)
+    );
   }
 
-  async function sendText(body: string) {
+  async function reactToMessage(message: Message, emoji: string) {
+    if (!active) return;
+    try {
+      await sendControlMessage(active, "reaction", message.id, emoji);
+      setMessages(await peerApi.listMessages(active.id));
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function togglePinMessage(message: Message) {
+    if (!active) return;
+    setMsgMenu(null);
+    try {
+      await sendControlMessage(active, message.pinned ? "unpin" : "pin", message.id);
+      setMessages(await peerApi.listMessages(active.id));
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  function startReply(message: Message) {
+    setReplyTo(message);
+    setMsgMenu(null);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  async function copyMessage(message: Message) {
+    setMsgMenu(null);
+    const content = plain[message.id] || "";
+    try {
+      await navigator.clipboard.writeText(content);
+      setStatus("Copied to clipboard");
+    } catch {
+      setStatus("Could not copy");
+    }
+  }
+
+  function startForward(message: Message) {
+    setForwardMessage(message);
+    setForwardPick("");
+    setMsgMenu(null);
+  }
+
+  async function confirmForward() {
+    if (!forwardMessage || !forwardPick) return;
+    const target = convs.find((c) => c.id === forwardPick);
+    if (!target) return;
+    const body = plain[forwardMessage.id];
+    if (!body) {
+      setStatus("Nothing to forward");
+      return;
+    }
+    try {
+      if (target.kind === "dm" && target.peer_id) {
+        const peer = peers.find((p) => p.user_id === target.peer_id);
+        if (!peer) throw new Error("Peer not found");
+        const pubs: Record<string, string> = {
+          [peer.user_id]: peer.x25519_public,
+          [profile.id]: exportPublic(identity).x25519_public,
+        };
+        const enc = await encryptMessage(body, target.id, profile.id, identity, pubs);
+        await peerApi.sendMessage(
+          target.id,
+          { kind: "text", sender_id: profile.id, ...enc },
+          [peer.user_id]
+        );
+      } else {
+        const gk = await ensureGroupKey(target.id);
+        const enc = await encryptWithGroupKey(body, target.id, profile.id, gk, identity);
+        const memberIds = await peerApi.memberIds(target.id);
+        await peerApi.sendMessage(
+          target.id,
+          { kind: "text", sender_id: profile.id, ...enc },
+          memberIds.filter((id) => id !== profile.id)
+        );
+      }
+      setStatus("Forwarded");
+      if (active?.id === target.id) setMessages(await peerApi.listMessages(target.id));
+      setForwardMessage(null);
+      setForwardPick("");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function togglePinChat(conv: Conversation) {
+    try {
+      await peerApi.setConversationPinned(conv.id, !conv.pinned_at);
+      await refresh();
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function toggleMuteChat(conv: Conversation) {
+    try {
+      await peerApi.setConversationMuted(conv.id, !conv.muted);
+      await refresh();
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function sendText(body: string, replyToId?: string) {
     if (!active || !body.trim()) return;
-    const memberIds =
-      active.kind === "dm" && active.peer_id
-        ? [active.peer_id, profile.id]
-        : await peerApi.memberIds(active.id);
-
     let message: any;
     if (active.kind === "dm" && active.peer_id) {
       const peer = peers.find((p) => p.user_id === active.peer_id);
-      if (!peer) return;
+      if (!peer) {
+        setStatus("Peer not found");
+        return;
+      }
       const pubs: Record<string, string> = {
         [peer.user_id]: peer.x25519_public,
         [profile.id]: exportPublic(identity).x25519_public,
       };
       const enc = await encryptMessage(body.trim(), active.id, profile.id, identity, pubs);
-      message = { kind: "text", sender_id: profile.id, ...enc };
+      message = { kind: "text", sender_id: profile.id, ...enc, reply_to: replyToId ?? null };
     } else {
       const gk = await ensureGroupKey(active.id);
       const enc = await encryptWithGroupKey(body.trim(), active.id, profile.id, gk, identity);
-      message = { kind: "text", sender_id: profile.id, ...enc };
+      message = { kind: "text", sender_id: profile.id, ...enc, reply_to: replyToId ?? null };
     }
+    const memberIds = await resolveMemberIds(active);
     await peerApi.sendMessage(
       active.id,
       message,
@@ -575,13 +906,20 @@ function ChatScreen({
 
   async function submitComposer() {
     if (!active) return;
-    const file = pendingFile;
+    const files = stagedFiles;
     const body = text.trim();
-    if (!file && !body) return;
-    if (file) clearStagedFile();
-    if (body) setText("");
-    if (file) await sendFile(file);
-    if (body) await sendText(body);
+    const replyId = replyTo?.id;
+    if (!files.length && !body) return;
+    setText("");
+    setReplyTo(null);
+    setStagedFiles([]);
+    for (const f of files) if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
+    if (body) await sendText(body, replyId);
+    queueAbortRef.current = false;
+    for (const sf of files) {
+      if (queueAbortRef.current) break;
+      await sendFile(sf.file);
+    }
   }
 
   function senderLabel(id: string) {
@@ -592,9 +930,6 @@ function ChatScreen({
       "Member"
     );
   }
-
-  const inGroup =
-    active?.kind !== "group" || !membersLoaded || members.some((m) => m.user_id === profile.id);
 
   const dayGroups = useMemo(() => {
     const visible = active ? messages.filter((m) => m.conversation_id === active.id) : [];
@@ -610,6 +945,7 @@ function ChatScreen({
 
   async function abortOutgoingTransfer() {
     abortSendRef.current = true;
+    queueAbortRef.current = true;
     const current = outgoingFile;
     if (current?.fileId) {
       try {
@@ -626,6 +962,16 @@ function ChatScreen({
     setIncomingFile(null);
     setPreviewBusy(false);
     setStatus("");
+  }
+
+  async function retrySend(message: Message) {
+    try {
+      await peerApi.retryMessage(message.id);
+      if (active) setMessages(await peerApi.listMessages(active.id));
+      setStatus("Retrying…");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
   }
 
   async function deleteForMe(message: Message) {
@@ -674,14 +1020,13 @@ function ChatScreen({
         chunkCount,
         wrappedKeys: wrapped_keys,
         originalPath: (file as File & { path?: string }).path || null,
+        fileCryptoV: 2,
       });
       fileId = created.file_id;
-      const staging_dir = created.staging_dir;
       setFileNames((s) => ({ ...s, [fileId!]: file.name }));
       setOutgoingFile({
         conversationId,
         fileId,
-        stagingDir: staging_dir,
         name: file.name,
         done: 0,
         total: chunkCount,
@@ -690,13 +1035,12 @@ function ChatScreen({
         if (abortSendRef.current) throw new Error("aborted");
         const slice = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
         const buf = new Uint8Array(await slice.arrayBuffer());
-        const { nonce, ciphertextB64 } = encryptChunk(contentKey, buf);
-        await peerApi.writeFileChunk(staging_dir, i, ciphertextB64, nonce);
+        const { nonce, ciphertextB64 } = encryptChunk(contentKey, buf, i);
+        await peerApi.writeFileChunk(fileId, i, ciphertextB64, nonce);
         if (i === 0 || i + 1 === chunkCount || (i + 1) % 2 === 0) {
           setOutgoingFile({
             conversationId,
             fileId,
-            stagingDir: staging_dir,
             name: file.name,
             done: i + 1,
             total: chunkCount,
@@ -748,12 +1092,20 @@ function ChatScreen({
       }
     }
     const totalChunks = Math.max(1, Number(file.chunk_count) || 1);
+    const cryptoV = Number(file.file_crypto_v) || 1;
     setIncomingFile({ fileId, name, done: 0, total: totalChunks });
     const parts: Uint8Array[] = [];
     for (let i = 0; i < totalChunks; i++) {
       if (abortOpenRef.current) throw new Error("aborted");
       const chunk = await peerApi.fetchFileChunk(fileId, i, uploaderId);
-      parts.push(decryptChunk(key, chunk.nonce, fromB64(chunk.data_b64)));
+      parts.push(
+        decryptChunk(
+          key,
+          chunk.nonce,
+          fromB64(chunk.data_b64),
+          cryptoV >= 2 ? i : undefined
+        )
+      );
       if (i === 0 || i + 1 === totalChunks || (i + 1) % 2 === 0) {
         setIncomingFile({ fileId, name, done: i + 1, total: totalChunks });
         await new Promise((r) => setTimeout(r, 0));
@@ -837,14 +1189,138 @@ function ChatScreen({
     }
   }
 
+  async function handleRemoveMember(userId: string, displayName: string) {
+    if (!active) return;
+    if (!window.confirm(`Remove ${displayName} from the group?`)) return;
+    try {
+      const remaining = members.filter((m) => m.user_id !== userId);
+      const newKey = createGroupKey();
+      const pubs: Record<string, string> = {
+        [profile.id]: exportPublic(identity).x25519_public,
+      };
+      const missing: string[] = [];
+      for (const m of remaining) {
+        if (m.user_id === profile.id) continue;
+        const p = peers.find((x) => x.user_id === m.user_id);
+        if (p) pubs[m.user_id] = p.x25519_public;
+        else missing.push(m.display_name);
+      }
+      const wraps = wrapGroupKeyForMembers(newKey, identity, pubs);
+      await peerApi.removeGroupMember(active.id, userId, wraps);
+      setGroupKeys((g) => ({ ...g, [active.id]: newKey }));
+      groupKeysRef.current = { ...groupKeysRef.current, [active.id]: newKey };
+      setMembers(await peerApi.listMembers(active.id));
+      setMessages(await peerApi.listMessages(active.id));
+      setStatus(
+        missing.length
+          ? `Removed. ${missing.join(", ")} will need to come online to get the new key.`
+          : "Removed from group"
+      );
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function handleLeaveGroup() {
+    if (!active) return;
+    if (!window.confirm("Leave this group? You will keep the messages already here.")) return;
+    try {
+      const remaining = members.filter((m) => m.user_id !== profile.id);
+      let wraps: Record<string, string> | undefined;
+      if (remaining.length) {
+        const newKey = createGroupKey();
+        const pubs: Record<string, string> = {};
+        for (const m of remaining) {
+          const p = peers.find((x) => x.user_id === m.user_id);
+          if (p) pubs[m.user_id] = p.x25519_public;
+        }
+        if (Object.keys(pubs).length) wraps = wrapGroupKeyForMembers(newKey, identity, pubs);
+      }
+      await peerApi.leaveGroup(active.id, wraps);
+      setMembersOpen(false);
+      setActive(null);
+      await refresh();
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function handleAddMembers() {
+    if (!active || !addPick.length) return;
+    try {
+      const gk = await ensureGroupKey(active.id);
+      const pubs: Record<string, string> = {};
+      for (const id of addPick) {
+        const p = peers.find((x) => x.user_id === id);
+        if (p) pubs[id] = p.x25519_public;
+      }
+      if (!Object.keys(pubs).length) {
+        setStatus("None of the selected people have been discovered yet");
+        return;
+      }
+      await peerApi.addGroupMembers(active.id, wrapGroupKeyForMembers(gk, identity, pubs));
+      setAddPick([]);
+      setMembers(await peerApi.listMembers(active.id));
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function createGroup() {
+    if (!groupTitle.trim() || !groupPick.length) return;
+    try {
+      const gk = createGroupKey();
+      const pubs: Record<string, string> = {
+        [profile.id]: exportPublic(identity).x25519_public,
+      };
+      for (const id of groupPick) {
+        const u = peers.find((x) => x.user_id === id);
+        if (u) pubs[id] = u.x25519_public;
+      }
+      const wraps = wrapGroupKeyForMembers(gk, identity, pubs);
+      const conversation = await peerApi.createGroup(groupTitle.trim(), groupPick, wraps);
+      setGroupKeys((g) => ({ ...g, [conversation.id]: gk }));
+      groupKeysRef.current = { ...groupKeysRef.current, [conversation.id]: gk };
+      const enc = await encryptWithGroupKey(
+        `${profile.display_name} started the group`,
+        conversation.id,
+        profile.id,
+        gk,
+        identity
+      );
+      await peerApi.sendMessage(
+        conversation.id,
+        { kind: "text", sender_id: profile.id, ...enc },
+        groupPick
+      );
+      setGroupOpen(false);
+      setGroupTitle("");
+      setGroupPick([]);
+      selectConversation(conversation);
+      setTab(1);
+      await refresh();
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
   return (
-    <Box sx={{ display: "flex", minHeight: "100vh", bgcolor: "background.default" }}>
+    <Box
+      sx={{
+        display: "flex",
+        height: "100vh",
+        maxHeight: "100vh",
+        overflow: "hidden",
+        bgcolor: "background.default",
+      }}
+    >
       <Drawer
         variant="permanent"
         sx={{
-          width: 300,
+          width: 320,
+          flexShrink: 0,
           [`& .MuiDrawer-paper`]: {
-            width: 300,
+            width: 320,
             height: "100%",
             display: "flex",
             flexDirection: "column",
@@ -856,12 +1332,12 @@ function ChatScreen({
       >
         <Toolbar sx={{ gap: 1 }}>
           <ChatIcon color="primary" />
-          <Box flex={1}>
+          <Box flex={1} minWidth={0}>
             <Typography variant="subtitle1" fontWeight={700}>
-              {profile.display_name}
+              PeerTalk
             </Typography>
-            <Typography variant="caption" color="text.secondary">
-              P2P · port {profile.listen_port}
+            <Typography variant="caption" color="text.secondary" noWrap display="block">
+              {profile.display_name}
             </Typography>
           </Box>
           <IconButton aria-label="Refresh peers" onClick={() => refresh()}>
@@ -874,66 +1350,147 @@ function ChatScreen({
           <Tab label="Chats" />
         </Tabs>
         <Box sx={{ flex: 1, overflow: "auto", minHeight: 0 }}>
-        {tab === 0 && (
-          <List dense>
-            {others.map((p) => (
-              <ListItemButton key={p.user_id} onClick={() => openDm(p)}>
-                <Avatar sx={{ width: 36, height: 36, mr: 1.5, bgcolor: "primary.main" }}>
-                  {p.display_name.slice(0, 1).toUpperCase()}
-                </Avatar>
-                <ListItemText
-                  primary={p.display_name}
-                  secondary={p.online ? `${p.last_ip || "?"}:${p.last_port || ""}` : "Offline"}
-                />
-                <Box
-                  sx={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    bgcolor: p.online ? "success.main" : "grey.400",
-                  }}
-                />
-              </ListItemButton>
-            ))}
-            {!others.length && (
-              <Typography sx={{ p: 2 }} color="text.secondary">
-                No peers yet. Start LanMsg on another PC on this LAN and hit refresh.
-              </Typography>
-            )}
-          </List>
-        )}
-        {tab === 1 && (
-          <>
-            <Box px={2} py={1}>
-              <Button
-                startIcon={<GroupAddIcon />}
-                fullWidth
-                variant="outlined"
-                onClick={() => setGroupOpen(true)}
-              >
-                New group
-              </Button>
-            </Box>
+          {tab === 0 && (
             <List dense>
-              {convs.map((c) => (
-                <ListItemButton
-                  key={c.id}
-                  selected={active?.id === c.id}
-                  onClick={() => {
-                    setMessages([]);
-                    setPlain({});
-                    setActive(c);
-                  }}
-                >
+              {others.map((p) => (
+                <ListItemButton key={p.user_id} onClick={() => openDm(p)}>
+                  <Avatar sx={{ width: 36, height: 36, mr: 1.5, bgcolor: "primary.main" }}>
+                    {p.display_name.slice(0, 1).toUpperCase()}
+                  </Avatar>
                   <ListItemText
-                    primary={c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group"}
-                    secondary={c.kind}
+                    primary={p.display_name}
+                    secondary={p.online ? "Online" : lastSeenLabel(p.last_seen_at)}
+                  />
+                  <Box
+                    sx={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: "50%",
+                      bgcolor: p.online ? "success.main" : "grey.400",
+                    }}
                   />
                 </ListItemButton>
               ))}
+              {!others.length && (
+                <Typography sx={{ p: 2 }} color="text.secondary">
+                  No peers yet. Start PeerTalk on another PC on this LAN and hit refresh.
+                </Typography>
+              )}
+              {lanHosts.length > 0 && (
+                <>
+                  <Divider sx={{ my: 1 }} />
+                  <Typography variant="overline" color="text.secondary" sx={{ px: 2 }}>
+                    Other devices on this network
+                  </Typography>
+                  {lanHosts.map((h) => (
+                    <Box
+                      key={h.ip}
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 1.5,
+                        px: 2,
+                        py: 1,
+                        opacity: 0.5,
+                      }}
+                    >
+                      <Avatar sx={{ width: 36, height: 36, bgcolor: "grey.300", color: "grey.600" }}>
+                        {h.label.slice(0, 1).toUpperCase()}
+                      </Avatar>
+                      <Box flex={1} minWidth={0}>
+                        <Typography noWrap>{h.label}</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {h.ip} · No PeerTalk
+                        </Typography>
+                      </Box>
+                    </Box>
+                  ))}
+                </>
+              )}
             </List>
-          </>
-        )}
+          )}
+          {tab === 1 && (
+            <>
+              <Box px={2} py={1} display="flex" flexDirection="column" gap={1}>
+                <Button
+                  startIcon={<GroupAddIcon />}
+                  fullWidth
+                  variant="outlined"
+                  onClick={() => setGroupOpen(true)}
+                >
+                  New group
+                </Button>
+                <TextField
+                  inputRef={chatSearchRef}
+                  size="small"
+                  fullWidth
+                  placeholder="Search chats… (Ctrl/Cmd+K)"
+                  value={chatSearch}
+                  onChange={(e) => setChatSearch(e.target.value)}
+                  InputProps={{
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <SearchIcon fontSize="small" />
+                      </InputAdornment>
+                    ),
+                  }}
+                />
+              </Box>
+              <List dense>
+                {filteredConvs.map((c) => {
+                  const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
+                  return (
+                    <Box key={c.id} sx={{ display: "flex", alignItems: "center", pr: 0.5 }}>
+                      <ListItemButton
+                        selected={active?.id === c.id}
+                        onClick={() => selectConversation(c)}
+                        sx={{ flex: 1, minWidth: 0 }}
+                      >
+                        <Avatar
+                          sx={{
+                            width: 36,
+                            height: 36,
+                            mr: 1.5,
+                            bgcolor: c.kind === "group" ? "secondary.main" : "primary.main",
+                          }}
+                        >
+                          {title.slice(0, 1).toUpperCase()}
+                        </Avatar>
+                        <ListItemText
+                          primary={title}
+                          secondary={c.kind === "group" ? "Group" : undefined}
+                          primaryTypographyProps={{ noWrap: true }}
+                        />
+                      </ListItemButton>
+                      <Tooltip title={c.pinned_at ? "Unpin chat" : "Pin chat"}>
+                        <IconButton size="small" onClick={() => togglePinChat(c)}>
+                          {c.pinned_at ? (
+                            <PushPinIcon fontSize="small" color="primary" />
+                          ) : (
+                            <PushPinOutlinedIcon fontSize="small" />
+                          )}
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title={c.muted ? "Unmute chat" : "Mute chat"}>
+                        <IconButton size="small" onClick={() => toggleMuteChat(c)}>
+                          {c.muted ? (
+                            <VolumeOffIcon fontSize="small" color="disabled" />
+                          ) : (
+                            <VolumeUpIcon fontSize="small" sx={{ opacity: 0.4 }} />
+                          )}
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
+                  );
+                })}
+                {!filteredConvs.length && (
+                  <Typography sx={{ p: 2 }} color="text.secondary">
+                    {chatSearch ? "No chats match your search." : "No chats yet. Start one from People."}
+                  </Typography>
+                )}
+              </List>
+            </>
+          )}
         </Box>
         <Box sx={{ mt: "auto", borderTop: "1px solid #D5E3DD", p: 1.5 }}>
           <Button
@@ -948,16 +1505,29 @@ function ChatScreen({
         </Box>
       </Drawer>
 
-      <Box flex={1} display="flex" flexDirection="column">
+      <Box
+        flex={1}
+        display="flex"
+        flexDirection="column"
+        minWidth={0}
+        minHeight={0}
+        height="100%"
+        overflow="hidden"
+      >
         <AppBar
-          position="sticky"
-          color="transparent"
+          position="static"
           elevation={0}
-          sx={{ borderBottom: "1px solid #D5E3DD" }}
+          sx={{
+            flexShrink: 0,
+            bgcolor: "#FFFFFF",
+            color: "text.primary",
+            borderBottom: "1px solid #D5E3DD",
+            zIndex: 2,
+          }}
         >
-          <Toolbar>
-            <Box>
-              <Typography variant="h6">
+          <Toolbar sx={{ gap: 1 }}>
+            <Box flex={1} minWidth={0}>
+              <Typography variant="h6" noWrap>
                 {active
                   ? active.kind === "dm"
                     ? active.peer_name
@@ -970,8 +1540,16 @@ function ChatScreen({
                 </Typography>
               )}
             </Box>
-            <Box flex={1} />
-            {status && <Chip size="small" label={status} />}
+            {isAdmin && (
+              <Chip
+                size="small"
+                icon={<AdminPanelSettingsIcon fontSize="small" />}
+                label="Admin"
+                color="primary"
+                variant="outlined"
+              />
+            )}
+            {status && <Chip size="small" label={status} onDelete={() => setStatus("")} />}
             {active?.kind === "group" && (
               <IconButton aria-label="Group members" onClick={() => setMembersOpen(true)}>
                 <GroupIcon />
@@ -983,11 +1561,13 @@ function ChatScreen({
         <Box
           ref={scroller}
           flex={1}
+          minHeight={0}
           p={2}
           overflow="auto"
           display="flex"
           flexDirection="column"
           gap={1}
+          sx={{ bgcolor: "background.default" }}
         >
           {!active && (
             <Box m="auto" textAlign="center" maxWidth={360}>
@@ -1016,95 +1596,173 @@ function ChatScreen({
                   }}
                 />
               </Box>
-              {group.items.map((m) => (
-                <Grow in key={m.id} timeout={220}>
-                  <Paper
-                    elevation={0}
-                    sx={{
-                      alignSelf: m.sender_id === profile.id ? "flex-end" : "flex-start",
-                      maxWidth: "70%",
-                      p: 1.5,
-                      bgcolor:
-                        m.kind === "deleted"
-                          ? "#F1F4F3"
-                          : m.sender_id === profile.id
-                            ? "#DCEFE9"
-                            : "#FFFFFF",
-                      border: "1px solid #D5E3DD",
-                      position: "relative",
-                    }}
-                  >
-                    {m.kind !== "deleted" && (
-                      <IconButton
-                        size="small"
-                        aria-label="Message options"
-                        onClick={(e) => setMsgMenu({ anchor: e.currentTarget, message: m })}
-                        sx={{ position: "absolute", top: 2, right: 2, opacity: 0.55 }}
-                      >
-                        <MoreVertIcon sx={{ fontSize: 16 }} />
-                      </IconButton>
-                    )}
-                    {active?.kind === "group" && m.sender_id !== profile.id && m.kind !== "deleted" && (
-                      <Typography variant="caption" color="primary" fontWeight={700} display="block">
-                        {senderLabel(m.sender_id)}
-                      </Typography>
-                    )}
-                    {m.kind === "deleted" ? (
-                      <Typography
-                        fontStyle="italic"
-                        color="text.secondary"
-                        sx={{ pr: 2 }}
-                      >
-                        This message was deleted
-                      </Typography>
-                    ) : m.kind === "file_notice" ? (
-                      <Button
-                        size="small"
-                        startIcon={<InsertDriveFileIcon />}
-                        endIcon={<OpenInNewIcon />}
-                        disabled={previewBusy || !!incomingFile}
-                        onClick={() => m.file_id && previewFile(m.file_id, m.sender_id)}
+              {group.items.map((m) => {
+                const mine = m.sender_id === profile.id;
+                const quoted = m.reply_to ? messages.find((x) => x.id === m.reply_to) : undefined;
+                return (
+                  <Grow in key={m.id} timeout={220}>
+                    <Box sx={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "70%" }}>
+                      <Paper
+                        elevation={0}
                         sx={{
-                          textTransform: "none",
-                          fontWeight: 700,
-                          justifyContent: "flex-start",
-                          pr: 3,
+                          p: 1.5,
+                          bgcolor:
+                            m.kind === "deleted" ? "#F1F4F3" : mine ? "#DCEFE9" : "#FFFFFF",
+                          border: "1px solid #D5E3DD",
+                          position: "relative",
                         }}
                       >
-                        {(m.file_id && fileNames[m.file_id]) || "Encrypted file"}
-                      </Button>
-                    ) : (
-                      <Typography whiteSpace="pre-wrap" sx={{ pr: 2 }}>
-                        {plain[m.id] || "…"}
-                      </Typography>
-                    )}
-                    <Box
-                      sx={{
-                        mt: 0.5,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "flex-end",
-                        gap: 0.4,
-                        color: "text.secondary",
-                      }}
-                    >
-                      <Typography variant="caption">{formatClock(m.created_at)}</Typography>
-                      {m.sender_id === profile.id &&
-                        m.kind !== "deleted" &&
-                        (m.read ? (
-                          <DoneAllIcon
-                            titleAccess="Read"
-                            sx={{ fontSize: 16, color: "success.main" }}
+                        {m.pinned && (
+                          <PushPinIcon
+                            sx={{
+                              position: "absolute",
+                              top: -8,
+                              left: -8,
+                              fontSize: 16,
+                              color: "secondary.main",
+                              bgcolor: "background.paper",
+                              borderRadius: "50%",
+                              p: 0.2,
+                            }}
                           />
-                        ) : m.delivered ? (
-                          <DoneAllIcon titleAccess="Received" sx={{ fontSize: 16 }} />
+                        )}
+                        {m.kind !== "deleted" && (
+                          <IconButton
+                            size="small"
+                            aria-label="Message options"
+                            onClick={(e) => setMsgMenu({ anchor: e.currentTarget, message: m })}
+                            sx={{ position: "absolute", top: 2, right: 2, opacity: 0.55 }}
+                          >
+                            <MoreVertIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        )}
+                        {active?.kind === "group" && !mine && m.kind !== "deleted" && (
+                          <Typography variant="caption" color="primary" fontWeight={700} display="block">
+                            {senderLabel(m.sender_id)}
+                          </Typography>
+                        )}
+                        {quoted && m.kind !== "deleted" && (
+                          <Box
+                            sx={{
+                              borderLeft: "3px solid",
+                              borderColor: "primary.main",
+                              pl: 1,
+                              mb: 0.5,
+                              opacity: 0.85,
+                            }}
+                          >
+                            <Typography variant="caption" fontWeight={700} color="primary" display="block">
+                              {senderLabel(quoted.sender_id)}
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              noWrap
+                              display="block"
+                              sx={{ maxWidth: 220 }}
+                            >
+                              {quoted.kind === "file_notice"
+                                ? "📎 File"
+                                : quoted.kind === "deleted"
+                                  ? "Deleted message"
+                                  : truncate(plain[quoted.id] || "…", 80)}
+                            </Typography>
+                          </Box>
+                        )}
+                        {m.kind === "deleted" ? (
+                          <Typography fontStyle="italic" color="text.secondary" sx={{ pr: 2 }}>
+                            This message was deleted
+                          </Typography>
+                        ) : m.kind === "file_notice" ? (
+                          <Button
+                            size="small"
+                            startIcon={<InsertDriveFileIcon />}
+                            endIcon={<OpenInNewIcon />}
+                            disabled={previewBusy || !!incomingFile}
+                            onClick={() => m.file_id && previewFile(m.file_id, m.sender_id)}
+                            sx={{
+                              textTransform: "none",
+                              fontWeight: 700,
+                              justifyContent: "flex-start",
+                              pr: 3,
+                            }}
+                          >
+                            {(m.file_id && fileNames[m.file_id]) || "Encrypted file"}
+                          </Button>
                         ) : (
-                          <DoneIcon titleAccess="Queued" sx={{ fontSize: 16 }} />
-                        ))}
+                          <Typography whiteSpace="pre-wrap" sx={{ pr: 2 }}>
+                            {plain[m.id] || "…"}
+                          </Typography>
+                        )}
+                        <Box
+                          sx={{
+                            mt: 0.5,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "flex-end",
+                            gap: 0.4,
+                            color: "text.secondary",
+                          }}
+                        >
+                          {m.failed ? (
+                            <Typography
+                              variant="caption"
+                              color="error"
+                              sx={{ display: "flex", alignItems: "center", gap: 0.5 }}
+                            >
+                              Failed ·
+                              <Box
+                                component="span"
+                                sx={{ cursor: "pointer", textDecoration: "underline" }}
+                                onClick={() => retrySend(m)}
+                              >
+                                Retry
+                              </Box>
+                            </Typography>
+                          ) : (
+                            <Typography variant="caption">{formatClock(m.created_at)}</Typography>
+                          )}
+                          {mine && m.kind !== "deleted" && !m.failed && (
+                            m.read ? (
+                              <DoneAllIcon
+                                titleAccess="Read"
+                                sx={{ fontSize: 16, color: "success.main" }}
+                              />
+                            ) : m.delivered ? (
+                              <DoneAllIcon titleAccess="Received" sx={{ fontSize: 16 }} />
+                            ) : (
+                              <DoneIcon titleAccess="Queued" sx={{ fontSize: 16 }} />
+                            )
+                          )}
+                        </Box>
+                      </Paper>
+                      {!!m.reactions?.length && (
+                        <Stack
+                          direction="row"
+                          spacing={0.5}
+                          sx={{
+                            mt: 0.5,
+                            flexWrap: "wrap",
+                            justifyContent: mine ? "flex-end" : "flex-start",
+                          }}
+                        >
+                          {m.reactions.map((r) => (
+                            <Chip
+                              key={r.emoji}
+                              size="small"
+                              label={`${r.emoji} ${r.count}`}
+                              onClick={() => reactToMessage(m, r.emoji)}
+                              variant={r.users.includes(profile.id) ? "filled" : "outlined"}
+                              color={r.users.includes(profile.id) ? "primary" : "default"}
+                              sx={{ height: 22 }}
+                            />
+                          ))}
+                        </Stack>
+                      )}
                     </Box>
-                  </Paper>
-                </Grow>
-              ))}
+                  </Grow>
+                );
+              })}
             </Box>
           ))}
           {outgoingFile && active?.id === outgoingFile.conversationId && (
@@ -1212,76 +1870,133 @@ function ChatScreen({
           <Paper
             square
             elevation={0}
-            sx={{ p: 1.5, borderTop: "1px solid #D5E3DD", display: "flex", flexDirection: "column" }}
+            sx={{
+              flexShrink: 0,
+              p: 1.5,
+              borderTop: "1px solid #D5E3DD",
+              display: "flex",
+              flexDirection: "column",
+              gap: 1,
+              bgcolor: "#FFFFFF",
+              zIndex: 2,
+            }}
           >
-            {pendingFile && (
+            {replyTo && (
               <Box
                 sx={{
                   display: "flex",
                   alignItems: "center",
                   gap: 1,
-                  mb: 1,
                   p: 1,
                   border: "1px solid #D5E3DD",
                   borderRadius: 2,
                   bgcolor: "#F7FBFA",
                 }}
               >
-                {previewUrl ? (
-                  <Box
-                    component="img"
-                    src={previewUrl}
-                    alt=""
-                    sx={{ width: 56, height: 56, objectFit: "cover", borderRadius: 1 }}
-                  />
-                ) : (
-                  <InsertDriveFileIcon color="primary" />
-                )}
+                <ReplyIcon fontSize="small" color="primary" />
                 <Box flex={1} minWidth={0}>
-                  <Typography noWrap fontWeight={700}>
-                    {pendingFile.name}
+                  <Typography variant="caption" fontWeight={700} color="primary" display="block">
+                    Replying to {senderLabel(replyTo.sender_id)}
                   </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {formatBytes(pendingFile.size)} · not sent yet
+                  <Typography variant="caption" color="text.secondary" noWrap display="block">
+                    {replyTo.kind === "file_notice" ? "📎 File" : truncate(plain[replyTo.id] || "…", 90)}
                   </Typography>
                 </Box>
-                <IconButton aria-label="Remove file" size="small" onClick={clearStagedFile}>
-                  <CloseIcon />
+                <IconButton size="small" aria-label="Cancel reply" onClick={() => setReplyTo(null)}>
+                  <CloseIcon fontSize="small" />
                 </IconButton>
               </Box>
             )}
-            <Box display="flex" gap={1}>
+            {stagedFiles.length > 0 && (
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                {stagedFiles.map((sf) => (
+                  <Box
+                    key={sf.id}
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 1,
+                      p: 1,
+                      border: "1px solid #D5E3DD",
+                      borderRadius: 2,
+                      bgcolor: "#F7FBFA",
+                    }}
+                  >
+                    {sf.previewUrl ? (
+                      <Box
+                        component="img"
+                        src={sf.previewUrl}
+                        alt=""
+                        sx={{ width: 40, height: 40, objectFit: "cover", borderRadius: 1 }}
+                      />
+                    ) : (
+                      <InsertDriveFileIcon color="primary" />
+                    )}
+                    <Box minWidth={0}>
+                      <Typography variant="body2" noWrap sx={{ maxWidth: 160 }}>
+                        {sf.file.name}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {formatBytes(sf.file.size)}
+                      </Typography>
+                    </Box>
+                    <IconButton
+                      size="small"
+                      aria-label={`Remove ${sf.file.name}`}
+                      onClick={() => removeStagedFile(sf.id)}
+                    >
+                      <CloseIcon fontSize="small" />
+                    </IconButton>
+                  </Box>
+                ))}
+              </Stack>
+            )}
+            <Box display="flex" gap={1} alignItems="flex-end">
               <IconButton
-                component="label"
-                aria-label="Attach file"
+                aria-label="Emoji picker"
                 disabled={!!outgoingFile}
+                onClick={(e) => setEmojiAnchor(e.currentTarget)}
               >
+                <EmojiEmotionsIcon />
+              </IconButton>
+              <IconButton component="label" aria-label="Attach files" disabled={!!outgoingFile}>
                 <AttachFileIcon />
                 <input
                   hidden
                   type="file"
+                  multiple
                   disabled={!!outgoingFile}
                   onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) stageFile(f);
+                    const files = Array.from(e.target.files || []);
+                    if (files.length) stageFiles(files);
                     e.target.value = "";
                   }}
                 />
               </IconButton>
               <TextField
+                inputRef={composerRef}
                 fullWidth
                 size="small"
-                placeholder="Encrypted message…"
+                multiline
+                minRows={1}
+                maxRows={6}
+                placeholder="Encrypted message… (Shift+Enter for newline)"
                 value={text}
                 disabled={!!outgoingFile}
                 onChange={(e) => setText(e.target.value)}
-                onKeyDown={(e) =>
-                  e.key === "Enter" && !e.shiftKey && (e.preventDefault(), submitComposer())
-                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    submitComposer();
+                  } else if (e.key === "Escape" && replyTo) {
+                    e.preventDefault();
+                    setReplyTo(null);
+                  }
+                }}
               />
               <Button
                 variant="contained"
-                disabled={!!outgoingFile || (!text.trim() && !pendingFile)}
+                disabled={!!outgoingFile || (!text.trim() && !stagedFiles.length)}
                 onClick={submitComposer}
               >
                 Send
@@ -1290,11 +2005,48 @@ function ChatScreen({
           </Paper>
         )}
         {active?.kind === "group" && membersLoaded && !inGroup && (
-          <Paper square elevation={0} sx={{ p: 2, borderTop: "1px solid #D5E3DD", textAlign: "center" }}>
+          <Paper
+            square
+            elevation={0}
+            sx={{
+              flexShrink: 0,
+              p: 2,
+              borderTop: "1px solid #D5E3DD",
+              textAlign: "center",
+              bgcolor: "#FFFFFF",
+              zIndex: 2,
+            }}
+          >
             <Typography color="text.secondary">You're no longer in this group.</Typography>
           </Paper>
         )}
       </Box>
+
+      <Popover
+        open={!!emojiAnchor}
+        anchorEl={emojiAnchor}
+        onClose={() => setEmojiAnchor(null)}
+        anchorOrigin={{ vertical: "top", horizontal: "left" }}
+        transformOrigin={{ vertical: "bottom", horizontal: "left" }}
+      >
+        <Box
+          sx={{
+            p: 1,
+            width: 280,
+            display: "grid",
+            gridTemplateColumns: "repeat(8, 1fr)",
+            gap: 0.25,
+            maxHeight: 240,
+            overflow: "auto",
+          }}
+        >
+          {EMOJI_SET.map((e, idx) => (
+            <IconButton key={`${e}-${idx}`} size="small" onClick={() => setText((t) => t + e)}>
+              <Typography fontSize={18}>{e}</Typography>
+            </IconButton>
+          ))}
+        </Box>
+      </Popover>
 
       <Menu
         anchorEl={msgMenu?.anchor ?? null}
@@ -1303,18 +2055,58 @@ function ChatScreen({
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
       >
-        <MenuItem
-          onClick={() => msgMenu && deleteForMe(msgMenu.message)}
-        >
+        <Box sx={{ display: "flex", gap: 0.25, px: 1, py: 0.5 }}>
+          {QUICK_REACTIONS.map((e) => (
+            <IconButton
+              key={e}
+              size="small"
+              onClick={() => {
+                if (msgMenu) reactToMessage(msgMenu.message, e);
+                setMsgMenu(null);
+              }}
+            >
+              <Typography fontSize={18}>{e}</Typography>
+            </IconButton>
+          ))}
+        </Box>
+        <Divider />
+        <MenuItem onClick={() => msgMenu && startReply(msgMenu.message)}>
+          <ListItemIcon>
+            <ReplyIcon fontSize="small" />
+          </ListItemIcon>
+          Reply
+        </MenuItem>
+        {msgMenu?.message.kind === "text" && (
+          <MenuItem onClick={() => msgMenu && startForward(msgMenu.message)}>
+            <ListItemIcon>
+              <ForwardIcon fontSize="small" />
+            </ListItemIcon>
+            Forward
+          </MenuItem>
+        )}
+        {msgMenu?.message.kind === "text" && (
+          <MenuItem onClick={() => msgMenu && copyMessage(msgMenu.message)}>
+            <ListItemIcon>
+              <ContentCopyIcon fontSize="small" />
+            </ListItemIcon>
+            Copy text
+          </MenuItem>
+        )}
+        <MenuItem onClick={() => msgMenu && togglePinMessage(msgMenu.message)}>
+          <ListItemIcon>
+            <PushPinIcon fontSize="small" />
+          </ListItemIcon>
+          {msgMenu?.message.pinned ? "Unpin message" : "Pin message"}
+        </MenuItem>
+        <Divider />
+        <MenuItem onClick={() => msgMenu && deleteForMe(msgMenu.message)}>
           <ListItemIcon>
             <DeleteOutlineIcon fontSize="small" />
           </ListItemIcon>
           Delete for me
         </MenuItem>
         {msgMenu?.message.sender_id === profile.id && msgMenu.message.kind !== "deleted" && (
-          <MenuItem
-            onClick={() => msgMenu && deleteForEveryone(msgMenu.message)}
-          >
+          <MenuItem onClick={() => msgMenu && deleteForEveryone(msgMenu.message)}>
             <ListItemIcon>
               <DeleteForeverIcon fontSize="small" color="error" />
             </ListItemIcon>
@@ -1343,9 +2135,8 @@ function ChatScreen({
               await peerApi.pinPeer(pinOpen.user_id, pinOpen.tls_fingerprint);
               const c = await peerApi.openDm(pinOpen.user_id);
               setPinOpen(null);
-              setMessages([]);
-              setPlain({});
-              setActive(c);
+              selectConversation(c);
+              setTab(1);
               await refresh();
             }}
           >
@@ -1382,47 +2173,39 @@ function ChatScreen({
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setGroupOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={async () => {
-              const gk = createGroupKey();
-              const pubs: Record<string, string> = {
-                [profile.id]: exportPublic(identity).x25519_public,
-              };
-              for (const id of groupPick) {
-                const u = peers.find((x) => x.user_id === id)!;
-                pubs[id] = u.x25519_public;
-              }
-              const wraps = wrapGroupKeyForMembers(gk, identity, pubs);
-              const conversation = await peerApi.createGroup(groupTitle, groupPick, wraps);
-              setGroupKeys((g) => ({ ...g, [conversation.id]: gk }));
-              groupKeysRef.current = { ...groupKeysRef.current, [conversation.id]: gk };
-              // notify members with wrap via a lightweight deliver (group announce as empty msg optional)
-              for (const rid of groupPick) {
-                await peerApi.sendMessage(
-                  conversation.id,
-                  {
-                    kind: "text",
-                    sender_id: profile.id,
-                    ...(await encryptWithGroupKey(
-                      `Joined group “${groupTitle}”`,
-                      conversation.id,
-                      profile.id,
-                      gk,
-                      identity
-                    )),
-                  },
-                  [rid]
-                );
-              }
-              setGroupOpen(false);
-              setMessages([]);
-              setPlain({});
-              setActive(conversation);
-              await refresh();
-            }}
-          >
+          <Button variant="contained" disabled={!groupTitle.trim() || !groupPick.length} onClick={createGroup}>
             Create
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={!!forwardMessage} onClose={() => setForwardMessage(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Forward message</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            {truncate(forwardMessage ? plain[forwardMessage.id] || "" : "", 160)}
+          </Typography>
+          <List dense>
+            {convs.map((c) => (
+              <ListItemButton
+                key={c.id}
+                selected={forwardPick === c.id}
+                onClick={() => setForwardPick(c.id)}
+              >
+                <ListItemText primary={c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group"} />
+              </ListItemButton>
+            ))}
+            {!convs.length && (
+              <Typography color="text.secondary" sx={{ p: 1 }}>
+                No chats to forward to yet.
+              </Typography>
+            )}
+          </List>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setForwardMessage(null)}>Cancel</Button>
+          <Button variant="contained" disabled={!forwardPick} onClick={confirmForward}>
+            Forward
           </Button>
         </DialogActions>
       </Dialog>
@@ -1521,45 +2304,26 @@ function ChatScreen({
           </Typography>
           <List dense>
             {members.map((m) => (
-              <ListItemButton key={m.user_id} disableRipple>
+              <ListItemButton key={m.user_id} disableRipple sx={{ cursor: "default" }}>
                 <Avatar sx={{ width: 32, height: 32, mr: 1.5, bgcolor: "primary.main", fontSize: 14 }}>
                   {m.display_name.slice(0, 1).toUpperCase()}
                 </Avatar>
                 <ListItemText
                   primary={m.user_id === profile.id ? `${m.display_name} (you)` : m.display_name}
                 />
-                {members.some((x) => x.user_id === profile.id) && m.user_id !== profile.id && (
+                {m.role === "admin" && (
+                  <Chip
+                    size="small"
+                    label="Admin"
+                    icon={<AdminPanelSettingsIcon fontSize="small" />}
+                    sx={{ mr: 1 }}
+                  />
+                )}
+                {isAdmin && m.user_id !== profile.id && (
                   <IconButton
                     aria-label={`Remove ${m.display_name}`}
                     size="small"
-                    onClick={async () => {
-                      if (!active) return;
-                      if (!window.confirm(`Remove ${m.display_name} from the group?`)) return;
-                      try {
-                        const gk = await ensureGroupKey(active.id);
-                        const ids = await peerApi.memberIds(active.id);
-                        await peerApi.sendMessage(
-                          active.id,
-                          {
-                            kind: "text",
-                            sender_id: profile.id,
-                            ...(await encryptWithGroupKey(
-                              `${profile.display_name} removed ${m.display_name}`,
-                              active.id,
-                              profile.id,
-                              gk,
-                              identity
-                            )),
-                          },
-                          ids.filter((id) => id !== profile.id)
-                        );
-                        await peerApi.removeGroupMember(active.id, m.user_id);
-                        setMembers(await peerApi.listMembers(active.id));
-                        setMessages(await peerApi.listMessages(active.id));
-                      } catch (err: any) {
-                        setStatus(err?.message || String(err));
-                      }
-                    }}
+                    onClick={() => handleRemoveMember(m.user_id, m.display_name)}
                   >
                     <PersonRemoveIcon fontSize="small" />
                   </IconButton>
@@ -1567,7 +2331,7 @@ function ChatScreen({
               </ListItemButton>
             ))}
           </List>
-          {members.some((x) => x.user_id === profile.id) && (
+          {isAdmin && (
             <>
               <Typography variant="overline" color="text.secondary">
                 Add people
@@ -1598,86 +2362,15 @@ function ChatScreen({
           )}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          {members.some((x) => x.user_id === profile.id) && (
-            <Button
-              color="error"
-              onClick={async () => {
-                if (!active) return;
-                if (!window.confirm("Leave this group? You will keep the messages already here.")) return;
-                try {
-                  const gk = await ensureGroupKey(active.id);
-                  const ids = await peerApi.memberIds(active.id);
-                  await peerApi.sendMessage(
-                    active.id,
-                    {
-                      kind: "text",
-                      sender_id: profile.id,
-                      ...(await encryptWithGroupKey(
-                        `${profile.display_name} left the group`,
-                        active.id,
-                        profile.id,
-                        gk,
-                        identity
-                      )),
-                    },
-                    ids.filter((id) => id !== profile.id)
-                  );
-                  await peerApi.leaveGroup(active.id);
-                  setMembers(await peerApi.listMembers(active.id));
-                  setMessages(await peerApi.listMessages(active.id));
-                  setMembersOpen(false);
-                } catch (err: any) {
-                  setStatus(err?.message || String(err));
-                }
-              }}
-            >
-              Exit group
+          {inGroup && (
+            <Button color="error" onClick={handleLeaveGroup}>
+              Leave group
             </Button>
           )}
           <Box flex={1} />
           <Button onClick={() => setMembersOpen(false)}>Close</Button>
-          {members.some((x) => x.user_id === profile.id) && (
-            <Button
-              variant="contained"
-              disabled={!addPick.length}
-              onClick={async () => {
-                if (!active || !addPick.length) return;
-                try {
-                  const gk = await ensureGroupKey(active.id);
-                  const pubs: Record<string, string> = {};
-                  const names: string[] = [];
-                  for (const id of addPick) {
-                    const u = peers.find((x) => x.user_id === id);
-                    if (!u) continue;
-                    pubs[id] = u.x25519_public;
-                    names.push(u.display_name);
-                  }
-                  if (!names.length) return;
-                  await peerApi.addGroupMembers(active.id, wrapGroupKeyForMembers(gk, identity, pubs));
-                  const ids = await peerApi.memberIds(active.id);
-                  await peerApi.sendMessage(
-                    active.id,
-                    {
-                      kind: "text",
-                      sender_id: profile.id,
-                      ...(await encryptWithGroupKey(
-                        `${profile.display_name} added ${names.join(", ")}`,
-                        active.id,
-                        profile.id,
-                        gk,
-                        identity
-                      )),
-                    },
-                    ids.filter((id) => id !== profile.id)
-                  );
-                  setAddPick([]);
-                  setMembers(await peerApi.listMembers(active.id));
-                  setMessages(await peerApi.listMessages(active.id));
-                } catch (err: any) {
-                  setStatus(err?.message || String(err));
-                }
-              }}
-            >
+          {isAdmin && (
+            <Button variant="contained" disabled={!addPick.length} onClick={handleAddMembers}>
               Add
             </Button>
           )}
@@ -1691,14 +2384,56 @@ function SettingsScreen(props: {
   profile: Profile;
   identity: Identity;
   onBack: () => void;
-  onReset: () => void;
+  onNameUpdated: (p: Profile) => void;
 }) {
   const [fp, setFp] = useState("");
+  const [name, setName] = useState(props.profile.display_name);
+  const [savingName, setSavingName] = useState(false);
+  const [notifEnabled, setNotifEnabled] = useState(true);
+  const [status, setStatus] = useState("");
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
 
   useEffect(() => {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
+    peerApi.getNotificationsEnabled().then(setNotifEnabled).catch(() => {});
   }, []);
+
+  async function saveName() {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === props.profile.display_name) return;
+    setSavingName(true);
+    try {
+      const p = await peerApi.updateDisplayName(trimmed);
+      props.onNameUpdated(p);
+      setStatus("Display name updated");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    } finally {
+      setSavingName(false);
+    }
+  }
+
+  async function toggleNotifications(checked: boolean) {
+    setNotifEnabled(checked);
+    try {
+      await peerApi.setNotificationsEnabled(checked);
+      if (checked) {
+        const granted = await ensureBrowserNotifyPermission();
+        if (!granted) setStatus("Notifications are blocked in the browser/OS");
+      }
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function copy(label: string, value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setStatus(`${label} copied`);
+    } catch {
+      setStatus("Could not copy");
+    }
+  }
 
   return (
     <Box minHeight="100vh" p={3} maxWidth={720} mx="auto">
@@ -1711,42 +2446,117 @@ function SettingsScreen(props: {
           <Typography variant="h6" gutterBottom>
             Profile
           </Typography>
-          <Typography>
-            {props.profile.display_name} · port {props.profile.listen_port}
-          </Typography>
-          <Typography variant="body2" color="text.secondary" fontFamily="monospace">
-            {props.profile.id}
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+            <TextField
+              label="Display name"
+              size="small"
+              fullWidth
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  saveName();
+                }
+              }}
+            />
+            <Button
+              variant="contained"
+              disabled={savingName || !name.trim() || name.trim() === props.profile.display_name}
+              onClick={saveName}
+            >
+              Save
+            </Button>
+          </Stack>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              fontFamily="monospace"
+              sx={{ wordBreak: "break-all" }}
+              flex={1}
+            >
+              {props.profile.id}
+            </Typography>
+            <IconButton size="small" aria-label="Copy user id" onClick={() => copy("User id", props.profile.id)}>
+              <ContentCopyIcon fontSize="small" />
+            </IconButton>
+          </Stack>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Listening port: Managed automatically
           </Typography>
         </Paper>
+
+        <Paper sx={{ p: 2.5 }} variant="outlined">
+          <Typography variant="h6" gutterBottom>
+            Notifications
+          </Typography>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={notifEnabled}
+                onChange={(e) => toggleNotifications(e.target.checked)}
+              />
+            }
+            label="Desktop notifications for new messages"
+          />
+          <Typography variant="body2" color="text.secondary">
+            Muted chats never notify, even when this is on.
+          </Typography>
+        </Paper>
+
         <Paper sx={{ p: 2.5 }} variant="outlined">
           <Typography variant="h6" gutterBottom>
             Security fingerprints
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Your key fingerprint
-          </Typography>
-          <Typography fontFamily="monospace" sx={{ mb: 2, wordBreak: "break-all" }}>
-            {keyFp}
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Your peer TLS fingerprint
-          </Typography>
-          <Typography fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
-            {fp || "…"}
-          </Typography>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Box flex={1} minWidth={0}>
+              <Typography variant="body2" color="text.secondary">
+                Your key fingerprint
+              </Typography>
+              <Typography fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
+                {keyFp}
+              </Typography>
+            </Box>
+            <IconButton
+              size="small"
+              aria-label="Copy key fingerprint"
+              onClick={() => copy("Key fingerprint", keyFp)}
+            >
+              <ContentCopyIcon fontSize="small" />
+            </IconButton>
+          </Stack>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.5 }}>
+            <Box flex={1} minWidth={0}>
+              <Typography variant="body2" color="text.secondary">
+                Your peer TLS fingerprint
+              </Typography>
+              <Typography fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
+                {fp || "…"}
+              </Typography>
+            </Box>
+            <IconButton
+              size="small"
+              aria-label="Copy TLS fingerprint"
+              disabled={!fp}
+              onClick={() => copy("TLS fingerprint", fp)}
+            >
+              <ContentCopyIcon fontSize="small" />
+            </IconButton>
+          </Stack>
         </Paper>
+
         <Alert severity="info">
-          No central server. Data is in local SQLite under the app data folder. Outbox delivers when
-          peers are reachable. Open UDP 41234 and TCP {props.profile.listen_port} on the firewall.
+          No central server — chats live in local SQLite and deliver when peers come online. For
+          reliable discovery and delivery, allow PeerTalk through your firewall: UDP 41234 for
+          discovery and TCP {props.profile.listen_port} for peer delivery (this TCP port is chosen
+          automatically and may change if it's busy).
         </Alert>
-        <Button
-          color="error"
-          variant="outlined"
-          startIcon={<LogoutIcon />}
-          onClick={props.onReset}
-        >
-          Back to setup screen
-        </Button>
+        {status && (
+          <Alert severity="success" onClose={() => setStatus("")}>
+            {status}
+          </Alert>
+        )}
       </Stack>
     </Box>
   );

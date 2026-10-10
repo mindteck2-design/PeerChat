@@ -117,6 +117,86 @@ async fn handle_packet(
     hub.peers.write().await.insert(peer.user_id.clone(), peer);
 }
 
+/// A LAN device observed via ARP (no PeerTalk). MAC is never returned or stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanHost {
+    pub ip: String,
+    pub label: String,
+}
+
+fn ipv4_same_slash24(a: &str, b: &str) -> bool {
+    let pa: Vec<_> = a.split('.').collect();
+    let pb: Vec<_> = b.split('.').collect();
+    pa.len() == 4
+        && pb.len() == 4
+        && pa[0] == pb[0]
+        && pa[1] == pb[1]
+        && pa[2] == pb[2]
+}
+
+fn looks_like_ipv4(s: &str) -> bool {
+    let parts: Vec<_> = s.split('.').collect();
+    parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
+}
+
+/// Best-effort LAN neighbor list from the OS ARP table (no MAC persistence).
+pub fn lan_hosts_without_app(exclude_ips: &[String]) -> Vec<LanHost> {
+    let me = lan_ip();
+    let output = {
+        #[cfg(windows)]
+        {
+            std::process::Command::new("arp")
+                .arg("-a")
+                .output()
+                .ok()
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("ip")
+                .args(["neigh"])
+                .output()
+                .or_else(|_| std::process::Command::new("arp").arg("-an").output())
+                .ok()
+        }
+    };
+    let Some(out) = output else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut hosts: Vec<LanHost> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in text.lines() {
+        let mut ip: Option<String> = None;
+        for tok in line.split_whitespace() {
+            let t = tok.trim_matches(|c| c == '(' || c == ')');
+            if looks_like_ipv4(t) {
+                ip = Some(t.to_string());
+                break;
+            }
+        }
+        let Some(ip) = ip else { continue };
+        if ip == me || ip.ends_with(".255") || ip.ends_with(".0") {
+            continue;
+        }
+        if !ipv4_same_slash24(&me, &ip) {
+            continue;
+        }
+        if exclude_ips.iter().any(|e| e == &ip) {
+            continue;
+        }
+        if !seen.insert(ip.clone()) {
+            continue;
+        }
+        hosts.push(LanHost {
+            ip: ip.clone(),
+            label: format!("Device on LAN ({ip})"),
+        });
+    }
+    hosts.sort_by(|a, b| a.ip.cmp(&b.ip));
+    hosts.truncate(64);
+    hosts
+}
+
 pub async fn scan(discovery_port: u16, self_id: &str) -> Result<Vec<PeerBeacon>, String> {
     let sock = UdpSocket::bind("0.0.0.0:0")
         .await

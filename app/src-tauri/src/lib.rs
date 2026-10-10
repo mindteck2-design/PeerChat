@@ -27,6 +27,46 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+const MAX_FILE_BYTES: i64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CHUNKS: i64 = 65_536;
+
+fn safe_download_name(filename: &str) -> String {
+    let safe: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = safe.trim().trim_start_matches('.').to_string();
+    if trimmed.is_empty() || trimmed.contains("..") {
+        "download.bin".into()
+    } else {
+        trimmed
+    }
+}
+
+fn resolve_staging_dir(app: &AppHandle, file_id: &str) -> Result<PathBuf, String> {
+    if file_id.is_empty()
+        || file_id.contains("..")
+        || file_id.contains('/')
+        || file_id.contains('\\')
+    {
+        return Err("invalid file id".into());
+    }
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("staging")
+        .join(file_id);
+    Ok(base)
+}
+
 fn from_peer_json(profile: &Value, fingerprint: &str) -> Value {
     json!({
         "user_id": profile["id"],
@@ -99,7 +139,8 @@ fn setup_profile(
     ed25519_public: String,
     listen_port: Option<i64>,
 ) -> Result<Value, String> {
-    let port = listen_port.unwrap_or(9876);
+    let preferred = listen_port.unwrap_or(9876) as u16;
+    let port = peer_http::allocate_listen_port(preferred)?;
     {
         let conn = state.db.lock();
         db::upsert_profile(
@@ -108,12 +149,88 @@ fn setup_profile(
             &display_name,
             &x25519_public,
             &ed25519_public,
-            port,
+            port as i64,
         )?;
     }
-    start_runtime_inner(&state, &user_id, &display_name, &x25519_public, &ed25519_public, port as u16)?;
+    start_runtime_inner(
+        &state,
+        &user_id,
+        &display_name,
+        &x25519_public,
+        &ed25519_public,
+        port,
+    )?;
     let conn = state.db.lock();
     db::get_profile(&conn)?.ok_or_else(|| "profile missing".into())
+}
+
+#[tauri::command]
+fn update_display_name(state: State<AppState>, display_name: String) -> Result<Value, String> {
+    let name = display_name.trim();
+    if name.is_empty() {
+        return Err("display name required".into());
+    }
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let id = profile["id"].as_str().unwrap_or("");
+    db::upsert_profile(
+        &conn,
+        id,
+        name,
+        profile["x25519_public"].as_str().unwrap_or(""),
+        profile["ed25519_public"].as_str().unwrap_or(""),
+        profile["listen_port"].as_i64().unwrap_or(9876),
+    )?;
+    db::get_profile(&conn)?.ok_or_else(|| "profile missing".into())
+}
+
+#[tauri::command]
+fn set_conversation_pinned(
+    state: State<AppState>,
+    conversation_id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::set_conversation_pinned(&conn, &conversation_id, pinned)
+}
+
+#[tauri::command]
+fn set_conversation_muted(
+    state: State<AppState>,
+    conversation_id: String,
+    muted: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::set_conversation_muted(&conn, &conversation_id, muted)
+}
+
+#[tauri::command]
+fn list_pinned_messages(
+    state: State<AppState>,
+    conversation_id: String,
+) -> Result<Vec<Value>, String> {
+    let conn = state.db.lock();
+    db::list_pinned_messages(&conn, &conversation_id)
+}
+
+#[tauri::command]
+fn get_notifications_enabled(state: State<AppState>) -> Result<bool, String> {
+    let conn = state.db.lock();
+    Ok(db::get_setting(&conn, "notifications_enabled")?
+        .map(|v| v != "0")
+        .unwrap_or(true))
+}
+
+#[tauri::command]
+fn set_notifications_enabled(state: State<AppState>, enabled: bool) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::set_setting(&conn, "notifications_enabled", if enabled { "1" } else { "0" })
+}
+
+#[tauri::command]
+fn conversation_is_muted(state: State<AppState>, conversation_id: String) -> Result<bool, String> {
+    let conn = state.db.lock();
+    db::conversation_muted(&conn, &conversation_id)
 }
 
 fn start_runtime_inner(
@@ -122,11 +239,21 @@ fn start_runtime_inner(
     display_name: &str,
     x25519_public: &str,
     ed25519_public: &str,
-    port: u16,
+    preferred_port: u16,
 ) -> Result<(), String> {
-    let mut started = state.started.lock();
-    if *started {
-        return Ok(());
+    {
+        let started = state.started.lock();
+        if *started {
+            return Ok(());
+        }
+    }
+    let port = peer_http::allocate_listen_port(preferred_port)?;
+    {
+        let conn = state.db.lock();
+        let _ = conn.execute(
+            "UPDATE profile SET listen_port=?1",
+            rusqlite::params![port as i64],
+        );
     }
     let cert = tls_cert::ensure(&state.data_dir)?;
     *state.fingerprint.lock() = cert.fingerprint.clone();
@@ -161,7 +288,7 @@ fn start_runtime_inner(
         }
     });
 
-    *started = true;
+    *state.started.lock() = true;
     Ok(())
 }
 
@@ -190,7 +317,14 @@ async fn flush_outbox(db: &SharedDb) {
         if !peer["online"].as_bool().unwrap_or(false) && peer["last_ip"].is_null() {
             continue;
         }
+        let pinned = peer["pinned"].as_bool().unwrap_or(false);
         let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
+        // Pinned peers must present a known TLS fingerprint.
+        if pinned && fp.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+            let conn = db.lock();
+            let _ = db::bump_outbox_error(&conn, &id, "pinned peer missing fingerprint");
+            continue;
+        }
         let Ok(payload) = serde_json::from_str::<Value>(&payload_str) else {
             continue;
         };
@@ -235,9 +369,52 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
         map.insert(k, v);
     }
     let mut out = Vec::new();
+    let online_ids: Vec<String> = map.keys().cloned().collect();
     {
         let conn = state.db.lock();
         for p in map.values() {
+            // Pinned peers: freeze identity keys / TLS fingerprint on change.
+            if let Ok(Some(existing)) = db::get_peer(&conn, &p.user_id) {
+                let pinned = existing["pinned"].as_bool().unwrap_or(false);
+                if pinned {
+                    let same_fp = existing["tls_fingerprint"].as_str() == Some(p.fingerprint.as_str());
+                    let same_x = existing["x25519_public"].as_str() == Some(p.x25519_public.as_str());
+                    let same_e = existing["ed25519_public"].as_str() == Some(p.ed25519_public.as_str());
+                    if !(same_fp && same_x && same_e) {
+                        // Keep old keys; still refresh IP/online for delivery.
+                        db::upsert_peer(
+                            &conn,
+                            &p.user_id,
+                            existing["display_name"].as_str().unwrap_or(&p.display_name),
+                            existing["x25519_public"].as_str().unwrap_or(&p.x25519_public),
+                            existing["ed25519_public"].as_str().unwrap_or(&p.ed25519_public),
+                            Some(&p.ip),
+                            Some(p.port as i64),
+                            existing["tls_fingerprint"].as_str(),
+                            true,
+                        )?;
+                        let _ = db::set_peer_pending_identity(
+                            &conn,
+                            &p.user_id,
+                            &p.fingerprint,
+                            &p.x25519_public,
+                            &p.ed25519_public,
+                        );
+                        out.push(json!({
+                            "user_id": p.user_id,
+                            "display_name": existing["display_name"],
+                            "x25519_public": existing["x25519_public"],
+                            "ed25519_public": existing["ed25519_public"],
+                            "last_ip": p.ip,
+                            "last_port": p.port,
+                            "tls_fingerprint": p.fingerprint,
+                            "online": true,
+                            "identity_changed": true,
+                        }));
+                        continue;
+                    }
+                }
+            }
             db::upsert_peer(
                 &conn,
                 &p.user_id,
@@ -258,10 +435,38 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
                 "last_port": p.port,
                 "tls_fingerprint": p.fingerprint,
                 "online": true,
+                "identity_changed": false,
             }));
         }
+        let _ = db::mark_peers_offline_except(&conn, &online_ids);
+        let _ = db::mark_stale_peers_offline(&conn, 45);
     }
     Ok(out)
+}
+
+#[tauri::command]
+async fn list_lan_hosts(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+    let peer_ips: Vec<String> = {
+        let conn = state.db.lock();
+        db::list_peers(&conn)?
+            .into_iter()
+            .filter_map(|p| p["last_ip"].as_str().map(|s| s.to_string()))
+            .collect()
+    };
+    let me = discovery::lan_ip();
+    let mut exclude = peer_ips;
+    exclude.push(me);
+    let hosts = discovery::lan_hosts_without_app(&exclude);
+    Ok(hosts
+        .into_iter()
+        .map(|h| {
+            json!({
+                "ip": h.ip,
+                "label": h.label,
+                "has_app": false,
+            })
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -353,6 +558,18 @@ fn list_messages(state: State<AppState>, conversation_id: String) -> Result<Vec<
         .unwrap_or("")
         .to_string();
     db::list_messages(&conn, &conversation_id, &me)
+}
+
+#[tauri::command]
+fn retry_message(state: State<AppState>, message_id: String) -> Result<(), String> {
+    let conn = state.db.lock();
+    let n = db::reset_outbox_attempts(&conn, &message_id)?;
+    if n == 0 {
+        return Err("No pending delivery to retry".into());
+    }
+    drop(conn);
+    kick_flush(&state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -483,65 +700,73 @@ fn send_message(state: State<AppState>, conversation_id: String, message: Value,
     msg["conversation_id"] = json!(conversation_id);
     msg["delivered"] = json!(false);
 
+    let fingerprint = state.fingerprint.lock().clone();
     let profile = {
         let conn = state.db.lock();
-        db::insert_message(&conn, &msg)?;
-        db::get_profile(&conn)?.ok_or("no profile")?
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| e.to_string())?;
+        let result = (|| -> Result<Value, String> {
+            db::insert_message(&conn, &msg)?;
+            let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+            let from_peer = json!({
+                "user_id": profile["id"],
+                "display_name": profile["display_name"],
+                "x25519_public": profile["x25519_public"],
+                "ed25519_public": profile["ed25519_public"],
+                "last_port": profile["listen_port"],
+                "tls_fingerprint": fingerprint,
+                "last_ip": discovery::lan_ip(),
+            });
+            let me = profile["id"].as_str().unwrap_or("");
+            let title = conn
+                .query_row(
+                    "SELECT title FROM conversations WHERE id=?1",
+                    rusqlite::params![conversation_id.as_str()],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten();
+            for rid in &recipient_ids {
+                if rid == me {
+                    continue;
+                }
+                let out_id = msg["id"].as_str().unwrap_or("").to_string();
+                let oid = format!("{out_id}:{rid}");
+                let mut payload = json!({
+                    "message": msg,
+                    "from_peer": from_peer,
+                    "conversation_id": conversation_id,
+                });
+                if let Ok(Some(w)) = db::get_wrapped_group_key(&conn, conversation_id.as_str(), rid) {
+                    payload["wrapped_group_key"] = json!(w);
+                }
+                if let Some(ref t) = title {
+                    payload["group_title"] = json!(t);
+                }
+                db::enqueue_outbox(
+                    &conn,
+                    &oid,
+                    rid,
+                    conversation_id.as_str(),
+                    &payload.to_string(),
+                )?;
+            }
+            Ok(profile)
+        })();
+        match result {
+            Ok(p) => {
+                conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+                p
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
     };
 
-    let from_peer = json!({
-        "user_id": profile["id"],
-        "display_name": profile["display_name"],
-        "x25519_public": profile["x25519_public"],
-        "ed25519_public": profile["ed25519_public"],
-        "last_port": profile["listen_port"],
-        "tls_fingerprint": state.fingerprint.lock().clone(),
-        "last_ip": discovery::lan_ip(),
-    });
-
-    {
-        let conn = state.db.lock();
-        let me = profile["id"].as_str().unwrap_or("");
-        let title = conn
-            .query_row(
-                "SELECT title FROM conversations WHERE id=?1",
-                rusqlite::params![conversation_id.as_str()],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten();
-        for rid in recipient_ids {
-            if rid == me {
-                continue;
-            }
-            let out_id = msg["id"].as_str().unwrap_or("").to_string();
-            let oid = format!("{out_id}:{rid}");
-            let mut payload = json!({
-                "message": msg,
-                "from_peer": from_peer,
-                "conversation_id": conversation_id,
-            });
-            // Each recipient needs their own wrapped group key copy
-            if let Ok(Some(w)) = db::get_wrapped_group_key(&conn, conversation_id.as_str(), &rid) {
-                payload["wrapped_group_key"] = json!(w);
-            }
-            if let Some(ref t) = title {
-                payload["group_title"] = json!(t);
-            }
-            db::enqueue_outbox(
-                &conn,
-                &oid,
-                &rid,
-                conversation_id.as_str(),
-                &payload.to_string(),
-            )?;
-        }
-    }
-    // kick flush
-    let db = state.db.clone();
-    tauri::async_runtime::spawn(async move {
-        flush_outbox(&db).await;
-    });
+    let _ = profile;
+    kick_flush(&state);
     Ok(msg)
 }
 
@@ -578,6 +803,9 @@ fn add_group_members(
     let conn = state.db.lock();
     let profile = db::get_profile(&conn)?.ok_or("no profile")?;
     let me = profile["id"].as_str().unwrap_or("").to_string();
+    if !db::is_group_admin(&conn, &conversation_id, &me)? {
+        return Err("Only group admins can add members".into());
+    }
     let title = db::conversation_title(&conn, &conversation_id)?
         .unwrap_or_else(|| "Group".into());
     if let Some(map) = wrapped_group_keys.as_object() {
@@ -624,6 +852,7 @@ fn remove_group_member(
     state: State<AppState>,
     conversation_id: String,
     user_id: String,
+    wrapped_group_keys: Option<Value>,
 ) -> Result<(), String> {
     let conn = state.db.lock();
     let profile = db::get_profile(&conn)?.ok_or("no profile")?;
@@ -631,25 +860,43 @@ fn remove_group_member(
     if user_id == me {
         return Err("use leave to exit the group".into());
     }
+    if !db::is_group_admin(&conn, &conversation_id, &me)? {
+        return Err("Only group admins can remove members".into());
+    }
     let title = db::conversation_title(&conn, &conversation_id)?
         .unwrap_or_else(|| "Group".into());
     let notify = db::member_ids(&conn, &conversation_id)?;
     db::delete_member(&conn, &conversation_id, &user_id)?;
+    let _ = db::ensure_group_admin(&conn, &conversation_id)?;
+    // Rotate group key for remaining members when wraps are provided.
+    if let Some(wraps) = wrapped_group_keys.as_ref().and_then(|v| v.as_object()) {
+        let pairs: Vec<(String, String)> = wraps
+            .iter()
+            .filter_map(|(uid, w)| w.as_str().map(|s| (uid.clone(), s.to_string())))
+            .filter(|(uid, _)| uid != &user_id)
+            .collect();
+        db::update_member_wraps(&conn, &conversation_id, &pairs)?;
+    }
     let roster = Value::Array(db::list_members(&conn, &conversation_id)?);
     let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
     for rid in notify {
+        if rid == me || rid == user_id {
+            // Still notify removed user of removal; remaining get new wraps.
+        }
         if rid == me {
             continue;
         }
+        let wrap = db::get_wrapped_group_key(&conn, &conversation_id, &rid)?;
+        let op = if rid == user_id { "remove" } else { "sync" };
         enqueue_group_event(
             &conn,
             &from_peer,
             &conversation_id,
             &rid,
             &title,
-            None,
+            wrap,
             &roster,
-            "remove",
+            op,
             Some(user_id.as_str()),
         )?;
     }
@@ -659,7 +906,11 @@ fn remove_group_member(
 }
 
 #[tauri::command]
-fn leave_group(state: State<AppState>, conversation_id: String) -> Result<(), String> {
+fn leave_group(
+    state: State<AppState>,
+    conversation_id: String,
+    wrapped_group_keys: Option<Value>,
+) -> Result<(), String> {
     let conn = state.db.lock();
     let profile = db::get_profile(&conn)?.ok_or("no profile")?;
     let me = profile["id"].as_str().unwrap_or("").to_string();
@@ -667,12 +918,33 @@ fn leave_group(state: State<AppState>, conversation_id: String) -> Result<(), St
         .unwrap_or_else(|| "Group".into());
     let notify = db::member_ids(&conn, &conversation_id)?;
     db::delete_member(&conn, &conversation_id, &me)?;
+    let _ = db::ensure_group_admin(&conn, &conversation_id)?;
+    if let Some(wraps) = wrapped_group_keys.as_ref().and_then(|v| v.as_object()) {
+        let pairs: Vec<(String, String)> = wraps
+            .iter()
+            .filter_map(|(uid, w)| w.as_str().map(|s| (uid.clone(), s.to_string())))
+            .filter(|(uid, _)| uid != &me)
+            .collect();
+        db::update_member_wraps(&conn, &conversation_id, &pairs)?;
+    }
     let roster = Value::Array(db::list_members(&conn, &conversation_id)?);
     let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
     for rid in notify {
         if rid == me {
             continue;
         }
+        let wrap = db::get_wrapped_group_key(&conn, &conversation_id, &rid)?;
+        enqueue_group_event(
+            &conn,
+            &from_peer,
+            &conversation_id,
+            &rid,
+            &title,
+            wrap,
+            &roster,
+            "sync",
+            Some(me.as_str()),
+        )?;
         enqueue_group_event(
             &conn,
             &from_peer,
@@ -707,18 +979,22 @@ fn create_outgoing_file(
     chunk_count: i64,
     wrapped_keys: Value,
     original_path: Option<String>,
+    content_sha256: Option<String>,
+    file_crypto_v: Option<i64>,
 ) -> Result<FileCreateResult, String> {
     let profile = {
         let conn = state.db.lock();
         db::get_profile(&conn)?.ok_or("no profile")?
     };
+    if size_bytes <= 0 || size_bytes > MAX_FILE_BYTES {
+        return Err(format!("file size must be 1..{MAX_FILE_BYTES} bytes"));
+    }
+    if chunk_count <= 0 || chunk_count > MAX_CHUNKS {
+        return Err(format!("chunk_count must be 1..{MAX_CHUNKS}"));
+    }
+    let crypto_v = file_crypto_v.unwrap_or(2).clamp(1, 2);
     let file_id = uuid::Uuid::new_v4().to_string();
-    let staging = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("staging")
-        .join(&file_id);
+    let staging = resolve_staging_dir(&app, &file_id)?;
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
     let meta = json!({
         "id": file_id,
@@ -732,6 +1008,8 @@ fn create_outgoing_file(
         "staging_dir": staging.display().to_string(),
         "local_path": original_path,
         "created_at": now(),
+        "content_sha256": content_sha256,
+        "file_crypto_v": crypto_v,
     });
     {
         let conn = state.db.lock();
@@ -744,16 +1022,40 @@ fn create_outgoing_file(
 }
 
 #[tauri::command]
+fn set_file_content_hash(
+    state: State<AppState>,
+    file_id: String,
+    content_sha256: String,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::set_file_content_hash(&conn, &file_id, &content_sha256)
+}
+
+#[tauri::command]
 fn write_file_chunk(
-    staging_dir: String,
+    app: AppHandle,
+    state: State<AppState>,
+    file_id: String,
     index: u32,
     data_b64: String,
     nonce: String,
 ) -> Result<(), String> {
     let data = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
+        .decode(&data_b64)
         .map_err(|e| e.to_string())?;
-    let dir = PathBuf::from(staging_dir);
+    if data.len() > MAX_CHUNK_BYTES {
+        return Err(format!("chunk exceeds {MAX_CHUNK_BYTES} bytes"));
+    }
+    {
+        let conn = state.db.lock();
+        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let me = profile["id"].as_str().unwrap_or("");
+        let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
+        if file["uploader_id"].as_str() != Some(me) {
+            return Err("only uploader may write staging chunks".into());
+        }
+    }
+    let dir = resolve_staging_dir(&app, &file_id)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(format!("{index}.chunk")), data).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(format!("{index}.nonce")), nonce).map_err(|e| e.to_string())?;
@@ -910,27 +1212,16 @@ async fn save_downloaded_file(
     let data = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
         .map_err(|e| e.to_string())?;
-    let safe: String = filename
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let name = if safe.trim().is_empty() {
-        "download.bin".into()
-    } else {
-        safe
-    };
+    if data.len() > MAX_FILE_BYTES as usize {
+        return Err("decoded file exceeds size limit".into());
+    }
+    let name = safe_download_name(&filename);
     let base = app
         .path()
         .download_dir()
         .or_else(|_| app.path().app_data_dir())
         .map_err(|e| e.to_string())?;
-    let dir = base.join("LanMsg");
+    let dir = base.join("PeerTalk");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut path = dir.join(&name);
     if path.exists() {
@@ -940,12 +1231,131 @@ async fn save_downloaded_file(
             .unwrap_or(0);
         path = dir.join(format!("{name}-{stamp}"));
     }
+    // Reject path escape even after join.
+    if !path.starts_with(&dir) {
+        return Err("invalid download path".into());
+    }
     std::fs::write(&path, &data).map_err(|e| e.to_string())?;
     if let Some(file_id) = file_id {
         let conn = state.db.lock();
         db::set_file_local_path(&conn, &file_id, &path.display().to_string())?;
+        let _ = db::clear_receive_progress(&conn, &file_id);
     }
     Ok(path.display().to_string())
+}
+
+#[tauri::command]
+fn begin_file_receive(app: AppHandle, state: State<AppState>, file_id: String) -> Result<Value, String> {
+    let conn = state.db.lock();
+    if let Ok(Some((next, temp))) = db::get_receive_progress(&conn, &file_id) {
+        return Ok(json!({ "next_index": next, "temp_path": temp }));
+    }
+    let tmp_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("incoming");
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let temp = tmp_dir.join(format!("{file_id}.part"));
+    if temp.exists() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    std::fs::File::create(&temp).map_err(|e| e.to_string())?;
+    db::upsert_receive_progress(&conn, &file_id, 0, Some(&temp.display().to_string()))?;
+    Ok(json!({ "next_index": 0, "temp_path": temp.display().to_string() }))
+}
+
+#[tauri::command]
+fn append_file_receive(
+    state: State<AppState>,
+    file_id: String,
+    index: u32,
+    data_b64: String,
+) -> Result<(), String> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|e| e.to_string())?;
+    if data.len() > MAX_CHUNK_BYTES {
+        return Err("chunk too large".into());
+    }
+    let (expected, temp) = {
+        let conn = state.db.lock();
+        let prog = db::get_receive_progress(&conn, &file_id)?.ok_or("receive not started")?;
+        prog
+    };
+    if index as i64 != expected {
+        return Err(format!("expected chunk {expected}, got {index}"));
+    }
+    let path = PathBuf::from(temp.ok_or("missing temp path")?);
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    f.write_all(&data).map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
+    db::upsert_receive_progress(
+        &conn,
+        &file_id,
+        expected + 1,
+        Some(&path.display().to_string()),
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+fn finalize_file_receive(
+    app: AppHandle,
+    state: State<AppState>,
+    file_id: String,
+    filename: String,
+) -> Result<String, String> {
+    let temp = {
+        let conn = state.db.lock();
+        let prog = db::get_receive_progress(&conn, &file_id)?.ok_or("receive not started")?;
+        PathBuf::from(prog.1.ok_or("missing temp path")?)
+    };
+    if !temp.is_file() {
+        return Err("temp file missing".into());
+    }
+    let name = safe_download_name(&filename);
+    let base = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().app_data_dir())
+        .map_err(|e| e.to_string())?;
+    let dir = base.join("PeerTalk");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut path = dir.join(&name);
+    if path.exists() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        path = dir.join(format!("{name}-{stamp}"));
+    }
+    if !path.starts_with(&dir) {
+        return Err("invalid download path".into());
+    }
+    std::fs::rename(&temp, &path)
+        .or_else(|_| {
+            std::fs::copy(&temp, &path).map(|_| ()).and_then(|_| std::fs::remove_file(&temp))
+        })
+        .map_err(|e| e.to_string())?;
+    let conn = state.db.lock();
+    db::set_file_local_path(&conn, &file_id, &path.display().to_string())?;
+    let _ = db::clear_receive_progress(&conn, &file_id);
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+fn get_receive_progress(state: State<AppState>, file_id: String) -> Result<Value, String> {
+    let conn = state.db.lock();
+    match db::get_receive_progress(&conn, &file_id)? {
+        Some((next, temp)) => Ok(json!({ "next_index": next, "temp_path": temp })),
+        None => Ok(json!({ "next_index": 0, "temp_path": Value::Null })),
+    }
 }
 
 #[tauri::command]
@@ -1027,8 +1437,13 @@ pub fn run() {
                 fingerprint: Mutex::new(String::new()),
                 started: Mutex::new(false),
             });
-            // auto-start if profile exists
-            if let Ok(Some(p)) = db::get_profile(&shared.lock()) {
+            // auto-start if profile exists (drop DB lock before starting runtime —
+            // holding it across start_runtime_inner deadlocks on the same Mutex).
+            let existing = {
+                let conn = shared.lock();
+                db::get_profile(&conn).ok().flatten()
+            };
+            if let Some(p) = existing {
                 let state = app.state::<AppState>();
                 let _ = start_runtime_inner(
                     &state,
@@ -1044,14 +1459,23 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_profile,
             setup_profile,
+            update_display_name,
+            set_conversation_pinned,
+            set_conversation_muted,
+            list_pinned_messages,
+            get_notifications_enabled,
+            set_notifications_enabled,
+            conversation_is_muted,
             my_fingerprint,
             discover_peers,
+            list_lan_hosts,
             list_peers,
             pin_peer,
             list_conversations,
             open_dm,
             create_group,
             list_messages,
+            retry_message,
             delete_message_for_me,
             delete_message_for_everyone,
             abort_outgoing_file,
@@ -1065,15 +1489,36 @@ pub fn run() {
             leave_group,
             create_outgoing_file,
             write_file_chunk,
+            set_file_content_hash,
             send_file_notice,
             fetch_file_chunk,
             ack_file_download,
             get_file,
             save_downloaded_file,
+            begin_file_receive,
+            append_file_receive,
+            finalize_file_receive,
+            get_receive_progress,
             open_local_file,
             read_local_file,
             tls_fingerprint_peer,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running LanMsg");
+        .expect("error while running PeerTalk");
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::safe_download_name;
+
+    #[test]
+    fn rejects_path_traversal_names() {
+        let n = safe_download_name("../etc/passwd");
+        assert!(!n.contains(".."));
+        assert_ne!(n, "download.bin");
+        let n2 = safe_download_name("..\\secret.txt");
+        assert!(!n2.contains(".."));
+        assert_eq!(safe_download_name(""), "download.bin");
+        assert_eq!(safe_download_name("notes.pdf"), "notes.pdf");
+    }
 }

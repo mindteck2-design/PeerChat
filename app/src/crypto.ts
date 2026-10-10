@@ -127,6 +127,26 @@ export async function encryptMessage(
   };
 }
 
+export function verifyMessageSignature(
+  msg: {
+    ciphertext: string;
+    nonce: string;
+    signature?: string;
+    conversation_id: string;
+    sender_id: string;
+  },
+  senderEd25519PublicB64: string
+) {
+  if (!msg.signature) throw new Error("Missing signature");
+  const toSign = sha256(
+    new TextEncoder().encode(
+      `${msg.conversation_id}|${msg.sender_id}|${msg.nonce}|${msg.ciphertext}`
+    )
+  );
+  const ok = ed25519.verify(fromB64(msg.signature), toSign, fromB64(senderEd25519PublicB64));
+  if (!ok) throw new Error("Invalid message signature");
+}
+
 export async function decryptMessage(
   msg: {
     ciphertext: string;
@@ -134,10 +154,15 @@ export async function decryptMessage(
     wrapped_keys: Record<string, { eph_pub: string; nonce: string; wrapped: string }>;
     conversation_id: string;
     sender_id: string;
+    signature?: string;
   },
   myUserId: string,
-  identity: Identity
+  identity: Identity,
+  senderEd25519PublicB64?: string
 ) {
+  if (senderEd25519PublicB64) {
+    verifyMessageSignature(msg, senderEd25519PublicB64);
+  }
   const bundle = msg.wrapped_keys[myUserId];
   if (!bundle) throw new Error("No wrapped key for this user");
   const contentKey = unwrapKey(bundle, identity.x25519Private);
@@ -193,9 +218,19 @@ export async function encryptWithGroupKey(
 }
 
 export async function decryptWithGroupKey(
-  msg: { ciphertext: string; nonce: string; conversation_id: string; sender_id: string },
-  groupKey: Uint8Array
+  msg: {
+    ciphertext: string;
+    nonce: string;
+    conversation_id: string;
+    sender_id: string;
+    signature?: string;
+  },
+  groupKey: Uint8Array,
+  senderEd25519PublicB64?: string
 ) {
+  if (senderEd25519PublicB64) {
+    verifyMessageSignature(msg, senderEd25519PublicB64);
+  }
   const ad = new TextEncoder().encode(`${msg.conversation_id}|${msg.sender_id}`);
   const cipher = gcm(groupKey, fromB64(msg.nonce), ad);
   return new TextDecoder().decode(cipher.decrypt(fromB64(msg.ciphertext)));
@@ -213,15 +248,41 @@ export async function prepareFileEncryption(
   return { contentKey, wrapped_keys };
 }
 
-export function encryptChunk(contentKey: Uint8Array, plain: Uint8Array) {
+/** file_crypto_v >= 2 binds chunk index into AES-GCM AAD. */
+export function encryptChunk(
+  contentKey: Uint8Array,
+  plain: Uint8Array,
+  chunkIndex?: number
+) {
   const nonce = randomBytes(12);
-  const cipher = gcm(contentKey, nonce);
+  const cipher =
+    chunkIndex === undefined
+      ? gcm(contentKey, nonce)
+      : gcm(contentKey, nonce, new TextEncoder().encode(`chunk:${chunkIndex}`));
   const ciphertext = cipher.encrypt(plain);
   return { nonce: b64(nonce), ciphertext, ciphertextB64: b64(ciphertext) };
 }
 
-export function decryptChunk(contentKey: Uint8Array, nonceB64: string, ct: Uint8Array) {
-  return gcm(contentKey, fromB64(nonceB64)).decrypt(ct);
+export function decryptChunk(
+  contentKey: Uint8Array,
+  nonceB64: string,
+  ct: Uint8Array,
+  chunkIndex?: number
+) {
+  const nonce = fromB64(nonceB64);
+  const cipher =
+    chunkIndex === undefined
+      ? gcm(contentKey, nonce)
+      : gcm(contentKey, nonce, new TextEncoder().encode(`chunk:${chunkIndex}`));
+  return cipher.decrypt(ct);
+}
+
+export function sha256Hex(data: Uint8Array): string {
+  return bytesToHex(sha256(data));
+}
+
+export function createSha256() {
+  return sha256.create();
 }
 
 /** Encrypt filename with the same content key as file chunks. */

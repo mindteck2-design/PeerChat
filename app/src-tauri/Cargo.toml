@@ -1,8 +1,8 @@
 [package]
 name = "lanmsg"
 version = "0.1.0"
-description = "LanMsg secure P2P messenger"
-authors = ["LanMsg"]
+description = "PeerTalk secure P2P LAN messenger"
+authors = ["PeerTalk"]
 edition = "2021"
 
 [lib]

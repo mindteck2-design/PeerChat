@@ -1,6 +1,8 @@
-# LanMsg (P2P)
+# PeerTalk (P2P)
 
-Desktop messenger for the LAN — **no central server**. Each PC runs the Tauri app, stores data in **local SQLite**, discovers peers over **UDP**, and delivers **E2E-encrypted** messages/files directly. If a peer is offline, ciphertext stays in the **sender outbox** until they return.
+Desktop messenger for the LAN — **no central server**. Each PC runs the Tauri app (**PeerTalk**), stores data in **local SQLite**, discovers peers over **UDP**, and delivers **E2E-encrypted** messages/files directly. If a peer is offline, ciphertext stays in the **sender outbox** until they return.
+
+Stable V1 identifiers remain `com.lanmsg.app` / `lanmsg.sqlite` so existing installs keep working.
 
 ```
 D:\LanMsg\

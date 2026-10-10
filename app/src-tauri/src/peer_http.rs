@@ -13,17 +13,45 @@ use tokio_rustls::TlsConnector;
 
 pub type SharedDb = Arc<Mutex<Connection>>;
 
+/// Pick a free TCP listen port: prefer `preferred`, then 9877..9899, then ephemeral.
+pub fn allocate_listen_port(preferred: u16) -> Result<u16, String> {
+    let start = if preferred == 0 { 9876 } else { preferred };
+    for p in start..=9899u16 {
+        if std::net::TcpListener::bind(("0.0.0.0", p)).is_ok() {
+            return Ok(p);
+        }
+    }
+    for p in 9876..start {
+        if std::net::TcpListener::bind(("0.0.0.0", p)).is_ok() {
+            return Ok(p);
+        }
+    }
+    let l = std::net::TcpListener::bind(("0.0.0.0", 0)).map_err(|e| e.to_string())?;
+    let port = l.local_addr().map_err(|e| e.to_string())?.port();
+    drop(l);
+    Ok(port)
+}
+
 pub fn spawn_listener(
     cert: LocalCert,
     port: u16,
     db: SharedDb,
     my_id: String,
 ) -> Result<(), String> {
+    // Confirm bind before spawning accept loop so setup can fail loudly.
+    {
+        let probe = std::net::TcpListener::bind(("0.0.0.0", port))
+            .map_err(|e| format!("cannot bind TCP port {port}: {e}"))?;
+        drop(probe);
+    }
     let cfg = Arc::new(tls_cert::rustls_server_config(&cert)?);
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
             Ok(l) => l,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("PeerTalk listener bind failed on {port}: {e}");
+                return;
+            }
         };
         let acceptor = tokio_rustls::TlsAcceptor::from(cfg);
         loop {
@@ -37,14 +65,46 @@ pub fn spawn_listener(
                 let Ok(mut tls) = acceptor.accept(tcp).await else {
                     return;
                 };
-                let mut buf = vec![0u8; 256 * 1024];
-                let Ok(n) = tls.read(&mut buf).await else {
-                    return;
-                };
-                if n == 0 {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 64 * 1024];
+                const MAX_REQ: usize = 16 * 1024 * 1024;
+                loop {
+                    match tls.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if buf.len() + n > MAX_REQ {
+                                buf.clear();
+                                break;
+                            }
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                // If Content-Length is present, keep reading until full body.
+                                let head = String::from_utf8_lossy(&buf);
+                                if let Some(cl) = head
+                                    .lines()
+                                    .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                                    .and_then(|l| l.split(':').nth(1))
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                                {
+                                    if let Some(pos) = head.find("\r\n\r\n") {
+                                        let body_len = buf.len().saturating_sub(pos + 4);
+                                        if body_len >= cl {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if buf.is_empty() {
                     return;
                 }
-                let req = String::from_utf8_lossy(&buf[..n]);
+                let req = String::from_utf8_lossy(&buf);
                 let resp = handle_http(&req, &db, &my_id);
                 let _ = tls.write_all(resp.as_bytes()).await;
                 let _ = tls.shutdown().await;
@@ -79,10 +139,25 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str) -> String {
             )
         }
         ("POST", "/v1/deliver") => {
+            const MAX_DELIVER_BODY: usize = 2 * 1024 * 1024;
+            if body.len() > MAX_DELIVER_BODY {
+                return http_json(400, json!({"error":"frame too large"}));
+            }
             let Ok(payload) = serde_json::from_str::<Value>(body) else {
                 return http_json(400, json!({"error":"bad json"}));
             };
+            if let Some(ct) = payload
+                .pointer("/message/ciphertext")
+                .and_then(|v| v.as_str())
+            {
+                if ct.len() > MAX_DELIVER_BODY {
+                    return http_json(400, json!({"error":"ciphertext too large"}));
+                }
+            }
             let conn = db.lock();
+            if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+                return http_json(500, json!({"error":"db busy"}));
+            }
             if let Some(msg) = payload.get("message") {
                 if payload
                     .get("delete_for_everyone")
@@ -118,15 +193,55 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str) -> String {
                 }
             }
             if let Some(peer) = payload.get("from_peer") {
+                let uid = peer["user_id"].as_str().unwrap_or("").to_string();
+                let mut dn = peer["display_name"]
+                    .as_str()
+                    .unwrap_or("peer")
+                    .to_string();
+                let mut x = peer["x25519_public"].as_str().unwrap_or("").to_string();
+                let mut e = peer["ed25519_public"].as_str().unwrap_or("").to_string();
+                let mut fp = peer
+                    .get("tls_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Ok(Some(existing)) = db::get_peer(&conn, &uid) {
+                    if existing["pinned"].as_bool().unwrap_or(false) {
+                        let same_fp = existing["tls_fingerprint"].as_str() == fp.as_deref()
+                            || fp.as_ref().map(|s| s.is_empty()).unwrap_or(true);
+                        let same_x = existing["x25519_public"].as_str() == Some(x.as_str());
+                        let same_e = existing["ed25519_public"].as_str() == Some(e.as_str());
+                        if !(same_fp && same_x && same_e) {
+                            let _ = db::set_peer_pending_identity(
+                                &conn,
+                                &uid,
+                                peer.get("tls_fingerprint").and_then(|v| v.as_str()).unwrap_or(""),
+                                peer["x25519_public"].as_str().unwrap_or(""),
+                                peer["ed25519_public"].as_str().unwrap_or(""),
+                            );
+                            if let Some(s) = existing["display_name"].as_str() {
+                                dn = s.to_string();
+                            }
+                            if let Some(s) = existing["x25519_public"].as_str() {
+                                x = s.to_string();
+                            }
+                            if let Some(s) = existing["ed25519_public"].as_str() {
+                                e = s.to_string();
+                            }
+                            fp = existing["tls_fingerprint"]
+                                .as_str()
+                                .map(|s| s.to_string());
+                        }
+                    }
+                }
                 let _ = db::upsert_peer(
                     &conn,
-                    peer["user_id"].as_str().unwrap_or(""),
-                    peer["display_name"].as_str().unwrap_or("peer"),
-                    peer["x25519_public"].as_str().unwrap_or(""),
-                    peer["ed25519_public"].as_str().unwrap_or(""),
+                    &uid,
+                    &dn,
+                    &x,
+                    &e,
                     peer.get("last_ip").and_then(|v| v.as_str()),
                     peer.get("last_port").and_then(|v| v.as_i64()),
-                    peer.get("tls_fingerprint").and_then(|v| v.as_str()),
+                    fp.as_deref(),
                     true,
                 );
             }
@@ -197,6 +312,10 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str) -> String {
                     }
                 }
             }
+            if conn.execute_batch("COMMIT").is_err() {
+                let _ = conn.execute_batch("ROLLBACK");
+                return http_json(500, json!({"error":"commit failed"}));
+            }
             http_json(200, json!({"ok": true}))
         }
         ("POST", "/v1/file/chunk") => {
@@ -209,7 +328,18 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str) -> String {
             let Some(meta) = db::get_file(&conn, file_id).ok().flatten() else {
                 return http_json(404, json!({"error":"missing file"}));
             };
+            let cid = meta["conversation_id"].as_str().unwrap_or("");
+            let uploader = meta["uploader_id"].as_str().unwrap_or("");
+            // Only conversation members (or the uploader) may fetch chunks.
+            let allowed = uploader == my_id
+                || db::is_conversation_member(&conn, cid, my_id).unwrap_or(false);
+            if !allowed {
+                return http_json(403, json!({"error":"forbidden"}));
+            }
             let staging = meta["staging_dir"].as_str().unwrap_or("");
+            if staging.is_empty() || staging.contains("..") {
+                return http_json(404, json!({"error":"missing staging"}));
+            }
             let path = std::path::Path::new(staging).join(format!("{index}.chunk"));
             let nonce_path = std::path::Path::new(staging).join(format!("{index}.nonce"));
             let Ok(data) = std::fs::read(&path) else {
@@ -230,7 +360,8 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str) -> String {
                 return http_json(400, json!({"error":"bad json"}));
             };
             let file_id = payload["file_id"].as_str().unwrap_or("");
-            let user_id = payload["user_id"].as_str().unwrap_or(my_id);
+            // Ignore spoofed user_id; bind ack to this peer's authenticated profile id.
+            let user_id = my_id;
             let conn = db.lock();
             let _ = db::ack_file(&conn, file_id, user_id);
             // If we are uploader, maybe purge staging when all members acked
@@ -255,6 +386,7 @@ fn http_json(code: u16, body: Value) -> String {
     let status = match code {
         200 => "200 OK",
         400 => "400 Bad Request",
+        403 => "403 Forbidden",
         404 => "404 Not Found",
         _ => "500 Error",
     };
@@ -354,11 +486,17 @@ pub async fn peer_request(
         .await
         .map_err(|e| e.to_string())?;
     let mut resp = Vec::new();
-    let mut tmp = [0u8; 8192];
+    let mut tmp = [0u8; 64 * 1024];
+    const MAX_RESP: usize = 16 * 1024 * 1024;
     loop {
         match tls.read(&mut tmp).await {
             Ok(0) => break,
-            Ok(n) => resp.extend_from_slice(&tmp[..n]),
+            Ok(n) => {
+                if resp.len() + n > MAX_RESP {
+                    return Err("peer response too large".into());
+                }
+                resp.extend_from_slice(&tmp[..n]);
+            }
             Err(_) => break,
         }
     }
