@@ -320,7 +320,10 @@ type FilePreview = {
 
 type StagedFile = {
   id: string;
-  file: File;
+  /** Browser File from picker, or a disk path from Tauri drag-drop / Share. */
+  source: File | { path: string; name: string; size: number };
+  name: string;
+  size: number;
   previewUrl: string | null;
 };
 
@@ -649,7 +652,16 @@ function ChatScreen({
 
   const [fileNames, setFileNames] = useState<Record<string, string>>({});
   const [pendingShareFiles, setPendingShareFiles] = useState<string[]>([]);
-  const [scanWarn, setScanWarn] = useState<{ detail: string; onProceed: () => void } | null>(null);
+  const [scanWarn, setScanWarn] = useState<{
+    detail: string;
+    title?: string;
+    body?: string;
+    proceedLabel?: string;
+    onProceed: () => void;
+    onCancel?: () => void;
+  } | null>(null);
+  const [dragOverChat, setDragOverChat] = useState(false);
+  const stickToBottomRef = useRef(true);
 
   // Ref for the active game's inbound message dispatcher (set by each game component)
   const gameDispatchRef = useRef<GameDispatchFn | null>(null);
@@ -967,6 +979,7 @@ function ChatScreen({
         if (kind === "reaction" || kind === "pin" || kind === "unpin" || kind === "deleted") return;
 
         // Decrypt game_move for session persistence + active game UI.
+        // Moves carry boardAfter so a single latest snapshot can resync state.
         if (kind === "game_move") {
           try {
             const msgs = await peerApi.listMessages(cid);
@@ -981,7 +994,6 @@ function ChatScreen({
               identity
             );
             const gameMsg = JSON.parse(plaintext) as GameMsg;
-            // Always keep LAN session in sync even when GamesHub is unmounted.
             applyInboundToSession(fromId, gameMsg, peerList, profile.id);
             gameDispatchRef.current?.(fromId, gameMsg);
           } catch {
@@ -1122,9 +1134,27 @@ function ChatScreen({
   }, [active?.id]);
 
   useEffect(() => {
+    stickToBottomRef.current = true;
+  }, [active?.id]);
+
+  useEffect(() => {
+    if (!stickToBottomRef.current) return;
     const el = scroller.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, active?.id, outgoingFile?.done, incomingFile?.done]);
+    if (!el) return;
+    const snap = () => {
+      el.scrollTop = el.scrollHeight;
+    };
+    snap();
+    requestAnimationFrame(snap);
+    const t = window.setTimeout(snap, 80);
+    return () => window.clearTimeout(t);
+  }, [
+    messages.length,
+    active?.id,
+    outgoingFile?.done,
+    incomingFile?.done,
+    Object.keys(plain).length,
+  ]);
 
   useEffect(() => {
     if (!active || !messages.some((m) => m.sender_id !== profile.id)) return;
@@ -1201,16 +1231,43 @@ function ChatScreen({
     return () => { unlisten?.(); };
   }, []);
 
-  // When pendingShareFiles arrives, stage them as outgoing files on the active conversation.
-  // If no conversation is active, just keep them queued and let the user select one first.
+  // Native OS drag-drop (WebView HTML5 File DnD often has empty paths on Windows).
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          setDragOverChat(true);
+        } else if (payload.type === "leave") {
+          setDragOverChat(false);
+        } else if (payload.type === "drop") {
+          setDragOverChat(false);
+          const paths = payload.paths || [];
+          if (!paths.length) return;
+          if (!activeRef.current) {
+            setPendingShareFiles(paths);
+            setStatus("Select a conversation, then drop again — or files are queued.");
+            return;
+          }
+          void stageDiskPaths(paths);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // When pendingShareFiles arrives, stage them on the active conversation.
   useEffect(() => {
     if (!pendingShareFiles.length || !active) return;
     const files = pendingShareFiles;
     setPendingShareFiles([]);
-    for (const path of files) {
-      const name = path.replace(/\\/g, "/").split("/").pop() || "shared-file";
-      sendFile({ path, name, size: 0 });
-    }
+    void stageDiskPaths(files);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingShareFiles, active?.id]);
 
@@ -1256,12 +1313,44 @@ function ChatScreen({
   }
 
   function stageFiles(files: File[]) {
-    const next = files.map((file) => ({
+    const next: StagedFile[] = files.map((file) => ({
       id: `${file.name}-${file.size}-${Math.random().toString(16).slice(2)}`,
-      file,
+      source: file,
+      name: file.name,
+      size: file.size,
       previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
     }));
     setStagedFiles((prev) => [...prev, ...next]);
+  }
+
+  async function stageDiskPaths(paths: string[]) {
+    const next: StagedFile[] = [];
+    for (const path of paths) {
+      try {
+        const meta = await peerApi.localPathMeta(path);
+        if (meta.is_dir) {
+          // Folders: pack as ZIP via existing bundle path on send.
+          next.push({
+            id: `${meta.name}-dir-${Math.random().toString(16).slice(2)}`,
+            source: { path: meta.path, name: meta.name, size: meta.size },
+            name: `${meta.name}/ (folder)`,
+            size: meta.size,
+            previewUrl: null,
+          });
+        } else {
+          next.push({
+            id: `${meta.name}-${meta.size}-${Math.random().toString(16).slice(2)}`,
+            source: { path: meta.path, name: meta.name, size: meta.size },
+            name: meta.name,
+            size: meta.size,
+            previewUrl: null,
+          });
+        }
+      } catch (err: any) {
+        setStatus(err?.message || `Can't read ${path}`);
+      }
+    }
+    if (next.length) setStagedFiles((prev) => [...prev, ...next]);
   }
 
   function removeStagedFile(id: string) {
@@ -1562,7 +1651,25 @@ function ChatScreen({
     queueAbortRef.current = false;
     for (const sf of files) {
       if (queueAbortRef.current) break;
-      await sendFile(sf.file);
+      const src = sf.source;
+      if (!(src instanceof File) && sf.name.includes("(folder)")) {
+        try {
+          const entries = await peerApi.listDirectoryFiles(src.path);
+          if (!entries.length) {
+            setStatus(`Folder empty: ${src.name}`);
+            continue;
+          }
+          const packed = await peerApi.packBundle(
+            entries.map((e) => ({ abs_path: e.abs_path, rel_path: e.rel_path }))
+          );
+          await sendFile({ path: packed.path, name: packed.name, size: packed.size });
+          await peerApi.deleteBundleFile(packed.path).catch(() => {});
+        } catch (err: any) {
+          setStatus(err?.message || String(err));
+        }
+        continue;
+      }
+      await sendFile(src);
     }
   }
 
@@ -2090,21 +2197,40 @@ function ChatScreen({
       const path = await peerApi.finalizeFileReceive(fileId, name);
       const check = await peerApi.verifyDownloadedFile(fileId);
 
-      // Virus scan the assembled file before accepting it.
+      // Virus scan — warn on hit but keep the download (preview/save already bypassed scan).
       const scanResult = await peerApi.scanFile(path).catch((): ScanResult => ({
         clean: true, engine: "none", detail: "scan unavailable", skipped: true,
       }));
+      let scanWarned = false;
       if (!scanResult.clean) {
-        // Threat confirmed — delete the file and abort.
-        try { await import("@tauri-apps/api/path").then(() => peerApi.discardFileReceive(fileId)); } catch {}
-        try { await (await import("@tauri-apps/api/core")).invoke("plugin:fs|remove_file", { path }); } catch {}
-        throw new Error(`Blocked by virus scanner (${scanResult.engine}): ${scanResult.detail}`);
+        scanWarned = true;
+        await new Promise<void>((resolve) => {
+          setScanWarn({
+            title: "Virus scanner warning",
+            detail: scanResult.detail,
+            body:
+              "Windows Defender flagged this file. It is still saved so you can open or delete it yourself. Treat unexpected files from unknown peers with caution.",
+            proceedLabel: "Keep file",
+            onProceed: () => {
+              setScanWarn(null);
+              resolve();
+            },
+            onCancel: () => {
+              setScanWarn(null);
+              resolve();
+            },
+          });
+        });
       }
 
       if (uploaderId !== profile.id) {
         await peerApi.ackFileDownload(fileId, uploaderId).catch(() => {});
       }
-      const scanNote = scanResult.skipped ? null : `Scanned clean by ${scanResult.engine}`;
+      const scanNote = scanResult.skipped
+        ? null
+        : scanWarned
+          ? `⚠ ${scanResult.engine} warning`
+          : `Scanned clean by ${scanResult.engine}`;
       await recordTransfer({
         id: transferId,
         filename: name,
@@ -2858,6 +2984,26 @@ function ChatScreen({
             dispatchRef={gameDispatchRef}
             pendingInvite={pendingGameInvite}
             onPendingConsumed={() => setPendingGameInvite(null)}
+            replayLanMoves={async (peerId, matchId) => {
+              const conv = await peerApi.openDm(peerId);
+              const msgs = await peerApi.listMessages(conv.id);
+              const out: GameMsg[] = [];
+              for (const m of msgs) {
+                if (m.kind !== "game_move") continue;
+                try {
+                  const plaintext = await decryptMessage(
+                    { ...m, wrapped_keys: m.wrapped_keys || {} },
+                    profile.id,
+                    identity
+                  );
+                  const gm = JSON.parse(plaintext) as GameMsg;
+                  if (matchIdOf(gm) === matchId) out.push(gm);
+                } catch {
+                  /* skip */
+                }
+              }
+              return out;
+            }}
           />
         ) : (
           <Box p={3}><Alert severity="info">Games are turned off in Settings.</Alert></Box>
@@ -2990,14 +3136,54 @@ function ChatScreen({
           display="flex"
           flexDirection="column"
           gap={0.75}
+          position="relative"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+            stickToBottomRef.current = dist < 80;
+          }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setDragOverChat(true);
+          }}
+          onDragLeave={() => setDragOverChat(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setDragOverChat(false);
+            const files = Array.from(e.dataTransfer.files || []);
+            if (files.length) stageFiles(files);
+          }}
           sx={{
             bgcolor: "background.default",
             backgroundImage: dark
               ? "radial-gradient(rgba(76,141,255,0.08) 1px, transparent 1px)"
               : "radial-gradient(rgba(15,107,92,0.06) 1px, transparent 1px)",
             backgroundSize: "18px 18px",
+            outline: dragOverChat ? "2px dashed" : "none",
+            outlineColor: "primary.main",
+            outlineOffset: -8,
           }}
         >
+          {dragOverChat && (
+            <Box
+              position="absolute"
+              top={0}
+              left={0}
+              right={0}
+              bottom={0}
+              zIndex={5}
+              display="flex"
+              alignItems="center"
+              justifyContent="center"
+              sx={{ bgcolor: "rgba(15,107,92,0.12)", pointerEvents: "none" }}
+            >
+              <Paper sx={{ px: 3, py: 2 }}>
+                <Typography fontWeight={700}>Drop files to attach</Typography>
+              </Paper>
+            </Box>
+          )}
           {!active && (
             <Box m="auto" textAlign="center" maxWidth={360}>
               <Typography variant="h5" gutterBottom>
@@ -3696,15 +3882,15 @@ function ChatScreen({
                     )}
                     <Box minWidth={0}>
                       <Typography variant="body2" noWrap sx={{ maxWidth: 160 }}>
-                        {sf.file.name}
+                        {sf.name}
                       </Typography>
                       <Typography variant="caption" color="text.secondary">
-                        {formatBytes(sf.file.size)}
+                        {formatBytes(sf.size)}
                       </Typography>
                     </Box>
                     <IconButton
                       size="small"
-                      aria-label={`Remove ${sf.file.name}`}
+                      aria-label={`Remove ${sf.name}`}
                       onClick={() => removeStagedFile(sf.id)}
                     >
                       <CloseIcon fontSize="small" />
@@ -4543,27 +4729,34 @@ function ChatScreen({
         ctx={commandCtx}
       />
 
-      {/* Virus scan warning — threat found on outgoing file */}
+      {/* Virus scan warning — outgoing send confirm, or inbound download notice */}
       <Dialog open={!!scanWarn} maxWidth="xs" fullWidth>
-        <DialogTitle sx={{ color: "error.main" }}>⚠ Virus threat detected</DialogTitle>
+        <DialogTitle sx={{ color: "warning.main" }}>
+          {scanWarn?.title || "Virus threat detected"}
+        </DialogTitle>
         <DialogContent>
-          <Alert severity="error" sx={{ mb: 1.5 }}>
+          <Alert severity="warning" sx={{ mb: 1.5 }}>
             {scanWarn?.detail}
           </Alert>
           <Typography variant="body2">
-            Windows Defender flagged this file before encryption. Sending it will still
-            encrypt and deliver it, but the recipient's scanner may also block it.
-          </Typography>
-          <Typography variant="body2" sx={{ mt: 1 }} color="text.secondary">
-            For most use cases you should <strong>not</strong> send this file.
+            {scanWarn?.body ||
+              "Windows Defender flagged this file before encryption. Sending it will still encrypt and deliver it, but the recipient's scanner may also flag it."}
           </Typography>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => { setScanWarn(null); setStatus("File not sent (virus scan warning)."); }}>
-            Cancel — don't send
+          <Button
+            onClick={() => {
+              if (scanWarn?.onCancel) scanWarn.onCancel();
+              else {
+                setScanWarn(null);
+                setStatus("File not sent (virus scan warning).");
+              }
+            }}
+          >
+            {scanWarn?.onCancel ? "Dismiss" : "Cancel — don't send"}
           </Button>
-          <Button color="error" variant="contained" onClick={() => scanWarn?.onProceed()}>
-            Send anyway
+          <Button color="warning" variant="contained" onClick={() => scanWarn?.onProceed()}>
+            {scanWarn?.proceedLabel || "Send anyway"}
           </Button>
         </DialogActions>
       </Dialog>

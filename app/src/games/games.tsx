@@ -36,7 +36,7 @@ import UndoIcon from "@mui/icons-material/UndoRounded";
 import RestartAltIcon from "@mui/icons-material/RestartAltRounded";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
-import { newTttState, tttMove, type TttState, type TttMsg } from "./ttt";
+import { newTttState, tttMove, tttStateFromBoard, type TttState, type TttMsg } from "./ttt";
 import { newRpsState, rpsResolveRound, type RpsState, type RpsMsg, type RpsChoice, type MatchFormat } from "./rps";
 import { newDabState, dabMove, type DabState, type DabMsg, type EdgeId } from "./dab";
 import { new2048State, move2048, undo2048, type Direction } from "./g2048";
@@ -118,6 +118,8 @@ const GAME_CARDS = [
 
 type GameId = typeof GAME_CARDS[number]["id"];
 
+export type GameReplayFn = (peerId: string, matchId: string) => Promise<GameMsg[]>;
+
 export function GamesHub({
   peers,
   myId,
@@ -126,6 +128,7 @@ export function GamesHub({
   dispatchRef,
   pendingInvite,
   onPendingConsumed,
+  replayLanMoves,
 }: {
   peers: Peer[];
   myId: string;
@@ -135,6 +138,8 @@ export function GamesHub({
   dispatchRef: React.MutableRefObject<GameDispatchFn | null>;
   pendingInvite?: PendingGameInvite | null;
   onPendingConsumed?: () => void;
+  /** Rebuild LAN board from encrypted chat history when reopening a match */
+  replayLanMoves?: GameReplayFn;
 }) {
   const [active, setActive] = useState<GameId | null>(null);
   const [history, setHistory] = useState<GameHistoryEntry[]>(() => loadGameHistory());
@@ -146,18 +151,17 @@ export function GamesHub({
     setActive(pendingInvite.game);
   }, [pendingInvite]);
 
-  // Keep a hub-level dispatcher so accept/decline/moves update session even when
-  // the user left the game screen (child unmounted).
+  // Hub dispatcher: App already calls applyInboundToSession — only fan out to
+  // the mounted game UI and refresh badges. Avoid double-applying moves.
   useEffect(() => {
     dispatchRef.current = (fromId, msg) => {
-      applyInboundToSession(fromId, msg, peers, myId);
       setSessionTick((n) => n + 1);
       childDispatch.current?.(fromId, msg);
     };
     return () => {
       dispatchRef.current = null;
     };
-  }, [dispatchRef, peers, myId]);
+  }, [dispatchRef]);
 
   const back = () => {
     setActive(null);
@@ -178,6 +182,7 @@ export function GamesHub({
       pendingInvite={pendingInvite?.game === "ttt" ? pendingInvite : null}
       onPendingConsumed={onPendingConsumed}
       onHistory={() => setHistory(loadGameHistory())}
+      replayLanMoves={replayLanMoves}
     />
   );
   if (active === "rps") return (
@@ -204,6 +209,7 @@ export function GamesHub({
       pendingInvite={pendingInvite?.game === "dab" ? pendingInvite : null}
       onPendingConsumed={onPendingConsumed}
       onHistory={() => setHistory(loadGameHistory())}
+      replayLanMoves={replayLanMoves}
     />
   );
 
@@ -362,10 +368,16 @@ export function applyInboundToSession(
       setTttSession({ ...s, mpPhase: "playing", mpError: "" });
     } else if (p.type === "decline" && s.mpPhase === "inviting") {
       setTttSession(null);
-    } else if (p.type === "move" && s.mpPhase === "playing") {
-      const expected = s.myRole === "X" ? "O" : "X";
-      if (s.state.turn !== expected) return;
-      const next = tttMove(s.state, p.index);
+    } else if (p.type === "move" && (s.mpPhase === "playing" || s.mpPhase === "done")) {
+      // Prefer authoritative boardAfter so returning to a match stays in sync
+      // even if a prior move was missed while the Games UI was unmounted.
+      let next: TttState | null = null;
+      if (Array.isArray(p.boardAfter) && p.boardAfter.length === 9) {
+        next = tttStateFromBoard(p.boardAfter);
+      } else {
+        const expected = s.myRole === "X" ? "O" : "X";
+        if (s.state.turn === expected) next = tttMove(s.state, p.index);
+      }
       if (!next) return;
       setTttSession({
         ...s,
@@ -533,10 +545,15 @@ export function applyInboundToSession(
       setDabSession({ ...s, mpPhase: "playing", mpError: "" });
     } else if (p.type === "decline" && s.mpPhase === "inviting") {
       setDabSession(null);
-    } else if (p.type === "move" && s.mpPhase === "playing") {
+    } else if (p.type === "move" && (s.mpPhase === "playing" || s.mpPhase === "done")) {
+      // Apply by edge; if turn guard would reject (missed prior moves), try anyway
+      // after forcing turn to the expected player so the board catches up.
+      let base = s.state;
       const expected = s.myPlayer === "A" ? "B" : "A";
-      if (s.state.turn !== expected) return;
-      const next = dabMove(s.state, p.edge);
+      if (base.turn !== expected) {
+        base = { ...base, turn: expected };
+      }
+      const next = dabMove(base, p.edge);
       if (!next) return;
       setDabSession({
         ...s,
@@ -790,7 +807,7 @@ type TttMode = "local" | "lan";
 type TttLanRole = "X" | "O"; // which symbol I am
 
 function TicTacToe({
-  onBack, peers, myId, myName, sendGameMsg, dispatchRef, pendingInvite, onPendingConsumed, onHistory,
+  onBack, peers, myId, myName, sendGameMsg, dispatchRef, pendingInvite, onPendingConsumed, onHistory, replayLanMoves,
 }: {
   onBack: () => void;
   peers: Peer[];
@@ -801,6 +818,7 @@ function TicTacToe({
   pendingInvite?: PendingGameInvite | null;
   onPendingConsumed?: () => void;
   onHistory?: () => void;
+  replayLanMoves?: GameReplayFn;
 }) {
   const [mode, setMode] = useState<TttMode>("local");
   const [state, setState] = useState<TttState>(newTttState);
@@ -814,6 +832,7 @@ function TicTacToe({
   const [seq, setSeq] = useState(0); // move sequence for ordering
   const pendingConsumed = useRef(false);
   const restored = useRef(false);
+  const replayed = useRef(false);
 
   // Restore LAN session when returning to this game.
   useEffect(() => {
@@ -837,6 +856,56 @@ function TicTacToe({
       });
     }
   }, [peers, pendingInvite]);
+
+  // Reconcile board from chat history (fixes "stuck on opponent's turn" after leaving).
+  useEffect(() => {
+    if (!replayLanMoves || !opponent || !matchId || mode !== "lan") return;
+    if (mpPhase !== "playing" && mpPhase !== "done") return;
+    if (replayed.current) return;
+    replayed.current = true;
+    let cancel = false;
+    void (async () => {
+      try {
+        const msgs = await replayLanMoves(opponent.user_id, matchId);
+        if (cancel || !msgs.length) return;
+        let board = newTttState();
+        let role: TttLanRole = myRole;
+        let phase: MpPhase = "playing";
+        let moveCount = 0;
+        for (const msg of msgs) {
+          if (msg.game !== "ttt") continue;
+          const p = msg.payload as TttMsg;
+          if (p.type === "accept") phase = "playing";
+          if (p.type === "move") {
+            if (Array.isArray(p.boardAfter) && p.boardAfter.length === 9) {
+              board = tttStateFromBoard(p.boardAfter);
+            } else {
+              board = tttMove(board, p.index) ?? board;
+            }
+            moveCount += 1;
+            phase = board.winner !== null ? "done" : "playing";
+          }
+          if (p.type === "rematch") {
+            board = newTttState();
+            role = role === "X" ? "O" : "X";
+            phase = "playing";
+            moveCount = 0;
+          }
+          if (p.type === "result" || p.type === "resign") phase = "done";
+        }
+        if (cancel) return;
+        setState(board);
+        setMyRole(role);
+        setMpPhase(phase);
+        setSeq(moveCount);
+      } catch {
+        /* keep restored session */
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [replayLanMoves, opponent, matchId, mode, mpPhase, myRole]);
 
   // Persist LAN session so leaving the screen does not lose invite/play state.
   useEffect(() => {
@@ -915,12 +984,16 @@ function TicTacToe({
         setTttSession(null);
       }
       if (p.type === "move" && mpPhase === "playing" && p.matchId === matchId) {
-        // Validate: it's the opponent's turn, index is empty
         setState((prev) => {
           if (prev.winner !== null) return prev;
-          const expectedTurn = myRole === "X" ? "O" : "X";
-          if (prev.turn !== expectedTurn) return prev;
-          const next = tttMove(prev, p.index) ?? prev;
+          let next: TttState | null = null;
+          if (Array.isArray(p.boardAfter) && p.boardAfter.length === 9) {
+            next = tttStateFromBoard(p.boardAfter);
+          } else {
+            const expectedTurn = myRole === "X" ? "O" : "X";
+            if (prev.turn === expectedTurn) next = tttMove(prev, p.index);
+          }
+          if (!next) return prev;
           if (next.winner !== null) {
             setMpPhase("done");
             const winnerId =
@@ -1640,7 +1713,7 @@ const PRESET_SIZES: { label: string; rows: number; cols: number }[] = [
 ];
 
 function DotsAndBoxes({
-  onBack, peers, myId, myName, sendGameMsg, dispatchRef, pendingInvite, onPendingConsumed, onHistory,
+  onBack, peers, myId, myName, sendGameMsg, dispatchRef, pendingInvite, onPendingConsumed, onHistory, replayLanMoves,
 }: {
   onBack: () => void;
   peers: Peer[];
@@ -1651,6 +1724,7 @@ function DotsAndBoxes({
   pendingInvite?: PendingGameInvite | null;
   onPendingConsumed?: () => void;
   onHistory?: () => void;
+  replayLanMoves?: GameReplayFn;
 }) {
   const [presetIdx, setPresetIdx] = useState(1);
   const preset = PRESET_SIZES[presetIdx];
@@ -1668,6 +1742,7 @@ function DotsAndBoxes({
   const [mpError, setMpError] = useState("");
   const pendingConsumed = useRef(false);
   const restored = useRef(false);
+  const replayed = useRef(false);
 
   const sendMsg = useCallback(
     async (payload: DabMsg) => {
@@ -1700,6 +1775,51 @@ function DotsAndBoxes({
       });
     }
   }, [peers, pendingInvite]);
+
+  useEffect(() => {
+    if (!replayLanMoves || !opponent || !matchId || mode !== "lan") return;
+    if (mpPhase !== "playing" && mpPhase !== "done") return;
+    if (replayed.current) return;
+    replayed.current = true;
+    let cancel = false;
+    void (async () => {
+      try {
+        const msgs = await replayLanMoves(opponent.user_id, matchId);
+        if (cancel || !msgs.length) return;
+        let board = newDabState(state.rows, state.cols);
+        let phase: MpPhase = "playing";
+        let moveSeq = 0;
+        for (const msg of msgs) {
+          if (msg.game !== "dab") continue;
+          const p = msg.payload as DabMsg;
+          if (p.type === "accept") phase = "playing";
+          if (p.type === "move") {
+            const next = dabMove(board, p.edge);
+            if (next) {
+              board = next;
+              moveSeq = p.seq || moveSeq + 1;
+              phase = next.done ? "done" : "playing";
+            }
+          }
+          if (p.type === "rematch") {
+            board = newDabState(board.rows, board.cols);
+            phase = "playing";
+            moveSeq = 0;
+          }
+          if (p.type === "result" || p.type === "resign") phase = "done";
+        }
+        if (cancel) return;
+        setState(board);
+        setMpPhase(phase);
+        setSeq(moveSeq);
+      } catch {
+        /* keep restored */
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [replayLanMoves, opponent, matchId, mode, mpPhase, state.rows, state.cols]);
 
   useEffect(() => {
     if (mode !== "lan") return;
@@ -1779,8 +1899,12 @@ function DotsAndBoxes({
       if (p.type === "move" && mpPhase === "playing" && p.matchId === matchId) {
         const expectedPlayer = myPlayer === "A" ? "B" : "A";
         setState((prev) => {
-          if (prev.turn !== expectedPlayer) return prev;
-          const next = dabMove(prev, p.edge) ?? prev;
+          const base =
+            prev.turn === expectedPlayer
+              ? prev
+              : { ...prev, turn: expectedPlayer as "A" | "B" };
+          const next = dabMove(base, p.edge);
+          if (!next) return prev;
           if (next.done) {
             setMpPhase("done");
             const winnerId =

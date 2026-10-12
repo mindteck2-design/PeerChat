@@ -33,6 +33,20 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+fn drain_pending_show(app: &AppHandle) {
+    let Ok(local) = std::env::var("LOCALAPPDATA") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(local)
+        .join("com.lanmsg.app")
+        .join("pending-show");
+    if !path.exists() {
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    show_main_window(app);
+}
+
 fn drain_pending_share(app: &AppHandle) {
     let Ok(local) = std::env::var("LOCALAPPDATA") else {
         return;
@@ -52,6 +66,12 @@ fn drain_pending_share(app: &AppHandle) {
     }
     show_main_window(app);
     let _ = app.emit("share-files", files);
+}
+
+/// Poll flags left by a second Start Menu / Apps launch (or --share).
+fn drain_second_instance_signals(app: &AppHandle) {
+    drain_pending_show(app);
+    drain_pending_share(app);
 }
 
 struct AppState {
@@ -2128,6 +2148,32 @@ struct ScanResult {
     skipped: bool,
 }
 
+#[derive(Serialize)]
+struct LocalPathMeta {
+    path: String,
+    name: String,
+    size: u64,
+    is_dir: bool,
+}
+
+/// Stat a local path for drag-drop / share staging (size + basename).
+#[tauri::command]
+fn local_path_meta(path: String) -> Result<LocalPathMeta, String> {
+    let p = std::path::Path::new(&path);
+    let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+    let name = p
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_string();
+    Ok(LocalPathMeta {
+        path,
+        name,
+        size: meta.len(),
+        is_dir: meta.is_dir(),
+    })
+}
+
 /// Scan a file path with the system AV (Windows Defender on Windows).
 /// Returns {clean, engine, detail, skipped}. Never returns Err — on failure
 /// the result is skipped=true so the caller can decide how to proceed.
@@ -2415,26 +2461,25 @@ pub fn run() {
             // Keep the handle alive for the process lifetime (managed by Tauri).
             std::mem::forget(tray);
 
-            // Pick up --share files left by a preempted second instance.
-            drain_pending_share(app.handle());
+            // Pick up Start Menu reopen / --share signals from a preempted second instance.
+            drain_second_instance_signals(app.handle());
             let share_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
-                    drain_pending_share(&share_handle);
+                    // Fast poll so Apps/Start Menu reopen feels instant.
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    drain_second_instance_signals(&share_handle);
                 }
             });
 
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                // X should quit the process. Hide-to-tray made "close" feel broken:
-                // reopen from tray, hit X again, and the app still lingered until Quit.
-                // Tray remains while the window is open (Show / Quit / notifications).
-                let app = window.app_handle().clone();
-                let _ = app.remove_tray_by_id("peerchat");
-                app.exit(0);
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Hide to tray — keep discovery, delivery, and notifications alive.
+                // Full exit only from tray menu "Quit PeerChat".
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -2504,6 +2549,7 @@ pub fn run() {
             read_bundle_chunk,
             delete_bundle_file,
             scan_file,
+            local_path_meta,
             install_shell_extension,
             uninstall_shell_extension,
             shell_extension_installed,

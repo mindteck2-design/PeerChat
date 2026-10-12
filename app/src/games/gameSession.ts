@@ -53,7 +53,28 @@ type Store = {
   dab?: DabSession;
 };
 
-const store: Store = {};
+const STORE_KEY = "peerchat.gameSessions.v1";
+
+function loadStore(): Store {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Store) : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistStore(store: Store) {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(store));
+  } catch {
+    /* ignore quota */
+  }
+}
+
+const store: Store = loadStore();
 
 export function getTttSession(): TttSession | undefined {
   return store.ttt;
@@ -61,6 +82,7 @@ export function getTttSession(): TttSession | undefined {
 export function setTttSession(s: TttSession | null) {
   if (s && s.mpPhase !== "idle") store.ttt = s;
   else delete store.ttt;
+  persistStore(store);
 }
 
 export function getRpsSession(): RpsSession | undefined {
@@ -69,6 +91,7 @@ export function getRpsSession(): RpsSession | undefined {
 export function setRpsSession(s: RpsSession | null) {
   if (s && s.mpPhase !== "idle") store.rps = s;
   else delete store.rps;
+  persistStore(store);
 }
 
 export function getDabSession(): DabSession | undefined {
@@ -77,6 +100,7 @@ export function getDabSession(): DabSession | undefined {
 export function setDabSession(s: DabSession | null) {
   if (s && s.mpPhase !== "idle") store.dab = s;
   else delete store.dab;
+  persistStore(store);
 }
 
 export function sessionBadge(

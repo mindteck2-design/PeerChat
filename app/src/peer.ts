@@ -264,6 +264,10 @@ export const peerApi = {
     inv<string>("read_bundle_chunk", { path, offset, len }),
   deleteBundleFile: (path: string) => inv<void>("delete_bundle_file", { path }),
   scanFile: (path: string) => inv<ScanResult>("scan_file", { path }),
+  localPathMeta: (path: string) =>
+    inv<{ path: string; name: string; size: number; is_dir: boolean }>("local_path_meta", {
+      path,
+    }),
   installShellExtension: (exePath: string) => inv<void>("install_shell_extension", { exePath }),
   uninstallShellExtension: () => inv<void>("uninstall_shell_extension"),
   shellExtensionInstalled: () => inv<boolean>("shell_extension_installed"),

@@ -3,6 +3,11 @@
 //! The tauri-plugin-single-instance can race (mutex exists before its hidden
 //! window is registered) and then allow a second full app — which creates a
 //! second tray icon. We bail out early if the plugin mutex is already held.
+//!
+//! Important: do NOT Win32-ShowWindow the main PeerChat HWND from this process.
+//! That desyncs Tauri's hide/show state after tray-hide, so the next X no longer
+//! hides cleanly. Instead write pending-show / pending-share and let the running
+//! instance call Tauri `window.show()`.
 
 #![cfg(windows)]
 
@@ -15,7 +20,6 @@ use windows_sys::Win32::System::Threading::OpenMutexW;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, EnumWindows, FindWindowW, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
 };
 
 const MUTEX_NAME: &str = "com.lanmsg.app-sim";
@@ -24,6 +28,13 @@ const WINDOW_NAME: &str = "com.lanmsg.app-siw";
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn app_data_dir() -> Option<std::path::PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA")?;
+    let dir = std::path::PathBuf::from(local).join("com.lanmsg.app");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
 }
 
 unsafe extern "system" fn enum_peerchat(
@@ -38,16 +49,12 @@ unsafe extern "system" fn enum_peerchat(
     }
     let title = String::from_utf16_lossy(&buf[..n as usize]);
     if title.starts_with("PeerChat") {
-        // Prefer a visible main window; otherwise take the first PeerChat title.
-        let visible = unsafe { IsWindowVisible(hwnd) } != 0;
         unsafe {
-            if visible || (*out).is_null() {
+            if (*out).is_null() {
                 *out = hwnd;
             }
-            if visible {
-                return 0; // stop
-            }
         }
+        return 0;
     }
     1
 }
@@ -60,58 +67,36 @@ fn find_main_peerchat_hwnd() -> HWND {
     found
 }
 
-fn activate_hwnd(hwnd: HWND) -> bool {
-    if hwnd.is_null() {
-        return false;
-    }
-    unsafe {
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        if pid != 0 {
-            AllowSetForegroundWindow(pid);
-        }
-        ShowWindow(hwnd, SW_RESTORE);
-        ShowWindow(hwnd, SW_SHOW);
-        SetForegroundWindow(hwnd) != 0
-    }
-}
-
-/// If another PeerChat already owns the single-instance mutex, focus it and exit.
-/// Call this *before* `tauri::Builder::run`.
-pub fn exit_if_already_running() {
-    let mutex_name = wide(MUTEX_NAME);
-    let existing = unsafe { OpenMutexW(SYNCHRONIZE, 0, mutex_name.as_ptr()) };
-    if existing.is_null() {
-        let _err = unsafe { GetLastError() };
-        // Mutex not created yet (ERROR_FILE_NOT_FOUND=2) — we are the first instance.
-        return;
-    }
-    unsafe { CloseHandle(existing) };
-
-    // Another instance holds the mutex. Give its message window a moment to appear,
-    // then focus either the plugin relay window's peer or the main PeerChat UI.
+fn allow_foreground_for_running_instance() {
     let class_name = wide(CLASS_NAME);
     let window_name = wide(WINDOW_NAME);
     for _ in 0..40 {
+        let mut pid = 0u32;
         let relay = unsafe { FindWindowW(class_name.as_ptr(), window_name.as_ptr()) };
         if !relay.is_null() {
-            let mut pid = 0u32;
             unsafe { GetWindowThreadProcessId(relay, &mut pid) };
-            if pid != 0 {
-                unsafe { AllowSetForegroundWindow(pid) };
+        }
+        if pid == 0 {
+            let main = find_main_peerchat_hwnd();
+            if !main.is_null() {
+                unsafe { GetWindowThreadProcessId(main, &mut pid) };
             }
         }
-        let main = find_main_peerchat_hwnd();
-        if activate_hwnd(main) {
-            write_pending_share_args();
-            std::process::exit(0);
+        if pid != 0 {
+            unsafe { AllowSetForegroundWindow(pid) };
+            return;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
 
-    // Still couldn't focus — do not start a second tray/window.
-    write_pending_share_args();
-    std::process::exit(0);
+/// Ask the running instance to show via Tauri (polled in lib.rs).
+fn write_pending_show() {
+    let Some(dir) = app_data_dir() else {
+        return;
+    };
+    let path = dir.join("pending-show");
+    let _ = std::fs::write(path, b"1");
 }
 
 fn write_pending_share_args() {
@@ -127,13 +112,31 @@ fn write_pending_share_args() {
     if files.is_empty() {
         return;
     }
-    let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+    let Some(dir) = app_data_dir() else {
         return;
     };
-    let dir = std::path::PathBuf::from(local).join("com.lanmsg.app");
-    let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("pending-share.json");
     if let Ok(body) = serde_json::to_string(&files) {
         let _ = std::fs::write(path, body);
     }
+}
+
+/// If another PeerChat already owns the single-instance mutex, signal it and exit.
+/// Call this *before* `tauri::Builder::run`.
+pub fn exit_if_already_running() {
+    let mutex_name = wide(MUTEX_NAME);
+    let existing = unsafe { OpenMutexW(SYNCHRONIZE, 0, mutex_name.as_ptr()) };
+    if existing.is_null() {
+        let _err = unsafe { GetLastError() };
+        // Mutex not created yet (ERROR_FILE_NOT_FOUND=2) — we are the first instance.
+        return;
+    }
+    unsafe { CloseHandle(existing) };
+
+    // Permit the running process to take foreground, then request a Tauri show.
+    // Never ShowWindow the main HWND from here — that breaks hide-to-tray.
+    allow_foreground_for_running_instance();
+    write_pending_show();
+    write_pending_share_args();
+    std::process::exit(0);
 }

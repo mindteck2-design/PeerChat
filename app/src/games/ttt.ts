@@ -42,6 +42,25 @@ function checkWinner(board: Board): number[] | null {
   return null;
 }
 
+/** Rebuild turn/winner from an authoritative board snapshot (LAN sync). */
+export function tttStateFromBoard(board: Board): TttState {
+  const cells: Board =
+    Array.isArray(board) && board.length === 9
+      ? (board.map((c) => (c === "X" || c === "O" ? c : null)) as Board)
+      : Array(9).fill(null);
+  const xCount = cells.filter((c) => c === "X").length;
+  const oCount = cells.filter((c) => c === "O").length;
+  const turn: "X" | "O" = xCount === oCount ? "X" : "O";
+  const win = checkWinner(cells);
+  const isDraw = !win && cells.every((c) => c !== null);
+  return {
+    board: cells,
+    turn,
+    winner: win ? (cells[win[0]] as "X" | "O") : isDraw ? "draw" : null,
+    winLine: win,
+  };
+}
+
 // LAN message payloads
 export type TttMsg =
   | { type: "invite"; matchId: string; fromName: string }
