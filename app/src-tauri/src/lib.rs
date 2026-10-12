@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 struct AppState {
     db: SharedDb,

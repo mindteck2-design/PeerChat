@@ -41,10 +41,7 @@
       "nsis": {
         "installMode": "currentUser",
         "startMenuFolder": "PeerChat",
-        "displayLanguageSelector": false,
-        "installerIcon": "icons/icon.ico",
-        "sidebarImage": "icons/128x128.png",
-        "postinstallScript": "packaging/client/nsis-postinstall.nsi"
+        "displayLanguageSelector": false
       }
     },
     "linux": {
