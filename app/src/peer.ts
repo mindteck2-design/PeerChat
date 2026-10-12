@@ -35,6 +35,12 @@ export type Conversation = {
   muted?: boolean;
   members_can_add?: boolean;
   unread_count?: number;
+  last_message_kind?: string | null;
+  last_message_at?: string | null;
+  last_message_sender?: string | null;
+  last_message_ciphertext?: string | null;
+  last_message_nonce?: string | null;
+  last_message_wrapped_keys?: Record<string, string>;
 };
 
 export type Member = {

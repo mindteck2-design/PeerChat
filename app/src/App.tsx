@@ -177,6 +177,52 @@ function formatClock(iso: string) {
   return `${String(h).padStart(2, "0")}:${m} ${ap}`;
 }
 
+/** WhatsApp-style relative time for conversation list rows. */
+function formatPreviewTime(iso: string | null | undefined) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diffDays = Math.round((today.getTime() - day.getTime()) / 86400000);
+  if (diffDays === 0) {
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) return d.toLocaleDateString([], { weekday: "short" });
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function conversationPreviewLine(
+  kind: string | null | undefined,
+  decrypted: string,
+  myId: string,
+  senderId: string | null | undefined,
+  senderLabel: string,
+  isGroup: boolean
+): string {
+  if (!kind) return "";
+  let body = decrypted;
+  if (kind === "file_notice") return "📎 File";
+  if (kind === "system") return body.trim() || "Group update";
+  if (kind === "announcement" || kind === "poll" || kind === "snippet") {
+    try {
+      const j = JSON.parse(decrypted);
+      if (kind === "poll") body = j.question || "Poll";
+      else if (kind === "announcement") body = j.title || j.body || decrypted;
+      else body = j.title || decrypted;
+    } catch {
+      body = decrypted;
+    }
+  }
+  body = body.replace(/\s+/g, " ").trim();
+  if (!body) body = kind === "forwarded" ? "Forwarded message" : "Message";
+  const prefix =
+    senderId === myId ? "You: " : isGroup && senderLabel ? `${senderLabel}: ` : "";
+  return truncate(prefix + body, 80);
+}
+
 function formatBytes(n: number) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -527,6 +573,8 @@ function ChatScreen({
   const filePickRef = useRef<HTMLInputElement | null>(null);
   const pauseRef = useRef(false);
   const [chatSearch, setChatSearch] = useState("");
+  const [lastPreviews, setLastPreviews] = useState<Record<string, string>>({});
+  const [convMenu, setConvMenu] = useState<{ anchor: HTMLElement; conv: Conversation } | null>(null);
 
   const [text, setText] = useState("");
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -555,7 +603,7 @@ function ChatScreen({
 
   const [msgMenu, setMsgMenu] = useState<{ anchor: HTMLElement; message: Message } | null>(null);
   const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
-  const [forwardPick, setForwardPick] = useState("");
+  const [forwardPick, setForwardPick] = useState<string[]>([]);
 
   const [fileNames, setFileNames] = useState<Record<string, string>>({});
   const [pendingShareFiles, setPendingShareFiles] = useState<string[]>([]);
@@ -667,6 +715,93 @@ function ChatScreen({
     const t = setInterval(() => refresh().catch(() => {}), 5000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      const gkNext: Record<string, Uint8Array> = {};
+      for (const c of convs) {
+        if (c.kind !== "group" || !c.last_message_kind || groupKeys[c.id]) continue;
+        try {
+          const wrap = await peerApi.getGroupKey(c.id);
+          if (wrap) gkNext[c.id] = unwrapGroupKey(wrap, identity);
+        } catch {
+          /* locked or missing */
+        }
+      }
+      if (!cancel && Object.keys(gkNext).length) {
+        setGroupKeys((g) => ({ ...g, ...gkNext }));
+      }
+
+      const keys = { ...groupKeys, ...gkNext };
+      const next: Record<string, string> = {};
+      for (const c of convs) {
+        const kind = c.last_message_kind;
+        if (!kind) {
+          next[c.id] = "";
+          continue;
+        }
+        if (kind === "file_notice") {
+          next[c.id] = "📎 File";
+          continue;
+        }
+        const ct = c.last_message_ciphertext;
+        if (!ct) {
+          next[c.id] = kind === "system" ? "Group update" : "";
+          continue;
+        }
+        let plainText = "";
+        try {
+          const stub: Message = {
+            id: "preview",
+            conversation_id: c.id,
+            sender_id: c.last_message_sender || "",
+            kind,
+            ciphertext: ct,
+            nonce: c.last_message_nonce || "",
+            wrapped_keys: c.last_message_wrapped_keys || {},
+            signature: "",
+            created_at: c.last_message_at || "",
+          };
+          if (c.kind === "group") {
+            const gk = keys[c.id];
+            if (!gk) {
+              next[c.id] = "…";
+              continue;
+            }
+            plainText = await decryptWithGroupKey(stub, gk);
+          } else if (c.peer_id) {
+            plainText = await decryptMessage(
+              { ...stub, wrapped_keys: stub.wrapped_keys || {} },
+              profile.id,
+              identity
+            );
+          }
+        } catch {
+          plainText = "";
+        }
+        const sid = c.last_message_sender || "";
+        const senderName =
+          sid === profile.id
+            ? "You"
+            : c.kind === "dm"
+              ? c.peer_name || "Contact"
+              : peers.find((p) => p.user_id === sid)?.display_name || "Member";
+        next[c.id] = conversationPreviewLine(
+          kind,
+          plainText,
+          profile.id,
+          c.last_message_sender,
+          senderName,
+          c.kind === "group"
+        );
+      }
+      if (!cancel) setLastPreviews(next);
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [convs, peers, groupKeys, identity, profile.id]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -1071,48 +1206,58 @@ function ChatScreen({
   }
 
   function startForward(message: Message) {
+    if (message.kind !== "text" && message.kind !== "forwarded") return;
     setForwardMessage(message);
-    setForwardPick("");
+    setForwardPick([]);
     setMsgMenu(null);
   }
 
+  function isTextLikeMessage(m: Message) {
+    return m.kind === "text" || m.kind === "forwarded";
+  }
+
   async function confirmForward() {
-    if (!forwardMessage || !forwardPick) return;
-    const target = convs.find((c) => c.id === forwardPick);
-    if (!target) return;
+    if (!forwardMessage || !forwardPick.length) return;
     const body = plain[forwardMessage.id];
     if (!body) {
       setStatus("Nothing to forward");
       return;
     }
     try {
-      if (target.kind === "dm" && target.peer_id) {
-        const peer = peers.find((p) => p.user_id === target.peer_id);
-        if (!peer) throw new Error("Peer not found");
-        const pubs: Record<string, string> = {
-          [peer.user_id]: peer.x25519_public,
-          [profile.id]: exportPublic(identity).x25519_public,
-        };
-        const enc = await encryptMessage(body, target.id, profile.id, identity, pubs);
-        await peerApi.sendMessage(
-          target.id,
-          { kind: "text", sender_id: profile.id, ...enc },
-          [peer.user_id]
-        );
-      } else {
-        const gk = await ensureGroupKey(target.id);
-        const enc = await encryptWithGroupKey(body, target.id, profile.id, gk, identity);
-        const memberIds = await peerApi.memberIds(target.id);
-        await peerApi.sendMessage(
-          target.id,
-          { kind: "text", sender_id: profile.id, ...enc },
-          memberIds.filter((id) => id !== profile.id)
-        );
+      let sent = 0;
+      for (const convId of forwardPick) {
+        const target = convs.find((c) => c.id === convId);
+        if (!target) continue;
+        if (target.kind === "dm" && target.peer_id) {
+          const peer = peers.find((p) => p.user_id === target.peer_id);
+          if (!peer) throw new Error("Peer not found");
+          const pubs: Record<string, string> = {
+            [peer.user_id]: peer.x25519_public,
+            [profile.id]: exportPublic(identity).x25519_public,
+          };
+          const enc = await encryptMessage(body, target.id, profile.id, identity, pubs);
+          await peerApi.sendMessage(
+            target.id,
+            { kind: "forwarded", sender_id: profile.id, ...enc },
+            [peer.user_id]
+          );
+        } else {
+          const gk = await ensureGroupKey(target.id);
+          const enc = await encryptWithGroupKey(body, target.id, profile.id, gk, identity);
+          const memberIds = await peerApi.memberIds(target.id);
+          await peerApi.sendMessage(
+            target.id,
+            { kind: "forwarded", sender_id: profile.id, ...enc },
+            memberIds.filter((id) => id !== profile.id)
+          );
+        }
+        if (active?.id === target.id) setMessages(await peerApi.listMessages(target.id));
+        sent += 1;
       }
-      setStatus("Forwarded");
-      if (active?.id === target.id) setMessages(await peerApi.listMessages(target.id));
+      setStatus(sent > 1 ? `Forwarded to ${sent} chats` : "Forwarded");
       setForwardMessage(null);
-      setForwardPick("");
+      setForwardPick([]);
+      await refresh();
     } catch (err: any) {
       setStatus(err?.message || String(err));
     }
@@ -2365,14 +2510,27 @@ function ChatScreen({
             <List dense disablePadding>
               {filteredConvs.map((c) => {
                 const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
+                const peerOnline =
+                  c.kind === "dm" && c.peer_id
+                    ? peers.find((p) => p.user_id === c.peer_id)?.online
+                    : false;
+                const preview = lastPreviews[c.id] || "";
+                const timeLabel = formatPreviewTime(c.last_message_at || c.created_at);
+                const unread = !!c.unread_count && active?.id !== c.id;
                 return (
                   <ListItemButton
                     key={c.id}
                     selected={active?.id === c.id}
                     onClick={() => selectConversation(c)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setConvMenu({ anchor: e.currentTarget as HTMLElement, conv: c });
+                    }}
                     sx={{
-                      py: 0.9,
-                      alignItems: "flex-start",
+                      py: 1.1,
+                      px: 2,
+                      alignItems: "center",
+                      gap: 1.5,
                       "& .chat-row-actions": {
                         opacity: 0,
                         pointerEvents: "none",
@@ -2384,84 +2542,107 @@ function ChatScreen({
                       },
                     }}
                   >
-                    <Avatar
-                      sx={{
-                        width: 42,
-                        height: 42,
-                        mr: 1.25,
-                        mt: 0.25,
-                        bgcolor: avatarColor(title),
-                        fontSize: 16,
-                      }}
-                    >
-                      {title.slice(0, 1).toUpperCase()}
-                    </Avatar>
-                    <ListItemText
-                      primary={
-                        <Box display="flex" alignItems="center" gap={0.5}>
-                          <Typography
-                            fontWeight={c.unread_count ? 800 : 700}
-                            fontSize={14}
-                            noWrap
-                            flex={1}
-                          >
-                            {title}
-                          </Typography>
-                          {c.muted && <VolumeOffIcon sx={{ fontSize: 14, color: "text.disabled" }} />}
-                          {c.pinned_at && <PushPinIcon sx={{ fontSize: 13, color: "primary.main" }} />}
-                        </Box>
-                      }
-                      secondary={c.kind === "group" ? "Group" : "Direct message"}
-                      secondaryTypographyProps={{ fontSize: 12, noWrap: true }}
-                    />
-                    {!!c.unread_count && active?.id !== c.id && (
-                      <Chip
-                        size="small"
-                        label={c.unread_count > 99 ? "99+" : c.unread_count}
-                        color="primary"
+                    <Box sx={{ position: "relative", flexShrink: 0 }}>
+                      <Avatar
                         sx={{
-                          height: 22,
-                          minWidth: 22,
-                          mt: 0.85,
-                          mr: 0.25,
-                          fontWeight: 800,
-                          fontSize: 11,
-                          "& .MuiChip-label": { px: 0.75 },
+                          width: 48,
+                          height: 48,
+                          bgcolor: avatarColor(title),
+                          fontSize: c.kind === "group" ? 22 : 17,
                         }}
-                      />
-                    )}
-                    <Stack direction="row" spacing={0} className="chat-row-actions" sx={{ mt: 0.2 }}>
-                      <Tooltip title={c.pinned_at ? "Unpin" : "Pin"}>
-                        <IconButton
-                          size="small"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            togglePinChat(c);
+                      >
+                        {c.kind === "group" ? (
+                          <GroupsIcon fontSize="small" />
+                        ) : (
+                          title.slice(0, 1).toUpperCase()
+                        )}
+                      </Avatar>
+                      {c.kind === "dm" && (
+                        <Box
+                          sx={{
+                            position: "absolute",
+                            bottom: 1,
+                            right: 1,
+                            width: 11,
+                            height: 11,
+                            borderRadius: "50%",
+                            border: "2px solid",
+                            borderColor: "background.paper",
+                            bgcolor: peerOnline ? "success.main" : "grey.400",
                           }}
+                        />
+                      )}
+                    </Box>
+                    <Box flex={1} minWidth={0}>
+                      <Box display="flex" alignItems="baseline" gap={1}>
+                        <Typography
+                          component="span"
+                          fontWeight={unread ? 700 : 600}
+                          fontSize={15}
+                          noWrap
+                          flex={1}
                         >
-                          {c.pinned_at ? (
-                            <PushPinIcon sx={{ fontSize: 15 }} color="primary" />
-                          ) : (
-                            <PushPinOutlinedIcon sx={{ fontSize: 15, opacity: 0.55 }} />
-                          )}
-                        </IconButton>
-                      </Tooltip>
-                      <Tooltip title={c.muted ? "Unmute" : "Mute"}>
-                        <IconButton
-                          size="small"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleMuteChat(c);
-                          }}
+                          {title}
+                        </Typography>
+                        <Typography
+                          component="span"
+                          variant="caption"
+                          color={unread ? "primary.main" : "text.secondary"}
+                          sx={{ flexShrink: 0, fontSize: 11.5, fontWeight: unread ? 600 : 400 }}
                         >
-                          {c.muted ? (
-                            <VolumeOffIcon sx={{ fontSize: 15 }} color="disabled" />
-                          ) : (
-                            <VolumeUpIcon sx={{ fontSize: 15, opacity: 0.55 }} />
-                          )}
-                        </IconButton>
-                      </Tooltip>
-                    </Stack>
+                          {timeLabel}
+                        </Typography>
+                      </Box>
+                      <Box display="flex" alignItems="center" gap={0.5} mt={0.15}>
+                        {c.muted && (
+                          <VolumeOffIcon sx={{ fontSize: 14, color: "text.disabled", flexShrink: 0 }} />
+                        )}
+                        {c.pinned_at && (
+                          <PushPinIcon sx={{ fontSize: 13, color: "text.disabled", flexShrink: 0 }} />
+                        )}
+                        <Typography
+                          variant="body2"
+                          color="text.secondary"
+                          noWrap
+                          flex={1}
+                          sx={{ fontSize: 13, lineHeight: 1.35 }}
+                        >
+                          {preview || "\u00a0"}
+                        </Typography>
+                        {unread && (
+                          <Box
+                            sx={{
+                              flexShrink: 0,
+                              minWidth: 20,
+                              height: 20,
+                              px: 0.5,
+                              borderRadius: 10,
+                              bgcolor: "primary.main",
+                              color: "primary.contrastText",
+                              fontSize: 11,
+                              fontWeight: 700,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            {c.unread_count! > 99 ? "99+" : c.unread_count}
+                          </Box>
+                        )}
+                      </Box>
+                    </Box>
+                    <IconButton
+                      size="small"
+                      className="chat-row-actions"
+                      aria-label="Chat options"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConvMenu({ anchor: e.currentTarget, conv: c });
+                      }}
+                      sx={{ ml: -0.5 }}
+                    >
+                      <MoreVertIcon sx={{ fontSize: 18, opacity: 0.5 }} />
+                    </IconButton>
                   </ListItemButton>
                 );
               })}
@@ -2764,6 +2945,22 @@ function ChatScreen({
                             >
                               {truncate(label, 22)}
                             </Typography>
+                          )}
+                          {m.kind === "forwarded" && (
+                            <Stack
+                              direction="row"
+                              alignItems="center"
+                              spacing={0.35}
+                              sx={{ mb: 0.35, color: "text.secondary", pr: 2 }}
+                            >
+                              <ForwardIcon sx={{ fontSize: 13, transform: "scaleX(-1)" }} />
+                              <Typography
+                                variant="caption"
+                                sx={{ fontSize: 11, fontWeight: 600, fontStyle: "italic" }}
+                              >
+                                Forwarded
+                              </Typography>
+                            </Stack>
                           )}
                           {quoted && m.kind !== "deleted" && (
                             <Box
@@ -3355,6 +3552,43 @@ function ChatScreen({
       </Popover>
 
       <Menu
+        anchorEl={convMenu?.anchor ?? null}
+        open={!!convMenu}
+        onClose={() => setConvMenu(null)}
+      >
+        <MenuItem
+          onClick={() => {
+            if (convMenu) togglePinChat(convMenu.conv);
+            setConvMenu(null);
+          }}
+        >
+          <ListItemIcon>
+            {convMenu?.conv.pinned_at ? (
+              <PushPinIcon fontSize="small" color="primary" />
+            ) : (
+              <PushPinOutlinedIcon fontSize="small" />
+            )}
+          </ListItemIcon>
+          {convMenu?.conv.pinned_at ? "Unpin chat" : "Pin chat"}
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (convMenu) toggleMuteChat(convMenu.conv);
+            setConvMenu(null);
+          }}
+        >
+          <ListItemIcon>
+            {convMenu?.conv.muted ? (
+              <VolumeOffIcon fontSize="small" />
+            ) : (
+              <VolumeUpIcon fontSize="small" />
+            )}
+          </ListItemIcon>
+          {convMenu?.conv.muted ? "Unmute" : "Mute"}
+        </MenuItem>
+      </Menu>
+
+      <Menu
         anchorEl={msgMenu?.anchor ?? null}
         open={!!msgMenu}
         onClose={() => setMsgMenu(null)}
@@ -3382,7 +3616,7 @@ function ChatScreen({
           </ListItemIcon>
           Reply
         </MenuItem>
-        {msgMenu?.message.kind === "text" && (
+        {msgMenu && isTextLikeMessage(msgMenu.message) && (
           <MenuItem onClick={() => msgMenu && startForward(msgMenu.message)}>
             <ListItemIcon>
               <ForwardIcon fontSize="small" />
@@ -3390,12 +3624,12 @@ function ChatScreen({
             Forward
           </MenuItem>
         )}
-        {msgMenu?.message.kind === "text" && (
+        {msgMenu && isTextLikeMessage(msgMenu.message) && (
           <MenuItem onClick={() => msgMenu && copyMessage(msgMenu.message)}>
             <ListItemIcon>
               <ContentCopyIcon fontSize="small" />
             </ListItemIcon>
-            Copy text
+            Copy
           </MenuItem>
         )}
         {msgMenu?.message.kind === "text" &&
@@ -3528,8 +3762,12 @@ function ChatScreen({
             {convs.map((c) => (
               <ListItemButton
                 key={c.id}
-                selected={forwardPick === c.id}
-                onClick={() => setForwardPick(c.id)}
+                selected={forwardPick.includes(c.id)}
+                onClick={() =>
+                  setForwardPick((ids) =>
+                    ids.includes(c.id) ? ids.filter((x) => x !== c.id) : [...ids, c.id]
+                  )
+                }
               >
                 <ListItemText primary={c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group"} />
               </ListItemButton>
@@ -3543,8 +3781,8 @@ function ChatScreen({
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setForwardMessage(null)}>Cancel</Button>
-          <Button variant="contained" disabled={!forwardPick} onClick={confirmForward}>
-            Forward
+          <Button variant="contained" disabled={!forwardPick.length} onClick={confirmForward}>
+            Forward{forwardPick.length > 1 ? ` (${forwardPick.length})` : ""}
           </Button>
         </DialogActions>
       </Dialog>

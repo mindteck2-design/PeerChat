@@ -893,9 +893,31 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
     let me = get_profile(conn)?
         .and_then(|p| p["id"].as_str().map(|s| s.to_string()))
         .unwrap_or_default();
+    // Subquery: pick the single most-recent visible message per conversation using
+    // a window function so we get kind + sender alongside the timestamp.
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, title, peer_id, created_at, pinned_at, COALESCE(muted,0), COALESCE(members_can_add,1) FROM conversations ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC",
+            r#"SELECT c.id, c.kind, c.title, c.peer_id, c.created_at, c.pinned_at,
+                      COALESCE(c.muted,0), COALESCE(c.members_can_add,1),
+                      lm.kind, lm.created_at, lm.sender_id,
+                      lm.ciphertext, lm.nonce, lm.wrapped_keys
+               FROM conversations c
+               LEFT JOIN (
+                 SELECT conversation_id, kind, created_at, sender_id, ciphertext, nonce, wrapped_keys
+                 FROM (
+                   SELECT conversation_id, kind, created_at, sender_id, ciphertext, nonce, wrapped_keys,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY conversation_id
+                            ORDER BY COALESCE(NULLIF(sort_at,''), created_at) DESC, id DESC
+                          ) AS rn
+                   FROM messages
+                   WHERE kind NOT IN ('reaction','pin','unpin','deleted','game_move','poll_vote')
+                 ) ranked
+                 WHERE rn = 1
+               ) lm ON lm.conversation_id = c.id
+               ORDER BY (c.pinned_at IS NULL),
+                        c.pinned_at DESC,
+                        COALESCE(lm.created_at, c.created_at) DESC"#,
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -909,13 +931,25 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
                 r.get::<_, Option<String>>(5)?,
                 r.get::<_, i64>(6)?,
                 r.get::<_, i64>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
+                r.get::<_, Option<String>>(13)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, kind, title, peer_id, created_at, pinned_at, muted, members_can_add) =
+        let (id, kind, title, peer_id, created_at, pinned_at, muted, members_can_add,
+             last_kind, last_at, last_sender, last_ct, last_nonce, last_wraps) =
             row.map_err(|e| e.to_string())?;
+        let last_wrapped_keys: Value = last_wraps
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::json!({}));
         // Hide detached legacy DM shells (peer_id cleared after canonical migration).
         if kind == "dm" && peer_id.is_none() {
             continue;
@@ -944,6 +978,12 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
             "muted": muted == 1,
             "members_can_add": members_can_add == 1,
             "unread_count": unread,
+            "last_message_kind": last_kind,
+            "last_message_at": last_at,
+            "last_message_sender": last_sender,
+            "last_message_ciphertext": last_ct,
+            "last_message_nonce": last_nonce,
+            "last_message_wrapped_keys": last_wrapped_keys,
         }));
     }
     Ok(out)
@@ -1588,7 +1628,7 @@ pub fn mark_message_read(conn: &Connection, message_id: &str, user_id: &str) -> 
 
 fn unread_message_filter_sql() -> &'static str {
     // User-visible chat items only (skip reactions / pin control / deletes).
-    "m.kind IN ('text','file_notice','system')"
+    "m.kind IN ('text','forwarded','file_notice','system')"
 }
 
 pub fn unread_count(
