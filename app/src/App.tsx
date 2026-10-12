@@ -617,6 +617,9 @@ function ChatScreen({
   const chatSearchRef = useRef<HTMLInputElement | null>(null);
   const groupKeysRef = useRef(groupKeys);
   groupKeysRef.current = groupKeys;
+  const [groupKeyHistory, setGroupKeyHistory] = useState<Record<string, Uint8Array[]>>({});
+  const groupKeyHistoryRef = useRef(groupKeyHistory);
+  groupKeyHistoryRef.current = groupKeyHistory;
   const abortSendRef = useRef(false);
   const abortOpenRef = useRef(false);
   const queueAbortRef = useRef(false);
@@ -665,14 +668,99 @@ function ChatScreen({
     inGroup &&
     (isAdmin || active.members_can_add !== false);
 
+  const GROUP_KEY_HIST_PREFIX = "group_key_history:";
+
+  function groupKeysEqual(a: Uint8Array, b: Uint8Array) {
+    if (a.byteLength !== b.byteLength) return false;
+    for (let i = 0; i < a.byteLength; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  async function loadPersistedKeyHistory(convId: string): Promise<Uint8Array[]> {
+    const raw = await peerApi.getAppSetting(`${GROUP_KEY_HIST_PREFIX}${convId}`).catch(() => null);
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as string[];
+      return parsed.map((s) => fromB64(s));
+    } catch {
+      return [];
+    }
+  }
+
+  async function savePersistedKeyHistory(convId: string, keys: Uint8Array[]) {
+    if (!keys.length) return;
+    const payload = JSON.stringify(keys.map((k) => b64(k)));
+    await peerApi.setAppSetting(`${GROUP_KEY_HIST_PREFIX}${convId}`, payload);
+  }
+
+  /** Keep prior group keys so messages encrypted before a rotation still decrypt. */
+  async function adoptGroupKey(convId: string, newKey: Uint8Array) {
+    const prev = groupKeysRef.current[convId];
+    let hist = groupKeyHistoryRef.current[convId] || [];
+    if (prev && !groupKeysEqual(prev, newKey)) {
+      if (!hist.some((k) => groupKeysEqual(k, prev))) {
+        hist = [...hist, prev];
+      }
+    }
+    groupKeysRef.current = { ...groupKeysRef.current, [convId]: newKey };
+    groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
+    setGroupKeys((g) => ({ ...g, [convId]: newKey }));
+    setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
+    await savePersistedKeyHistory(convId, hist);
+  }
+
+  async function decryptGroupMessageText(m: Message): Promise<string> {
+    const convId = m.conversation_id;
+    const current = groupKeysRef.current[convId];
+    const hist = groupKeyHistoryRef.current[convId] || [];
+    const candidates: Uint8Array[] = [];
+    if (current) candidates.push(current);
+    for (const k of hist) {
+      if (!current || !groupKeysEqual(k, current)) candidates.push(k);
+    }
+    const sender = peers.find((p) => p.user_id === m.sender_id);
+    const edPub = sender?.ed25519_public;
+    for (const gk of candidates) {
+      try {
+        return await decryptWithGroupKey(m, gk, edPub);
+      } catch {
+        /* try older key */
+      }
+    }
+    throw new Error("unable to decrypt");
+  }
+
+  async function syncGroupKeyIfRotated(convId: string) {
+    const wrap = await peerApi.getGroupKey(convId);
+    if (!wrap) return;
+    const gk = unwrapGroupKey(wrap, identity);
+    const current = groupKeysRef.current[convId];
+    if (!current) {
+      const hist = await loadPersistedKeyHistory(convId);
+      groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
+      setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
+      groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
+      setGroupKeys((g) => ({ ...g, [convId]: gk }));
+      return;
+    }
+    if (!groupKeysEqual(current, gk)) {
+      await adoptGroupKey(convId, gk);
+    }
+  }
+
   async function ensureGroupKey(convId: string) {
     const existing = groupKeysRef.current[convId];
     if (existing) return existing;
     const wrap = await peerApi.getGroupKey(convId);
     if (!wrap) throw new Error("Missing group key");
     const gk = unwrapGroupKey(wrap, identity);
-    setGroupKeys((g) => ({ ...g, [convId]: gk }));
+    const hist = await loadPersistedKeyHistory(convId);
+    groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
+    setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
     groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
+    setGroupKeys((g) => ({ ...g, [convId]: gk }));
     return gk;
   }
 
@@ -769,7 +857,7 @@ function ChatScreen({
               next[c.id] = "…";
               continue;
             }
-            plainText = await decryptWithGroupKey(stub, gk);
+            plainText = await decryptGroupMessageText(stub);
           } else if (c.peer_id) {
             plainText = await decryptMessage(
               { ...stub, wrapped_keys: stub.wrapped_keys || {} },
@@ -801,7 +889,7 @@ function ChatScreen({
     return () => {
       cancel = true;
     };
-  }, [convs, peers, groupKeys, identity, profile.id]);
+  }, [convs, peers, groupKeys, groupKeyHistory, identity, profile.id]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -927,13 +1015,9 @@ function ChatScreen({
     clearStagedFiles();
 
     async function pull() {
-      if (conv.kind === "group" && !groupKeysRef.current[conv.id]) {
+      if (conv.kind === "group") {
         try {
-          const wrap = await peerApi.getGroupKey(conv.id);
-          if (!cancel && wrap) {
-            const gk = unwrapGroupKey(wrap, identity);
-            setGroupKeys((g) => (g[conv.id] ? g : { ...g, [conv.id]: gk }));
-          }
+          if (!cancel) await syncGroupKeyIfRotated(conv.id);
         } catch (err) {
           console.error(err);
           if (!cancel) setStatus("Couldn't unlock this group");
@@ -998,7 +1082,7 @@ function ChatScreen({
         }
         try {
           if (active.kind === "group" && gk) {
-            next[m.id] = await decryptWithGroupKey(m, gk);
+            next[m.id] = await decryptGroupMessageText(m);
           } else {
             next[m.id] = await decryptMessage(
               { ...m, wrapped_keys: m.wrapped_keys || {} },
@@ -1016,7 +1100,7 @@ function ChatScreen({
     return () => {
       cancel = true;
     };
-  }, [messages, groupKeys, active?.id, active?.kind]);
+  }, [messages, groupKeys, groupKeyHistory, peers, active?.id, active?.kind]);
 
   useEffect(() => {
     let cancel = false;
@@ -2024,8 +2108,7 @@ function ChatScreen({
       }
       const wraps = wrapGroupKeyForMembers(newKey, identity, pubs);
       await peerApi.removeGroupMember(active.id, userId, wraps);
-      setGroupKeys((g) => ({ ...g, [active.id]: newKey }));
-      groupKeysRef.current = { ...groupKeysRef.current, [active.id]: newKey };
+      await adoptGroupKey(active.id, newKey);
       const remainingIds = remaining.map((m) => m.user_id);
       try {
         await sendGroupSystemNotice(
@@ -2256,8 +2339,8 @@ function ChatScreen({
           let textBody = "";
           try {
             if (c.kind === "group") {
-              const gk = await ensureGroupKey(c.id);
-              textBody = await decryptWithGroupKey(m, gk);
+              await ensureGroupKey(c.id);
+              textBody = await decryptGroupMessageText(m);
             } else {
               textBody = await decryptMessage({ ...m, wrapped_keys: m.wrapped_keys || {} }, profile.id, identity);
             }
