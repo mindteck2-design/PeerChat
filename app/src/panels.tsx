@@ -426,7 +426,7 @@ export function SavedPanel({
   onRemove,
 }: {
   items: SavedItem[];
-  onOpen: (conversationId: string) => void;
+  onOpen: (conversationId: string, messageId?: string | null) => void;
   onRemove: (id: string) => void;
 }) {
   return (
@@ -435,7 +435,10 @@ export function SavedPanel({
       {!items.length && <Alert severity="info">Nothing saved yet. Use Save on a message.</Alert>}
       <List>
         {items.map((item) => (
-          <ListItemButton key={item.id} onClick={() => onOpen(item.conversation_id)}>
+          <ListItemButton
+            key={item.id}
+            onClick={() => onOpen(item.conversation_id, item.message_id)}
+          >
             <ListItemText primary={item.preview} secondary={item.kind} primaryTypographyProps={{ noWrap: true }} />
             <Button
               size="small"

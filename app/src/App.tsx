@@ -75,6 +75,7 @@ import SendIcon from "@mui/icons-material/SendRounded";
 
 import {
   isPermissionGranted,
+  onAction,
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
@@ -662,6 +663,9 @@ function ChatScreen({
   } | null>(null);
   const [dragOverChat, setDragOverChat] = useState(false);
   const stickToBottomRef = useRef(true);
+  const [highlightMsgId, setHighlightMsgId] = useState<string | null>(null);
+  const convsRef = useRef(convs);
+  convsRef.current = convs;
 
   // Ref for the active game's inbound message dispatcher (set by each game component)
   const gameDispatchRef = useRef<GameDispatchFn | null>(null);
@@ -1041,7 +1045,11 @@ function ChatScreen({
               : kind === "system" || kind === "group_event"
                 ? "Group update"
                 : "New message";
-          sendNotification({ title, body });
+          sendNotification({
+            title,
+            body,
+            extra: cid ? { conversation_id: cid } : undefined,
+          });
         } catch (err) {
           console.error("notify", err);
         }
@@ -1051,6 +1059,48 @@ function ChatScreen({
     });
     return () => unlisten?.();
   }, [profile.id, identity]);
+
+  // Toast click (JS-sent notifications) + Rust tray toasts via notification-open event.
+  useEffect(() => {
+    let unAction: { unregister: () => Promise<void> } | undefined;
+    let unListen: (() => void) | undefined;
+    const openFromNotify = (conversationId?: string) => {
+      void getCurrentWindow().show().catch(() => {});
+      void getCurrentWindow().setFocus().catch(() => {});
+      setNav("chats");
+      setTab(1);
+      if (!conversationId) return;
+      const conv =
+        convsRef.current.find((c) => c.id === conversationId) ||
+        (activeRef.current?.id === conversationId ? activeRef.current : null);
+      if (conv) selectConversation(conv);
+      else {
+        peerApi.listConversations().then((list) => {
+          const found = list.find((c) => c.id === conversationId);
+          if (found) selectConversation(found);
+        }).catch(() => {});
+      }
+    };
+    onAction((event) => {
+      const extra = event.notification?.extra as Record<string, unknown> | undefined;
+      const cid = typeof extra?.conversation_id === "string" ? extra.conversation_id : "";
+      openFromNotify(cid || undefined);
+    })
+      .then((fn) => {
+        unAction = fn;
+      })
+      .catch(() => {});
+    listen<{ conversation_id?: string }>("notification-open", (ev) => {
+      openFromNotify(ev.payload?.conversation_id);
+    }).then((fn) => {
+      unListen = fn;
+    });
+    return () => {
+      unListen?.();
+      void unAction?.unregister();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile.id]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -1138,7 +1188,7 @@ function ChatScreen({
   }, [active?.id]);
 
   useEffect(() => {
-    if (!stickToBottomRef.current) return;
+    if (!stickToBottomRef.current || highlightMsgId) return;
     const el = scroller.current;
     if (!el) return;
     const snap = () => {
@@ -1154,7 +1204,24 @@ function ChatScreen({
     outgoingFile?.done,
     incomingFile?.done,
     Object.keys(plain).length,
+    highlightMsgId,
   ]);
+
+  // WhatsApp-style jump + flash when opening a saved message.
+  useEffect(() => {
+    if (!highlightMsgId || !active) return;
+    if (!messages.some((m) => m.id === highlightMsgId)) return;
+    stickToBottomRef.current = false;
+    const t = window.setTimeout(() => {
+      const node = document.getElementById(`msg-${highlightMsgId}`);
+      node?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 120);
+    const clear = window.setTimeout(() => setHighlightMsgId(null), 2800);
+    return () => {
+      window.clearTimeout(t);
+      window.clearTimeout(clear);
+    };
+  }, [highlightMsgId, active?.id, messages]);
 
   useEffect(() => {
     if (!active || !messages.some((m) => m.sender_id !== profile.id)) return;
@@ -1732,6 +1799,7 @@ function ChatScreen({
     try {
       await peerApi.deleteMessageForMe(message.id);
       if (active) setMessages(await peerApi.listMessages(active.id));
+      setSavedItems(await peerApi.listSavedItems().catch(() => []));
     } catch (err: any) {
       setStatus(err?.message || String(err));
     }
@@ -1742,6 +1810,7 @@ function ChatScreen({
     try {
       await peerApi.deleteMessageForEveryone(message.id);
       if (active) setMessages(await peerApi.listMessages(active.id));
+      setSavedItems(await peerApi.listSavedItems().catch(() => []));
     } catch (err: any) {
       setStatus(err?.message || String(err));
     }
@@ -2705,11 +2774,12 @@ function ChatScreen({
                   <ListItemButton key={p.user_id} onClick={() => openDm(p)} sx={{ py: 0.85 }}>
                     <Avatar
                       sx={{
-                        width: 40,
-                        height: 40,
-                        mr: 1.25,
+                        width: 32,
+                        height: 32,
+                        mr: 1.1,
                         bgcolor: avatarColor(p.display_name),
-                        fontSize: 15,
+                        fontSize: 14,
+                        fontWeight: 800,
                       }}
                     >
                       {p.display_name.slice(0, 1).toUpperCase()}
@@ -2773,7 +2843,16 @@ function ChatScreen({
                         opacity: 0.55,
                       }}
                     >
-                      <Avatar sx={{ width: 40, height: 40, bgcolor: "grey.300", color: "grey.600", fontSize: 15 }}>
+                      <Avatar
+                        sx={{
+                          width: 32,
+                          height: 32,
+                          bgcolor: "grey.300",
+                          color: "grey.600",
+                          fontSize: 14,
+                          fontWeight: 800,
+                        }}
+                      >
                         {h.label.slice(0, 1).toUpperCase()}
                       </Avatar>
                       <Box flex={1} minWidth={0}>
@@ -2831,14 +2910,15 @@ function ChatScreen({
                     <Box sx={{ position: "relative", flexShrink: 0 }}>
                       <Avatar
                         sx={{
-                          width: 48,
-                          height: 48,
+                          width: 36,
+                          height: 36,
                           bgcolor: avatarColor(title),
-                          fontSize: c.kind === "group" ? 22 : 17,
+                          fontSize: c.kind === "group" ? 18 : 15,
+                          fontWeight: 800,
                         }}
                       >
                         {c.kind === "group" ? (
-                          <GroupsIcon fontSize="small" />
+                          <GroupsIcon sx={{ fontSize: 18 }} />
                         ) : (
                           title.slice(0, 1).toUpperCase()
                         )}
@@ -2847,10 +2927,10 @@ function ChatScreen({
                         <Box
                           sx={{
                             position: "absolute",
-                            bottom: 1,
-                            right: 1,
-                            width: 11,
-                            height: 11,
+                            bottom: 0,
+                            right: 0,
+                            width: 10,
+                            height: 10,
                             borderRadius: "50%",
                             border: "2px solid",
                             borderColor: "background.paper",
@@ -3011,9 +3091,10 @@ function ChatScreen({
         {nav === "saved" && (
           <SavedPanel
             items={savedItems}
-            onOpen={(id) => {
+            onOpen={(id, messageId) => {
               const conv = convs.find((c) => c.id === id);
               if (conv) {
+                if (messageId) setHighlightMsgId(messageId);
                 selectConversation(conv);
                 setNav("chats");
                 setTab(1);
@@ -3368,9 +3449,11 @@ function ChatScreen({
                     </Grow>
                   );
                 }
+                const highlighted = highlightMsgId === m.id;
                 return (
                   <Grow in key={m.id} timeout={180}>
                     <Box
+                      id={`msg-${m.id}`}
                       sx={{
                         alignSelf: mine ? "flex-end" : "flex-start",
                         maxWidth: "min(68%, 460px)",
@@ -3386,8 +3469,11 @@ function ChatScreen({
                           sx={{
                             px: 1,
                             py: 0.4,
-                            bgcolor:
-                              m.kind === "deleted"
+                            bgcolor: highlighted
+                              ? dark
+                                ? "rgba(255, 193, 7, 0.28)"
+                                : "rgba(255, 236, 150, 0.95)"
+                              : m.kind === "deleted"
                                 ? "action.selected"
                                 : mine
                                   ? dark
@@ -3395,8 +3481,9 @@ function ChatScreen({
                                     : "#DCEFE9"
                                   : "background.paper",
                             border: "1px solid",
-                            borderColor:
-                              m.kind === "deleted"
+                            borderColor: highlighted
+                              ? "warning.main"
+                              : m.kind === "deleted"
                                 ? "divider"
                                 : mine
                                   ? dark
@@ -3408,6 +3495,7 @@ function ChatScreen({
                             boxShadow: dark
                               ? "0 1px 2px rgba(0,0,0,0.25)"
                               : "0 1px 1px rgba(20,32,28,0.04)",
+                            transition: "background-color 0.35s ease, border-color 0.35s ease",
                           }}
                         >
                           {m.pinned && (
@@ -3432,13 +3520,14 @@ function ChatScreen({
                               onClick={(e) => setMsgMenu({ anchor: e.currentTarget, message: m })}
                               sx={{
                                 position: "absolute",
-                                top: 0,
-                                right: 0,
-                                opacity: 0.4,
-                                p: 0.35,
+                                top: 2,
+                                right: 2,
+                                opacity: 0.45,
+                                p: 0.45,
+                                zIndex: 1,
                               }}
                             >
-                              <MoreVertIcon sx={{ fontSize: 14 }} />
+                              <MoreVertIcon sx={{ fontSize: 15 }} />
                             </IconButton>
                           )}
                           {isGroup && m.kind !== "deleted" && (
@@ -3522,7 +3611,12 @@ function ChatScreen({
                               </Typography>
                             </Stack>
                           ) : m.kind === "file_notice" ? (
-                            <Stack direction="row" spacing={0.25} alignItems="center">
+                            <Stack
+                              direction="row"
+                              spacing={0.75}
+                              alignItems="center"
+                              sx={{ pr: 3.25 }}
+                            >
                               <Button
                                 size="small"
                                 startIcon={<DownloadIcon sx={{ fontSize: 16 }} />}
@@ -3547,7 +3641,7 @@ function ChatScreen({
                                     disabled={previewBusy || !!incomingFile || !m.file_id}
                                     onClick={() => m.file_id && previewFile(m.file_id, m.sender_id)}
                                     aria-label="Preview file"
-                                    sx={{ p: 0.4 }}
+                                    sx={{ p: 0.5 }}
                                   >
                                     <OpenInNewIcon sx={{ fontSize: 16 }} />
                                   </IconButton>
@@ -4870,8 +4964,7 @@ function SettingsScreen(props: {
             PeerChat {props.version}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Installed builds update in place — run a newer Install-PeerChat.bat (or setup.exe) to
-            upgrade. Chat data stays in your Windows app data folder.
+            A lightweight, secure peer-to-peer messaging app for direct communication and file sharing over your network.
           </Typography>
         </Paper>
 
@@ -4889,9 +4982,7 @@ function SettingsScreen(props: {
             label="Desktop notifications for new messages"
           />
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Uses Windows toast notifications (not the browser prompt). Muted chats stay quiet.
-            Closing the window keeps PeerChat in the system tray so messages can still arrive —
-            right-click the tray icon and choose Quit PeerChat to fully exit.
+            Get desktop alerts for new messages. Muted chats stay silent.
           </Typography>
         </Paper>
 
@@ -5021,9 +5112,7 @@ function SettingsScreen(props: {
             label="Add 'Share in PeerChat' to right-click menu"
           />
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Right-clicking any file in Explorer will show "Share in PeerChat". The app
-            opens directly to the file ready to send. No admin rights required — stored
-            in your user registry (HKCU). The installer also sets this automatically.
+          Add "Share in PeerChat" to the File Explorer right-click menu to share files easily.
           </Typography>
         </Paper>
 

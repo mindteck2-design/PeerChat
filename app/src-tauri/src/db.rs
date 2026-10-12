@@ -2374,12 +2374,23 @@ pub fn conversation_title(conn: &Connection, conversation_id: &str) -> Result<Op
     .map_err(|e| e.to_string())
 }
 
+pub fn delete_saved_by_message_id(conn: &Connection, message_id: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM saved_items WHERE message_id=?1",
+        params![message_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn hide_message(conn: &Connection, user_id: &str, message_id: &str) -> Result<(), String> {
     conn.execute(
         "INSERT OR IGNORE INTO hidden_messages(user_id, message_id, hidden_at) VALUES (?1,?2,?3)",
         params![user_id, message_id, chrono::Utc::now().to_rfc3339()],
     )
     .map_err(|e| e.to_string())?;
+    // Saved is a shortcut into chat — drop it when the message is gone for me.
+    let _ = delete_saved_by_message_id(conn, message_id);
     Ok(())
 }
 
@@ -2422,6 +2433,7 @@ pub fn tombstone_message(conn: &Connection, message_id: &str) -> Result<(), Stri
         params![message_id],
     )
     .map_err(|e| e.to_string())?;
+    let _ = delete_saved_by_message_id(conn, message_id);
     Ok(())
 }
 

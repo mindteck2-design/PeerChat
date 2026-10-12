@@ -20,6 +20,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State,
 };
+use tauri_plugin_notification::NotificationExt;
 
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -2422,6 +2423,27 @@ pub fn run() {
                         let _ = handle.emit("share-files", files);
                     });
                 }
+            }
+
+            // Toast click → show window + open conversation (must register BEFORE showing
+            // toasts, or Windows reports no activation).
+            {
+                let handle = app.handle().clone();
+                let _ = app.notification().on_action(move |action| {
+                    show_main_window(&handle);
+                    let cid = action
+                        .notification()
+                        .and_then(|n| n.extra().get("conversation_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !cid.is_empty() {
+                        let _ = handle.emit(
+                            "notification-open",
+                            serde_json::json!({ "conversation_id": cid }),
+                        );
+                    }
+                });
             }
 
             // System tray: closing the window hides to tray; discovery + delivery keep running.

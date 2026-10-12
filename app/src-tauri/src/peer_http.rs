@@ -179,7 +179,16 @@ fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
         "system" | "group_event" => "Group update",
         _ => "New message",
     };
-    let _ = app.notification().builder().title(title).body(body).show();
+    let mut builder = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .auto_cancel();
+    if !cid.is_empty() {
+        builder = builder.extra("conversation_id", cid);
+    }
+    let _ = builder.show();
 }
 
 /// Returns `(http_response, Some(notify_payload))` when the UI should refresh.
