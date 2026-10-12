@@ -42,6 +42,21 @@ import { newDabState, dabMove, type DabState, type DabMsg, type EdgeId } from ".
 import { new2048State, move2048, undo2048, type Direction } from "./g2048";
 import { SnakeGame } from "../panels";
 import type { Peer } from "../peer";
+import {
+  clearGameHistory,
+  gameLabel,
+  getDabSession,
+  getRpsSession,
+  getTttSession,
+  loadGameHistory,
+  pushGameHistory,
+  sessionBadge,
+  setDabSession,
+  setRpsSession,
+  setTttSession,
+  type GameHistoryEntry,
+  type MpPhase as SessionMpPhase,
+} from "./gameSession";
 
 // ─── Types the host (App.tsx) must provide ───────────────────────────────────
 
@@ -54,6 +69,17 @@ export type GameSendFn = (peerId: string, msg: GameMsg) => Promise<void>;
 
 /** Called by ChatScreen when an inbox-updated message has kind=game_move */
 export type GameDispatchFn = (fromId: string, msg: GameMsg) => void;
+
+/** Accept from a chat invite card — GamesHub opens the game and joins. */
+export type PendingGameInvite = {
+  game: "ttt" | "rps" | "dab";
+  matchId: string;
+  fromId: string;
+  fromName: string;
+  format?: MatchFormat;
+  rows?: number;
+  cols?: number;
+};
 
 // ─── Selection screen ────────────────────────────────────────────────────────
 
@@ -98,6 +124,8 @@ export function GamesHub({
   myName,
   sendGameMsg,
   dispatchRef,
+  pendingInvite,
+  onPendingConsumed,
 }: {
   peers: Peer[];
   myId: string;
@@ -105,10 +133,37 @@ export function GamesHub({
   sendGameMsg: GameSendFn;
   /** Caller stores a ref so inbox-updated can route inbound messages here */
   dispatchRef: React.MutableRefObject<GameDispatchFn | null>;
+  pendingInvite?: PendingGameInvite | null;
+  onPendingConsumed?: () => void;
 }) {
   const [active, setActive] = useState<GameId | null>(null);
+  const [history, setHistory] = useState<GameHistoryEntry[]>(() => loadGameHistory());
+  const [sessionTick, setSessionTick] = useState(0);
+  const childDispatch = useRef<GameDispatchFn | null>(null);
 
-  const back = () => setActive(null);
+  useEffect(() => {
+    if (!pendingInvite) return;
+    setActive(pendingInvite.game);
+  }, [pendingInvite]);
+
+  // Keep a hub-level dispatcher so accept/decline/moves update session even when
+  // the user left the game screen (child unmounted).
+  useEffect(() => {
+    dispatchRef.current = (fromId, msg) => {
+      applyInboundToSession(fromId, msg, peers, myId);
+      setSessionTick((n) => n + 1);
+      childDispatch.current?.(fromId, msg);
+    };
+    return () => {
+      dispatchRef.current = null;
+    };
+  }, [dispatchRef, peers, myId]);
+
+  const back = () => {
+    setActive(null);
+    setSessionTick((n) => n + 1);
+    setHistory(loadGameHistory());
+  };
 
   if (active === "snake") return <Box sx={{ p: 3 }}><BackBar onBack={back} title="Snake" /><SnakeGame /></Box>;
   if (active === "2048") return <Game2048 onBack={back} />;
@@ -119,7 +174,10 @@ export function GamesHub({
       myId={myId}
       myName={myName}
       sendGameMsg={sendGameMsg}
-      dispatchRef={dispatchRef}
+      dispatchRef={childDispatch}
+      pendingInvite={pendingInvite?.game === "ttt" ? pendingInvite : null}
+      onPendingConsumed={onPendingConsumed}
+      onHistory={() => setHistory(loadGameHistory())}
     />
   );
   if (active === "rps") return (
@@ -129,7 +187,10 @@ export function GamesHub({
       myId={myId}
       myName={myName}
       sendGameMsg={sendGameMsg}
-      dispatchRef={dispatchRef}
+      dispatchRef={childDispatch}
+      pendingInvite={pendingInvite?.game === "rps" ? pendingInvite : null}
+      onPendingConsumed={onPendingConsumed}
+      onHistory={() => setHistory(loadGameHistory())}
     />
   );
   if (active === "dab") return (
@@ -139,9 +200,14 @@ export function GamesHub({
       myId={myId}
       myName={myName}
       sendGameMsg={sendGameMsg}
-      dispatchRef={dispatchRef}
+      dispatchRef={childDispatch}
+      pendingInvite={pendingInvite?.game === "dab" ? pendingInvite : null}
+      onPendingConsumed={onPendingConsumed}
+      onHistory={() => setHistory(loadGameHistory())}
     />
   );
+
+  void sessionTick; // re-render badges when sessions change while on this screen
 
   return (
     <Box sx={{ p: 3, overflow: "auto", height: "100%" }}>
@@ -152,7 +218,12 @@ export function GamesHub({
         All games run entirely offline. LAN multiplayer uses the existing encrypted peer channel.
       </Typography>
       <Grid container spacing={2}>
-        {GAME_CARDS.map((g) => (
+        {GAME_CARDS.map((g) => {
+          const badge =
+            g.id === "ttt" || g.id === "rps" || g.id === "dab"
+              ? sessionBadge(g.id)
+              : null;
+          return (
           <Grid item xs={12} sm={6} md={4} key={g.id}>
             <Card variant="outlined" sx={{ height: "100%" }}>
               <CardActionArea
@@ -160,9 +231,12 @@ export function GamesHub({
                 onClick={() => setActive(g.id as GameId)}
               >
                 <CardContent>
-                  <Typography variant="h6" fontWeight={700} gutterBottom>
-                    {g.name}
-                  </Typography>
+                  <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+                    <Typography variant="h6" fontWeight={700} flex={1}>
+                      {g.name}
+                    </Typography>
+                    {badge && <Chip size="small" color="primary" label={badge} />}
+                  </Stack>
                   <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
                     {g.desc}
                   </Typography>
@@ -181,10 +255,338 @@ export function GamesHub({
               </CardActionArea>
             </Card>
           </Grid>
-        ))}
+          );
+        })}
       </Grid>
+
+      <Divider sx={{ my: 3 }} />
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
+        <Typography variant="h6" fontWeight={700} flex={1}>
+          Recent matches
+        </Typography>
+        {history.length > 0 && (
+          <Button
+            size="small"
+            onClick={() => {
+              clearGameHistory();
+              setHistory([]);
+            }}
+          >
+            Clear
+          </Button>
+        )}
+      </Stack>
+      {!history.length ? (
+        <Typography variant="body2" color="text.secondary">
+          Finished LAN games will show up here.
+        </Typography>
+      ) : (
+        <Stack spacing={1}>
+          {history.slice(0, 12).map((h) => (
+            <Box
+              key={h.id}
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 1.25,
+                px: 1.5,
+                py: 1,
+                borderRadius: 2,
+                border: "1px solid",
+                borderColor: "divider",
+                bgcolor: "background.paper",
+              }}
+            >
+              <Box flex={1} minWidth={0}>
+                <Typography fontWeight={700} fontSize={14} noWrap>
+                  {gameLabel(h.game)} · vs {h.opponentName}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {formatHistoryWhen(h.at)}
+                  {h.detail ? ` · ${h.detail}` : ""}
+                </Typography>
+              </Box>
+              <Chip
+                size="small"
+                label={h.outcome === "win" ? "Won" : h.outcome === "lose" ? "Lost" : "Draw"}
+                color={h.outcome === "win" ? "success" : h.outcome === "lose" ? "error" : "default"}
+              />
+            </Box>
+          ))}
+        </Stack>
+      )}
     </Box>
   );
+}
+
+function formatHistoryWhen(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Update persisted LAN session when the game screen is not mounted. */
+export function applyInboundToSession(
+  fromId: string,
+  msg: GameMsg,
+  peers: Peer[],
+  myId: string
+) {
+  const peer = peers.find((p) => p.user_id === fromId);
+  const peerName = peer?.display_name || "Peer";
+
+  if (msg.game === "ttt") {
+    const p = msg.payload as TttMsg;
+    const s = getTttSession();
+    if (p.type === "invite") {
+      if (s && s.mpPhase !== "idle" && s.mpPhase !== "done") return;
+      setTttSession({
+        mode: "lan",
+        mpPhase: "invited",
+        opponentId: fromId,
+        opponentName: peerName,
+        myRole: "O",
+        matchId: p.matchId,
+        state: newTttState(),
+        seq: 0,
+        inboundInvite: { fromId, matchId: p.matchId },
+        mpError: "",
+      });
+      return;
+    }
+    if (!s) return;
+    if ("matchId" in p && p.matchId && s.matchId && p.matchId !== s.matchId) {
+      return;
+    }
+    if (p.type === "accept" && s.mpPhase === "inviting") {
+      setTttSession({ ...s, mpPhase: "playing", mpError: "" });
+    } else if (p.type === "decline" && s.mpPhase === "inviting") {
+      setTttSession(null);
+    } else if (p.type === "move" && s.mpPhase === "playing") {
+      const expected = s.myRole === "X" ? "O" : "X";
+      if (s.state.turn !== expected) return;
+      const next = tttMove(s.state, p.index);
+      if (!next) return;
+      setTttSession({
+        ...s,
+        state: next,
+        seq: s.seq + 1,
+        mpPhase: next.winner !== null ? "done" : "playing",
+      });
+      if (next.winner !== null) {
+        const winnerId =
+          next.winner === "draw" ? null : next.winner === s.myRole ? myId : fromId;
+        pushGameHistory({
+          game: "ttt",
+          matchId: s.matchId,
+          opponentId: fromId,
+          opponentName: s.opponentName,
+          outcome: winnerId === null ? "draw" : winnerId === myId ? "win" : "lose",
+        });
+      }
+    } else if (p.type === "result") {
+      const outcome =
+        p.winnerId == null ? "draw" : p.winnerId === myId ? "win" : "lose";
+      pushGameHistory({
+        game: "ttt",
+        matchId: p.matchId || s.matchId,
+        opponentId: fromId,
+        opponentName: s.opponentName,
+        outcome,
+      });
+      setTttSession({ ...s, mpPhase: "done" });
+    } else if (p.type === "resign") {
+      pushGameHistory({
+        game: "ttt",
+        matchId: p.matchId || s.matchId,
+        opponentId: fromId,
+        opponentName: s.opponentName,
+        outcome: "win",
+        detail: "Opponent resigned",
+      });
+      setTttSession({ ...s, mpPhase: "done", mpError: `${peerName} resigned.` });
+    } else if (p.type === "rematch") {
+      setTttSession({
+        ...s,
+        state: newTttState(),
+        seq: 0,
+        mpPhase: "playing",
+        myRole: s.myRole === "X" ? "O" : "X",
+        mpError: "",
+      });
+    }
+    return;
+  }
+
+  if (msg.game === "rps") {
+    const p = msg.payload as RpsMsg;
+    const s = getRpsSession();
+    if (p.type === "invite") {
+      if (s && s.mpPhase !== "idle" && s.mpPhase !== "done") return;
+      setRpsSession({
+        mode: "lan",
+        mpPhase: "invited",
+        opponentId: fromId,
+        opponentName: peerName,
+        matchId: p.matchId,
+        format: p.format,
+        state: newRpsState(p.format),
+        myChoice: null,
+        theyCommitted: false,
+        theirReveal: null,
+        inboundInvite: { fromId, matchId: p.matchId, format: p.format },
+        mpError: "",
+      });
+      return;
+    }
+    if (!s) return;
+    if (p.type === "accept" && s.mpPhase === "inviting") {
+      setRpsSession({
+        ...s,
+        mpPhase: "playing",
+        state: newRpsState(s.format),
+        myChoice: null,
+        theyCommitted: false,
+        theirReveal: null,
+        mpError: "",
+      });
+    } else if (p.type === "decline" && s.mpPhase === "inviting") {
+      setRpsSession(null);
+    } else if (p.type === "commit" && s.mpPhase === "playing") {
+      setRpsSession({ ...s, theyCommitted: true });
+    } else if (p.type === "reveal" && s.mpPhase === "playing") {
+      let nextSession: typeof s = { ...s, theirReveal: p.choice };
+      if (s.myChoice) {
+        const next = rpsResolveRound(s.state, s.myChoice, p.choice);
+        nextSession = {
+          ...s,
+          state: next,
+          myChoice: null,
+          theyCommitted: false,
+          theirReveal: null,
+          mpPhase: next.phase === "done" ? "done" : "playing",
+        };
+        if (next.phase === "done") {
+          const needed = Math.ceil(s.format / 2);
+          const winnerId =
+            next.myScore >= needed ? myId : next.theirScore >= needed ? fromId : null;
+          pushGameHistory({
+            game: "rps",
+            matchId: s.matchId,
+            opponentId: fromId,
+            opponentName: s.opponentName,
+            outcome: winnerId === null ? "draw" : winnerId === myId ? "win" : "lose",
+            detail: `Best of ${s.format}`,
+          });
+        }
+      }
+      setRpsSession(nextSession);
+    } else if (p.type === "result") {
+      const outcome =
+        p.winnerId == null ? "draw" : p.winnerId === myId ? "win" : "lose";
+      pushGameHistory({
+        game: "rps",
+        matchId: p.matchId || s.matchId,
+        opponentId: fromId,
+        opponentName: s.opponentName,
+        outcome,
+        detail: `Best of ${s.format}`,
+      });
+      setRpsSession({ ...s, mpPhase: "done" });
+    } else if (p.type === "resign") {
+      pushGameHistory({
+        game: "rps",
+        matchId: p.matchId || s.matchId,
+        opponentId: fromId,
+        opponentName: s.opponentName,
+        outcome: "win",
+        detail: "Opponent resigned",
+      });
+      setRpsSession({ ...s, mpPhase: "done", mpError: `${peerName} resigned.` });
+    }
+    return;
+  }
+
+  if (msg.game === "dab") {
+    const p = msg.payload as DabMsg;
+    const s = getDabSession();
+    if (p.type === "invite") {
+      if (s && s.mpPhase !== "idle" && s.mpPhase !== "done") return;
+      setDabSession({
+        mode: "lan",
+        mpPhase: "invited",
+        opponentId: fromId,
+        opponentName: peerName,
+        myPlayer: "B",
+        matchId: p.matchId,
+        state: newDabState(p.rows, p.cols),
+        seq: 0,
+        rows: p.rows,
+        cols: p.cols,
+        inboundInvite: { fromId, matchId: p.matchId, rows: p.rows, cols: p.cols },
+        mpError: "",
+      });
+      return;
+    }
+    if (!s) return;
+    if (p.type === "accept" && s.mpPhase === "inviting") {
+      setDabSession({ ...s, mpPhase: "playing", mpError: "" });
+    } else if (p.type === "decline" && s.mpPhase === "inviting") {
+      setDabSession(null);
+    } else if (p.type === "move" && s.mpPhase === "playing") {
+      const expected = s.myPlayer === "A" ? "B" : "A";
+      if (s.state.turn !== expected) return;
+      const next = dabMove(s.state, p.edge);
+      if (!next) return;
+      setDabSession({
+        ...s,
+        state: next,
+        seq: p.seq,
+        mpPhase: next.done ? "done" : "playing",
+      });
+      if (next.done) {
+        const winnerId =
+          next.scoreA === next.scoreB
+            ? null
+            : next.scoreA > next.scoreB
+              ? s.myPlayer === "A"
+                ? myId
+                : fromId
+              : s.myPlayer === "B"
+                ? myId
+                : fromId;
+        pushGameHistory({
+          game: "dab",
+          matchId: s.matchId,
+          opponentId: fromId,
+          opponentName: s.opponentName,
+          outcome: winnerId === null ? "draw" : winnerId === myId ? "win" : "lose",
+          detail: `${next.scoreA}–${next.scoreB}`,
+        });
+      }
+    } else if (p.type === "result") {
+      const outcome =
+        p.winnerId == null ? "draw" : p.winnerId === myId ? "win" : "lose";
+      pushGameHistory({
+        game: "dab",
+        matchId: p.matchId || s.matchId,
+        opponentId: fromId,
+        opponentName: s.opponentName,
+        outcome,
+      });
+      setDabSession({ ...s, mpPhase: "done" });
+    } else if (p.type === "resign") {
+      pushGameHistory({
+        game: "dab",
+        matchId: p.matchId || s.matchId,
+        opponentId: fromId,
+        opponentName: s.opponentName,
+        outcome: "win",
+        detail: "Opponent resigned",
+      });
+      setDabSession({ ...s, mpPhase: "done", mpError: `${peerName} resigned.` });
+    }
+  }
 }
 
 // ─── Back button helper ───────────────────────────────────────────────────────
@@ -242,7 +644,18 @@ function PeerPickerDialog({
 
 // ─── Shared multiplayer state machine types ───────────────────────────────────
 
-type MpPhase = "idle" | "inviting" | "invited" | "playing" | "done";
+type MpPhase = SessionMpPhase;
+
+function peerFromSession(peers: Peer[], id: string, name: string): Peer {
+  return (
+    peers.find((p) => p.user_id === id) || {
+      user_id: id,
+      display_name: name,
+      x25519_public: "",
+      ed25519_public: "",
+    }
+  );
+}
 
 // ─── 2048 ────────────────────────────────────────────────────────────────────
 
@@ -377,7 +790,7 @@ type TttMode = "local" | "lan";
 type TttLanRole = "X" | "O"; // which symbol I am
 
 function TicTacToe({
-  onBack, peers, myId, myName, sendGameMsg, dispatchRef,
+  onBack, peers, myId, myName, sendGameMsg, dispatchRef, pendingInvite, onPendingConsumed, onHistory,
 }: {
   onBack: () => void;
   peers: Peer[];
@@ -385,6 +798,9 @@ function TicTacToe({
   myName: string;
   sendGameMsg: GameSendFn;
   dispatchRef: React.MutableRefObject<GameDispatchFn | null>;
+  pendingInvite?: PendingGameInvite | null;
+  onPendingConsumed?: () => void;
+  onHistory?: () => void;
 }) {
   const [mode, setMode] = useState<TttMode>("local");
   const [state, setState] = useState<TttState>(newTttState);
@@ -396,6 +812,73 @@ function TicTacToe({
   const [inboundInvite, setInboundInvite] = useState<{ from: Peer; matchId: string } | null>(null);
   const [mpError, setMpError] = useState("");
   const [seq, setSeq] = useState(0); // move sequence for ordering
+  const pendingConsumed = useRef(false);
+  const restored = useRef(false);
+
+  // Restore LAN session when returning to this game.
+  useEffect(() => {
+    if (restored.current || pendingInvite) return;
+    const s = getTttSession();
+    if (!s) return;
+    restored.current = true;
+    setMode("lan");
+    setMpPhase(s.mpPhase);
+    setMatchId(s.matchId);
+    setMyRole(s.myRole);
+    setState(s.state);
+    setSeq(s.seq);
+    setMpError(s.mpError);
+    const peer = peerFromSession(peers, s.opponentId, s.opponentName);
+    setOpponent(peer);
+    if (s.inboundInvite || s.mpPhase === "invited") {
+      setInboundInvite({
+        from: peer,
+        matchId: s.inboundInvite?.matchId || s.matchId,
+      });
+    }
+  }, [peers, pendingInvite]);
+
+  // Persist LAN session so leaving the screen does not lose invite/play state.
+  useEffect(() => {
+    if (mode !== "lan") return;
+    if (mpPhase === "idle" || !opponent) {
+      setTttSession(null);
+      return;
+    }
+    setTttSession({
+      mode: "lan",
+      mpPhase,
+      opponentId: opponent.user_id,
+      opponentName: opponent.display_name,
+      myRole,
+      matchId,
+      state,
+      seq,
+      inboundInvite: inboundInvite
+        ? { fromId: inboundInvite.from.user_id, matchId: inboundInvite.matchId }
+        : null,
+      mpError,
+    });
+  }, [mode, mpPhase, opponent, myRole, matchId, state, seq, inboundInvite, mpError]);
+
+  useEffect(() => {
+    if (!pendingInvite || pendingInvite.game !== "ttt" || pendingConsumed.current) return;
+    const fromPeer = peers.find((p) => p.user_id === pendingInvite.fromId);
+    if (!fromPeer) return;
+    pendingConsumed.current = true;
+    setOpponent(fromPeer);
+    setMatchId(pendingInvite.matchId);
+    setMyRole("O");
+    setMode("lan");
+    setMpPhase("playing");
+    setState(newTttState());
+    setSeq(0);
+    sendGameMsg(fromPeer.user_id, {
+      game: "ttt",
+      payload: { type: "accept", matchId: pendingInvite.matchId },
+    }).catch(() => setMpError("Failed to accept invite."));
+    onPendingConsumed?.();
+  }, [pendingInvite, peers, sendGameMsg, onPendingConsumed]);
 
   const sendMsg = useCallback(
     async (payload: TttMsg) => {
@@ -429,6 +912,7 @@ function TicTacToe({
         setMpPhase("idle");
         setMpError(`${fromPeer.display_name} declined.`);
         setOpponent(null);
+        setTttSession(null);
       }
       if (p.type === "move" && mpPhase === "playing" && p.matchId === matchId) {
         // Validate: it's the opponent's turn, index is empty
@@ -436,7 +920,25 @@ function TicTacToe({
           if (prev.winner !== null) return prev;
           const expectedTurn = myRole === "X" ? "O" : "X";
           if (prev.turn !== expectedTurn) return prev;
-          return tttMove(prev, p.index) ?? prev;
+          const next = tttMove(prev, p.index) ?? prev;
+          if (next.winner !== null) {
+            setMpPhase("done");
+            const winnerId =
+              next.winner === "draw" ? null : next.winner === myRole ? myId : fromId;
+            pushGameHistory({
+              game: "ttt",
+              matchId: p.matchId,
+              opponentId: fromId,
+              opponentName: fromPeer.display_name,
+              outcome: winnerId === null ? "draw" : winnerId === myId ? "win" : "lose",
+            });
+            onHistory?.();
+            void sendGameMsg(fromId, {
+              game: "ttt",
+              payload: { type: "result", matchId: p.matchId, winnerId },
+            });
+          }
+          return next;
         });
         setSeq((s) => s + 1);
       }
@@ -450,16 +952,44 @@ function TicTacToe({
       if (p.type === "resign") {
         setMpPhase("done");
         setMpError(`${fromPeer.display_name} resigned.`);
+        pushGameHistory({
+          game: "ttt",
+          matchId: p.matchId || matchId,
+          opponentId: fromId,
+          opponentName: fromPeer.display_name,
+          outcome: "win",
+          detail: "Opponent resigned",
+        });
+        onHistory?.();
+        void sendGameMsg(fromId, {
+          game: "ttt",
+          payload: { type: "result", matchId: p.matchId || matchId, winnerId: myId },
+        });
       }
     };
     return () => { dispatchRef.current = null; };
-  }, [mpPhase, peers, matchId, myRole, dispatchRef]);
+  }, [mpPhase, peers, matchId, myRole, myId, dispatchRef, sendGameMsg, onHistory]);
+
+  function recordTttHistory(outcome: "win" | "lose" | "draw", detail?: string) {
+    if (!opponent || !matchId) return;
+    pushGameHistory({
+      game: "ttt",
+      matchId,
+      opponentId: opponent.user_id,
+      opponentName: opponent.display_name,
+      outcome,
+      detail,
+    });
+    onHistory?.();
+  }
 
   function startLocalGame() {
     setMode("local");
     setState(newTttState());
     setMpPhase("idle");
     setOpponent(null);
+    setInboundInvite(null);
+    setTttSession(null);
   }
 
   function handleInvite(peer: Peer) {
@@ -472,6 +1002,7 @@ function TicTacToe({
     setMode("lan");
     setState(newTttState());
     setSeq(0);
+    setInboundInvite(null);
     sendGameMsg(peer.user_id, {
       game: "ttt",
       payload: { type: "invite", matchId: mid, fromName: myName },
@@ -494,6 +1025,16 @@ function TicTacToe({
     setInboundInvite(null);
     setMpPhase("idle");
     setOpponent(null);
+    setTttSession(null);
+  }
+
+  async function publishTttResult(next: TttState) {
+    if (mode !== "lan" || !opponent || !matchId) return;
+    if (next.winner === null) return;
+    const winnerId =
+      next.winner === "draw" ? null : next.winner === myRole ? myId : opponent.user_id;
+    recordTttHistory(winnerId === null ? "draw" : winnerId === myId ? "win" : "lose");
+    await sendMsg({ type: "result", matchId, winnerId });
   }
 
   async function handleCellClick(index: number) {
@@ -511,6 +1052,7 @@ function TicTacToe({
     setSeq(newSeq);
     if (next.winner !== null || next.board.every((c) => c !== null)) setMpPhase("done");
     await sendMsg({ type: "move", matchId, index, boardAfter: next.board });
+    if (next.winner !== null) await publishTttResult(next);
   }
 
   async function handleRematch() {
@@ -636,7 +1178,7 @@ function TicTacToe({
 const CHOICE_EMOJI: Record<RpsChoice, string> = { rock: "✊", paper: "✋", scissors: "✌️" };
 
 function RockPaperScissors({
-  onBack, peers, myId, myName, sendGameMsg, dispatchRef,
+  onBack, peers, myId, myName, sendGameMsg, dispatchRef, pendingInvite, onPendingConsumed, onHistory,
 }: {
   onBack: () => void;
   peers: Peer[];
@@ -644,6 +1186,9 @@ function RockPaperScissors({
   myName: string;
   sendGameMsg: GameSendFn;
   dispatchRef: React.MutableRefObject<GameDispatchFn | null>;
+  pendingInvite?: PendingGameInvite | null;
+  onPendingConsumed?: () => void;
+  onHistory?: () => void;
 }) {
   const [mode, setMode] = useState<"local" | "lan">("local");
   const [format, setFormat] = useState<MatchFormat>(3);
@@ -662,8 +1207,81 @@ function RockPaperScissors({
   const [theyCommitted, setTheyCommitted] = useState(false);
   const [theirReveal, setTheirReveal] = useState<RpsChoice | null>(null);
   const [mpError, setMpError] = useState("");
+  const pendingConsumed = useRef(false);
+  const restored = useRef(false);
 
   const roundNum = state.rounds.length;
+
+  useEffect(() => {
+    if (restored.current || pendingInvite) return;
+    const s = getRpsSession();
+    if (!s) return;
+    restored.current = true;
+    setMode("lan");
+    setMpPhase(s.mpPhase);
+    setMatchId(s.matchId);
+    setFormat(s.format);
+    setState(s.state);
+    setMyChoice(s.myChoice);
+    setTheyCommitted(s.theyCommitted);
+    setTheirReveal(s.theirReveal);
+    setMpError(s.mpError);
+    const peer = peerFromSession(peers, s.opponentId, s.opponentName);
+    setOpponent(peer);
+    if (s.inboundInvite || s.mpPhase === "invited") {
+      setInboundInvite({
+        from: peer,
+        matchId: s.inboundInvite?.matchId || s.matchId,
+        format: s.inboundInvite?.format || s.format,
+      });
+    }
+  }, [peers, pendingInvite]);
+
+  useEffect(() => {
+    if (mode !== "lan") return;
+    if (mpPhase === "idle" || !opponent) {
+      setRpsSession(null);
+      return;
+    }
+    setRpsSession({
+      mode: "lan",
+      mpPhase,
+      opponentId: opponent.user_id,
+      opponentName: opponent.display_name,
+      matchId,
+      format,
+      state,
+      myChoice,
+      theyCommitted,
+      theirReveal,
+      inboundInvite: inboundInvite
+        ? { fromId: inboundInvite.from.user_id, matchId: inboundInvite.matchId, format: inboundInvite.format }
+        : null,
+      mpError,
+    });
+  }, [mode, mpPhase, opponent, matchId, format, state, myChoice, theyCommitted, theirReveal, inboundInvite, mpError]);
+
+  useEffect(() => {
+    if (!pendingInvite || pendingInvite.game !== "rps" || pendingConsumed.current) return;
+    const fromPeer = peers.find((p) => p.user_id === pendingInvite.fromId);
+    if (!fromPeer) return;
+    pendingConsumed.current = true;
+    const fmt = (pendingInvite.format || 3) as MatchFormat;
+    setFormat(fmt);
+    setOpponent(fromPeer);
+    setMatchId(pendingInvite.matchId);
+    setMode("lan");
+    setMpPhase("playing");
+    setState(newRpsState(fmt));
+    setMyChoice(null);
+    setTheyCommitted(false);
+    setTheirReveal(null);
+    sendGameMsg(fromPeer.user_id, {
+      game: "rps",
+      payload: { type: "accept", matchId: pendingInvite.matchId },
+    }).catch(() => setMpError("Failed to accept invite."));
+    onPendingConsumed?.();
+  }, [pendingInvite, peers, sendGameMsg, onPendingConsumed]);
 
   const sendMsg = useCallback(
     async (payload: RpsMsg) => {
@@ -699,6 +1317,7 @@ function RockPaperScissors({
         setMpPhase("idle");
         setMpError(`${fromPeer.display_name} declined.`);
         setOpponent(null);
+        setRpsSession(null);
       }
       if (p.type === "commit" && mpPhase === "playing" && p.matchId === matchId && p.round === roundNum) {
         setTheyCommitted(true);
@@ -717,10 +1336,19 @@ function RockPaperScissors({
       if (p.type === "resign") {
         setMpPhase("done");
         setMpError(`${fromPeer.display_name} resigned.`);
+        pushGameHistory({
+          game: "rps",
+          matchId: p.matchId || matchId,
+          opponentId: fromId,
+          opponentName: fromPeer.display_name,
+          outcome: "win",
+          detail: "Opponent resigned",
+        });
+        onHistory?.();
       }
     };
     return () => { dispatchRef.current = null; };
-  }, [mpPhase, peers, matchId, roundNum, format, dispatchRef]);
+  }, [mpPhase, peers, matchId, roundNum, format, dispatchRef, onHistory]);
 
   // When both LAN choices are known, resolve the round
   useEffect(() => {
@@ -731,7 +1359,24 @@ function RockPaperScissors({
     setMyChoice(null);
     setTheyCommitted(false);
     setTheirReveal(null);
-    if (next.phase === "done") setMpPhase("done");
+    if (next.phase === "done") {
+      setMpPhase("done");
+      if (mode === "lan" && opponent && matchId) {
+        const needed = Math.ceil(format / 2);
+        const winnerId =
+          next.myScore >= needed ? myId : next.theirScore >= needed ? opponent.user_id : null;
+        pushGameHistory({
+          game: "rps",
+          matchId,
+          opponentId: opponent.user_id,
+          opponentName: opponent.display_name,
+          outcome: winnerId === null ? "draw" : winnerId === myId ? "win" : "lose",
+          detail: `Best of ${format}`,
+        });
+        onHistory?.();
+        void sendMsg({ type: "result", matchId, winnerId });
+      }
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myChoice, theirReveal]);
 
@@ -755,6 +1400,7 @@ function RockPaperScissors({
     setMyChoice(null);
     setTheyCommitted(false);
     setTheirReveal(null);
+    setInboundInvite(null);
     sendGameMsg(peer.user_id, {
       game: "rps",
       payload: { type: "invite", matchId: mid, fromName: myName, format },
@@ -780,6 +1426,7 @@ function RockPaperScissors({
     setInboundInvite(null);
     setMpPhase("idle");
     setOpponent(null);
+    setRpsSession(null);
   }
 
   async function rematch() {
@@ -813,6 +1460,10 @@ function RockPaperScissors({
     setLocalP1Choice(null);
     setLocalP2Choice(null);
     setLocalRevealed(false);
+    setMpPhase("idle");
+    setOpponent(null);
+    setInboundInvite(null);
+    setRpsSession(null);
   }
 
   const winnerLabel = () => {
@@ -989,7 +1640,7 @@ const PRESET_SIZES: { label: string; rows: number; cols: number }[] = [
 ];
 
 function DotsAndBoxes({
-  onBack, peers, myId, myName, sendGameMsg, dispatchRef,
+  onBack, peers, myId, myName, sendGameMsg, dispatchRef, pendingInvite, onPendingConsumed, onHistory,
 }: {
   onBack: () => void;
   peers: Peer[];
@@ -997,6 +1648,9 @@ function DotsAndBoxes({
   myName: string;
   sendGameMsg: GameSendFn;
   dispatchRef: React.MutableRefObject<GameDispatchFn | null>;
+  pendingInvite?: PendingGameInvite | null;
+  onPendingConsumed?: () => void;
+  onHistory?: () => void;
 }) {
   const [presetIdx, setPresetIdx] = useState(1);
   const preset = PRESET_SIZES[presetIdx];
@@ -1012,6 +1666,8 @@ function DotsAndBoxes({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [inboundInvite, setInboundInvite] = useState<{ from: Peer; matchId: string; rows: number; cols: number } | null>(null);
   const [mpError, setMpError] = useState("");
+  const pendingConsumed = useRef(false);
+  const restored = useRef(false);
 
   const sendMsg = useCallback(
     async (payload: DabMsg) => {
@@ -1020,6 +1676,80 @@ function DotsAndBoxes({
     },
     [opponent, sendGameMsg]
   );
+
+  useEffect(() => {
+    if (restored.current || pendingInvite) return;
+    const s = getDabSession();
+    if (!s) return;
+    restored.current = true;
+    setMode("lan");
+    setMpPhase(s.mpPhase);
+    setMatchId(s.matchId);
+    setMyPlayer(s.myPlayer);
+    setState(s.state);
+    setSeq(s.seq);
+    setMpError(s.mpError);
+    const peer = peerFromSession(peers, s.opponentId, s.opponentName);
+    setOpponent(peer);
+    if (s.inboundInvite || s.mpPhase === "invited") {
+      setInboundInvite({
+        from: peer,
+        matchId: s.inboundInvite?.matchId || s.matchId,
+        rows: s.inboundInvite?.rows || s.rows,
+        cols: s.inboundInvite?.cols || s.cols,
+      });
+    }
+  }, [peers, pendingInvite]);
+
+  useEffect(() => {
+    if (mode !== "lan") return;
+    if (mpPhase === "idle" || !opponent) {
+      setDabSession(null);
+      return;
+    }
+    setDabSession({
+      mode: "lan",
+      mpPhase,
+      opponentId: opponent.user_id,
+      opponentName: opponent.display_name,
+      myPlayer,
+      matchId,
+      state,
+      seq,
+      rows: state.rows,
+      cols: state.cols,
+      inboundInvite: inboundInvite
+        ? {
+            fromId: inboundInvite.from.user_id,
+            matchId: inboundInvite.matchId,
+            rows: inboundInvite.rows,
+            cols: inboundInvite.cols,
+          }
+        : null,
+      mpError,
+    });
+  }, [mode, mpPhase, opponent, myPlayer, matchId, state, seq, inboundInvite, mpError]);
+
+  useEffect(() => {
+    if (!pendingInvite || pendingInvite.game !== "dab" || pendingConsumed.current) return;
+    const fromPeer = peers.find((p) => p.user_id === pendingInvite.fromId);
+    if (!fromPeer) return;
+    pendingConsumed.current = true;
+    const rows = pendingInvite.rows || 4;
+    const cols = pendingInvite.cols || 4;
+    setOpponent(fromPeer);
+    setMatchId(pendingInvite.matchId);
+    setMyPlayer("B");
+    setMode("lan");
+    setMpPhase("playing");
+    setState(newDabState(rows, cols));
+    setSeq(0);
+    sendGameMsg(fromPeer.user_id, {
+      game: "dab",
+      payload: { type: "accept", matchId: pendingInvite.matchId },
+    }).catch(() => setMpError("Failed to accept invite."));
+    onPendingConsumed?.();
+  }, [pendingInvite, peers, sendGameMsg, onPendingConsumed]);
 
   useEffect(() => {
     dispatchRef.current = (fromId: string, msg: GameMsg) => {
@@ -1044,19 +1774,42 @@ function DotsAndBoxes({
         setMpPhase("idle");
         setMpError(`${fromPeer.display_name} declined.`);
         setOpponent(null);
+        setDabSession(null);
       }
       if (p.type === "move" && mpPhase === "playing" && p.matchId === matchId) {
         const expectedPlayer = myPlayer === "A" ? "B" : "A";
         setState((prev) => {
           if (prev.turn !== expectedPlayer) return prev;
-          return dabMove(prev, p.edge) ?? prev;
+          const next = dabMove(prev, p.edge) ?? prev;
+          if (next.done) {
+            setMpPhase("done");
+            const winnerId =
+              next.scoreA === next.scoreB
+                ? null
+                : next.scoreA > next.scoreB
+                  ? myPlayer === "A"
+                    ? myId
+                    : fromId
+                  : myPlayer === "B"
+                    ? myId
+                    : fromId;
+            pushGameHistory({
+              game: "dab",
+              matchId: p.matchId,
+              opponentId: fromId,
+              opponentName: fromPeer.display_name,
+              outcome: winnerId === null ? "draw" : winnerId === myId ? "win" : "lose",
+              detail: `${next.scoreA}–${next.scoreB}`,
+            });
+            onHistory?.();
+            void sendGameMsg(fromId, {
+              game: "dab",
+              payload: { type: "result", matchId: p.matchId, winnerId },
+            });
+          }
+          return next;
         });
         setSeq(p.seq);
-        // Check done
-        setState((prev) => {
-          if (prev.done) setMpPhase("done");
-          return prev;
-        });
       }
       if (p.type === "rematch") {
         setState(newDabState(p.rows, p.cols));
@@ -1067,10 +1820,23 @@ function DotsAndBoxes({
       if (p.type === "resign") {
         setMpPhase("done");
         setMpError(`${fromPeer.display_name} resigned.`);
+        pushGameHistory({
+          game: "dab",
+          matchId: p.matchId || matchId,
+          opponentId: fromId,
+          opponentName: fromPeer.display_name,
+          outcome: "win",
+          detail: "Opponent resigned",
+        });
+        onHistory?.();
+        void sendGameMsg(fromId, {
+          game: "dab",
+          payload: { type: "result", matchId: p.matchId || matchId, winnerId: myId },
+        });
       }
     };
     return () => { dispatchRef.current = null; };
-  }, [mpPhase, peers, matchId, myPlayer, dispatchRef]);
+  }, [mpPhase, peers, matchId, myPlayer, myId, dispatchRef, sendGameMsg, onHistory]);
 
   function handleInvite(peer: Peer) {
     setPickerOpen(false);
@@ -1082,6 +1848,7 @@ function DotsAndBoxes({
     setMode("lan");
     setState(newDabState(preset.rows, preset.cols));
     setSeq(0);
+    setInboundInvite(null);
     sendGameMsg(peer.user_id, {
       game: "dab",
       payload: { type: "invite", matchId: mid, fromName: myName, rows: preset.rows, cols: preset.cols },
@@ -1104,6 +1871,7 @@ function DotsAndBoxes({
     setInboundInvite(null);
     setMpPhase("idle");
     setOpponent(null);
+    setDabSession(null);
   }
 
   async function handleEdgeClick(edge: EdgeId) {
@@ -1115,7 +1883,33 @@ function DotsAndBoxes({
     if (mode === "lan") {
       const newSeq = seq + 1;
       setSeq(newSeq);
-      if (next.done) setMpPhase("done");
+      if (next.done) {
+        setMpPhase("done");
+        const winnerId =
+          next.scoreA === next.scoreB
+            ? null
+            : next.scoreA > next.scoreB
+              ? myPlayer === "A"
+                ? myId
+                : opponent?.user_id ?? null
+              : myPlayer === "B"
+                ? myId
+                : opponent?.user_id ?? null;
+        if (opponent) {
+          pushGameHistory({
+            game: "dab",
+            matchId,
+            opponentId: opponent.user_id,
+            opponentName: opponent.display_name,
+            outcome: winnerId === null ? "draw" : winnerId === myId ? "win" : "lose",
+            detail: `${next.scoreA}–${next.scoreB}`,
+          });
+          onHistory?.();
+        }
+        await sendMsg({ type: "move", matchId, seq: newSeq, edge });
+        await sendMsg({ type: "result", matchId, winnerId });
+        return;
+      }
       await sendMsg({ type: "move", matchId, seq: newSeq, edge });
     }
   }
@@ -1135,13 +1929,15 @@ function DotsAndBoxes({
     setState(newDabState(preset.rows, preset.cols));
     setMpPhase("idle");
     setOpponent(null);
+    setInboundInvite(null);
+    setDabSession(null);
   }
 
   const canMove = mode === "local" || (mpPhase === "playing" && state.turn === myPlayer);
   const { rows, cols } = state;
-  const DOT = 8;
-  const CELL = 44;
-  const EDGE_W = 6;
+  const DOT = 10;
+  const CELL = 72;
+  const EDGE_W = 8;
 
   const playerColor: Record<"A" | "B", string> = { A: "#4C8DFF", B: "#FF6B6B" };
   const playerLabel = (p: "A" | "B") => {

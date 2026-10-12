@@ -1370,15 +1370,40 @@ pub fn list_messages(
             .as_str()
             .unwrap_or(conversation_id)
             .to_string();
-        let (attempts, last_error): (i64, Option<String>) = conn
+        let (pending_count, attempts, last_error, outbox_created): (
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = conn
             .query_row(
-                "SELECT COALESCE(MAX(attempts),0), MAX(last_error) FROM outbox WHERE delivered_at IS NULL AND (id=?1 OR id LIKE ?2)",
+                "SELECT COUNT(*), COALESCE(MAX(attempts),0), MAX(last_error), MIN(created_at) FROM outbox WHERE delivered_at IS NULL AND (id=?1 OR id LIKE ?2)",
                 params![mid.as_str(), format!("{mid}:%")],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
-            .unwrap_or((0, None));
-        let failed = attempts >= 8;
+            .unwrap_or((0, 0, None, None));
+        let queued =
+            pending_count > 0 && !msg["delivered"].as_bool().unwrap_or(false);
+        // Soft network failures stay Queued. Only age out after 2 days, or fail
+        // immediately on security/identity errors.
+        let security = last_error
+            .as_deref()
+            .map(|e| e.contains("[SECURITY]"))
+            .unwrap_or(false);
+        let stale = outbox_created
+            .as_deref()
+            .or(msg["created_at"].as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|ts| {
+                chrono::Utc::now()
+                    .signed_duration_since(ts.with_timezone(&chrono::Utc))
+                    .num_hours()
+                    >= 48
+            })
+            .unwrap_or(false);
+        let failed = security || (queued && stale);
         msg["failed"] = serde_json::json!(failed);
+        msg["queued"] = serde_json::json!(queued && !failed);
         msg["attempts"] = serde_json::json!(attempts);
         msg["last_error"] = serde_json::json!(last_error);
         msg["reactions"] = serde_json::json!(list_reactions_for(conn, &mid).unwrap_or_default());
@@ -1528,10 +1553,15 @@ pub fn bump_outbox_error(conn: &Connection, id: &str, err: &str) -> Result<(), S
         .query_row("SELECT attempts FROM outbox WHERE id=?1", params![id], |r| r.get(0))
         .unwrap_or(0);
     let new_attempts = attempts + 1;
-    // Exponential backoff: 2^n seconds capped at 60 s, with ±25 % jitter.
+    // Exponential backoff with ±25 % jitter, then settle at 5 minutes so offline
+    // peers (app closed on LAN) stay queued without a hot retry loop.
     // Jitter uses FNV-1a hash of the id so different items for the same peer
     // don't all retry at exactly the same moment (thundering-herd avoidance).
-    let base_delay = (1i64 << new_attempts.min(6)).min(60);
+    let base_delay = if new_attempts <= 6 {
+        (1i64 << new_attempts).min(60)
+    } else {
+        300
+    };
     let jitter_range = (base_delay / 4).max(1);
     let hash: u64 = id.bytes().fold(14_695_981_039_346_656_037_u64, |acc, b| {
         acc.wrapping_mul(1_099_511_628_211).wrapping_add(b as u64)

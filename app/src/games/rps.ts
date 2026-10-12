@@ -79,4 +79,5 @@ export type RpsMsg =
   | { type: "commit"; matchId: string; round: number } // "I have chosen" — no choice revealed
   | { type: "reveal"; matchId: string; round: number; choice: RpsChoice }
   | { type: "rematch"; matchId: string; format: MatchFormat }
-  | { type: "resign"; matchId: string };
+  | { type: "resign"; matchId: string }
+  | { type: "result"; matchId: string; winnerId: string | null };

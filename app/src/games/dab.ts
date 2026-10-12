@@ -123,4 +123,5 @@ export type DabMsg =
   | { type: "decline"; matchId: string }
   | { type: "move"; matchId: string; seq: number; edge: EdgeId }
   | { type: "rematch"; matchId: string; rows: number; cols: number }
-  | { type: "resign"; matchId: string };
+  | { type: "resign"; matchId: string }
+  | { type: "result"; matchId: string; winnerId: string | null };

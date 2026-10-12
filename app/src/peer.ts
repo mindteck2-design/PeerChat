@@ -76,6 +76,8 @@ export type Message = {
   reply_to?: string | null;
   delivered?: boolean;
   read?: boolean;
+  /** Soft undelivered — still retrying locally (peer offline / app closed). */
+  queued?: boolean;
   failed?: boolean;
   attempts?: number;
   last_error?: string | null;

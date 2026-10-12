@@ -2,6 +2,8 @@ mod bundle;
 mod db;
 mod discovery;
 mod peer_http;
+#[cfg(windows)]
+mod single_instance;
 mod tls_cert;
 
 use base64::Engine;
@@ -13,7 +15,44 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State,
+};
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        // Windows often blocks focus steals from background processes; always-on-top
+        // for a tick is enough to surface the tray-restored window.
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_focus();
+        let _ = window.set_always_on_top(false);
+    }
+}
+
+fn drain_pending_share(app: &AppHandle) {
+    let Ok(local) = std::env::var("LOCALAPPDATA") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(local)
+        .join("com.lanmsg.app")
+        .join("pending-share.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&path);
+    let Ok(files) = serde_json::from_str::<Vec<String>>(&raw) else {
+        return;
+    };
+    if files.is_empty() {
+        return;
+    }
+    show_main_window(app);
+    let _ = app.emit("share-files", files);
+}
 
 struct AppState {
     db: SharedDb,
@@ -443,7 +482,7 @@ async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
             let _ = db::bump_outbox_error(
                 &conn,
                 &id,
-                "peer IP is loopback/invalid — ask them to update PeerTalk and Refresh People",
+                "peer IP is loopback/invalid — ask them to update PeerChat and Refresh People",
             );
             continue;
         }
@@ -2259,9 +2298,30 @@ fn shell_extension_installed() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    // Bail before any window/tray is created if PeerChat is already running.
+    #[cfg(windows)]
+    single_instance::exit_if_already_running();
+
+    // single-instance plugin still handles mid-session relaunch argv forwarding.
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            show_main_window(app);
+            // Forward Explorer "Share in PeerChat" files into the running instance.
+            if let Some(pos) = args.iter().position(|a| a == "--share") {
+                let files: Vec<String> = args[pos + 1..]
+                    .iter()
+                    .take_while(|a| !a.starts_with("--"))
+                    .cloned()
+                    .collect();
+                if !files.is_empty() {
+                    let _ = app.emit("share-files", files);
+                }
+            }
+            drain_pending_share(app);
+        }))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data = app
                 .path()
@@ -2312,12 +2372,70 @@ pub fn run() {
                     let handle = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(tokio::time::Duration::from_millis(900)).await;
+                        show_main_window(&handle);
                         let _ = handle.emit("share-files", files);
                     });
                 }
             }
 
+            // System tray: closing the window hides to tray; discovery + delivery keep running.
+            // Remove any leftover icon with this id so we never stack trays.
+            let _ = app.remove_tray_by_id("peerchat");
+            let show_i = MenuItem::with_id(app, "show", "Open PeerChat", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Quit PeerChat", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+            let tray = TrayIconBuilder::with_id("peerchat")
+                .icon(
+                    app.default_window_icon()
+                        .cloned()
+                        .ok_or_else(|| "missing window icon for tray".to_string())?,
+                )
+                .tooltip("PeerChat - running in background")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => {
+                        let _ = app.remove_tray_by_id("peerchat");
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+            // Keep the handle alive for the process lifetime (managed by Tauri).
+            std::mem::forget(tray);
+
+            // Pick up --share files left by a preempted second instance.
+            drain_pending_share(app.handle());
+            let share_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
+                    drain_pending_share(&share_handle);
+                }
+            });
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // X should quit the process. Hide-to-tray made "close" feel broken:
+                // reopen from tray, hit X again, and the app still lingered until Quit.
+                // Tray remains while the window is open (Show / Quit / notifications).
+                let app = window.app_handle().clone();
+                let _ = app.remove_tray_by_id("peerchat");
+                app.exit(0);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_profile,
@@ -2390,8 +2508,13 @@ pub fn run() {
             uninstall_shell_extension,
             shell_extension_installed,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running PeerChat");
+        .build(tauri::generate_context!())
+        .expect("error while building PeerChat")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                let _ = app.remove_tray_by_id("peerchat");
+            }
+        });
 }
 
 #[cfg(test)]

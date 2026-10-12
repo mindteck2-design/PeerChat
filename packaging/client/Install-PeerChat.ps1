@@ -1,4 +1,4 @@
-# PeerChat per-user installer — no admin rights required.
+﻿# PeerChat per-user installer - no admin rights required.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File Install-PeerChat.ps1
@@ -9,11 +9,11 @@
 #   1. Copies PeerChat.exe to %LOCALAPPDATA%\Programs\PeerChat\
 #   2. Creates Start Menu shortcuts (PeerChat + Uninstall)
 #   3. Creates a Desktop shortcut (pass -NoDesktopShortcut to skip)
-#   4. Registers in Add/Remove Programs (HKCU — no admin needed)
+#   4. Registers in Add/Remove Programs (HKCU - no admin needed)
 #   5. Registers "Share in PeerChat" in the right-click context menu (HKCU)
 #   6. Writes an Uninstall-PeerChat.bat that reverses all of the above
 #
-# To upgrade: run with a newer PeerChat.exe in the same folder — data is preserved.
+# To upgrade: run with a newer PeerChat.exe in the same folder - data is preserved.
 # To uninstall: run Uninstall PeerChat from the Start Menu, or Add/Remove Programs.
 
 param(
@@ -39,7 +39,7 @@ function Write-Step([string]$msg) {
     if (-not $Quiet) { Write-Host "  $msg" }
 }
 
-# ── Locate source exe ───────────────────────────────────────────────────────
+# -- Locate source exe -------------------------------------------------------
 function Get-ScriptDir {
     if ($PSScriptRoot) { return $PSScriptRoot }
     return Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -60,8 +60,8 @@ if (-not $SourceExe -or -not (Test-Path $SourceExe)) {
     Write-Error "Cannot find $ExeName next to this script. Pass -SourceExe <path>."
 }
 
-# ── Determine version ────────────────────────────────────────────────────────
-$version = "0.4.0"
+# -- Determine version --------------------------------------------------------
+$version = "0.4.1"
 $verBeside = Join-Path (Split-Path -Parent $SourceExe) $VersionFile
 if (Test-Path $verBeside) {
     $version = (Get-Content $verBeside -Raw).Trim()
@@ -71,7 +71,7 @@ if (Test-Path $verBeside) {
         $version = $fvi.ProductVersion
         if (-not $version) { $version = $fvi.FileVersion }
     } catch {}
-    if (-not $version) { $version = "0.4.0" }
+    if (-not $version) { $version = "0.4.1" }
 }
 
 if (-not $Quiet) {
@@ -79,7 +79,7 @@ if (-not $Quiet) {
     Write-Host "Installing $ProductName $version ..." -ForegroundColor Cyan
 }
 
-# ── Stop any running instance ────────────────────────────────────────────────
+# -- Stop any running instance ------------------------------------------------
 Get-Process -Name "PeerChat","lanmsg" -ErrorAction SilentlyContinue | ForEach-Object {
     try { $_.CloseMainWindow() | Out-Null } catch {}
 }
@@ -87,14 +87,14 @@ Start-Sleep -Milliseconds 500
 Get-Process -Name "PeerChat","lanmsg" -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
 
-# ── Copy exe ─────────────────────────────────────────────────────────────────
+# -- Copy exe -----------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 $destExe = Join-Path $InstallRoot $ExeName
 Copy-Item -Force $SourceExe $destExe
 Set-Content -Path (Join-Path $InstallRoot $VersionFile) -Value $version -Encoding ASCII
 Write-Step "Copied $ExeName → $InstallRoot"
 
-# ── Write uninstaller batch ───────────────────────────────────────────────────
+# -- Write uninstaller batch ---------------------------------------------------
 $uninstallBat = Join-Path $InstallRoot $UninstallName
 @"
 @echo off
@@ -126,7 +126,7 @@ pause
 "@ | Set-Content -Path $uninstallBat -Encoding ASCII
 Write-Step "Wrote $UninstallName"
 
-# ── Start Menu shortcuts ─────────────────────────────────────────────────────
+# -- Start Menu shortcuts -----------------------------------------------------
 $wsh      = New-Object -ComObject WScript.Shell
 $startDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\PeerChat"
 New-Item -ItemType Directory -Force -Path $startDir | Out-Null
@@ -135,7 +135,7 @@ $startLnk = Join-Path $startDir "PeerChat.lnk"
 $sc = $wsh.CreateShortcut($startLnk)
 $sc.TargetPath      = $destExe
 $sc.WorkingDirectory = $InstallRoot
-$sc.Description     = "PeerChat $version — secure LAN messenger"
+$sc.Description     = "PeerChat $version - secure LAN messenger"
 $sc.Save()
 
 $unLnk = Join-Path $startDir "Uninstall PeerChat.lnk"
@@ -146,7 +146,7 @@ $usc.Description     = "Uninstall PeerChat"
 $usc.Save()
 Write-Step "Created Start Menu shortcuts"
 
-# ── Desktop shortcut ─────────────────────────────────────────────────────────
+# -- Desktop shortcut ---------------------------------------------------------
 if (-not $NoDesktopShortcut) {
     $desk    = [Environment]::GetFolderPath("Desktop")
     $deskLnk = Join-Path $desk "PeerChat.lnk"
@@ -158,7 +158,7 @@ if (-not $NoDesktopShortcut) {
     Write-Step "Created Desktop shortcut"
 }
 
-# ── Add/Remove Programs (HKCU — no admin) ───────────────────────────────────
+# -- Add/Remove Programs (HKCU - no admin) -----------------------------------
 New-Item -Path $RegUninstall -Force | Out-Null
 $props = @{
     DisplayName     = "$ProductName $version"
@@ -177,9 +177,9 @@ foreach ($k in $props.Keys) {
 }
 Write-Step "Registered in Add/Remove Programs (HKCU)"
 
-# ── Right-click shell integration ────────────────────────────────────────────
+# -- Right-click shell integration --------------------------------------------
 if (-not $NoShellIntegration) {
-    # Register "Share in PeerChat" verb for all file types (HKCU — no admin).
+    # Register "Share in PeerChat" verb for all file types (HKCU - no admin).
     New-Item -Path "$ShellVerbKey"          -Force | Out-Null
     New-Item -Path "$ShellVerbKey\command"  -Force | Out-Null
 
@@ -195,7 +195,7 @@ if (-not $NoShellIntegration) {
     Write-Step "(Right-click any file in Explorer → 'Share in PeerChat')"
 }
 
-# ── Done ──────────────────────────────────────────────────────────────────────
+# -- Done ----------------------------------------------------------------------
 if (-not $Quiet) {
     Write-Host ""
     Write-Host "Installed: $destExe" -ForegroundColor Green

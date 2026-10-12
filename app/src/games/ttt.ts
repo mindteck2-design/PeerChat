@@ -49,4 +49,5 @@ export type TttMsg =
   | { type: "decline"; matchId: string }
   | { type: "move"; matchId: string; index: number; boardAfter: Board }
   | { type: "rematch"; matchId: string }
-  | { type: "resign"; matchId: string };
+  | { type: "resign"; matchId: string }
+  | { type: "result"; matchId: string; winnerId: string | null };

@@ -129,7 +129,19 @@ import {
 import type { SavedItem, ScanResult, TransferLog } from "./peer";
 import { ThemeMode } from "./theme";
 import { FEATURE_GAMES } from "./features";
-import { GamesHub, type GameDispatchFn, type GameMsg } from "./games/games";
+import {
+  GamesHub,
+  applyInboundToSession,
+  type GameDispatchFn,
+  type GameMsg,
+  type PendingGameInvite,
+} from "./games/games";
+import {
+  GameInviteCard,
+  matchIdOf,
+  parseGameMsg,
+  resolveGameCardStatus,
+} from "./games/GameInviteCard";
 
 type Screen = "setup" | "chat" | "settings";
 
@@ -206,6 +218,31 @@ function conversationPreviewLine(
   let body = decrypted;
   if (kind === "file_notice") return "📎 File";
   if (kind === "system") return body.trim() || "Group update";
+  if (kind === "game_move") {
+    try {
+      const j = JSON.parse(decrypted) as GameMsg;
+      const t = j?.payload?.type;
+      const g =
+        j?.game === "ttt"
+          ? "Tic-Tac-Toe"
+          : j?.game === "rps"
+            ? "Rock Paper Scissors"
+            : j?.game === "dab"
+              ? "Dots & Boxes"
+              : "Game";
+      if (t === "invite") {
+        body = senderId === myId ? `Game invite: ${g}` : `Invited you to ${g}`;
+      } else if (t === "accept") body = `Accepted ${g}`;
+      else if (t === "decline") body = `Declined ${g}`;
+      else if (t === "result") body = `${g} finished`;
+      else body = g;
+    } catch {
+      body = "Game";
+    }
+    const prefix =
+      senderId === myId ? "You: " : isGroup && senderLabel ? `${senderLabel}: ` : "";
+    return truncate(prefix + body, 80);
+  }
   if (kind === "announcement" || kind === "poll" || kind === "snippet") {
     try {
       const j = JSON.parse(decrypted);
@@ -554,7 +591,7 @@ function ChatScreen({
   const [plain, setPlain] = useState<Record<string, string>>({});
   const [groupKeys, setGroupKeys] = useState<Record<string, Uint8Array>>({});
   const [tab, setTab] = useState(0);
-  const [nav, setNav] = useState<"people" | "chats" | "groups" | "transfers" | "games" | "saved">("chats");
+  const [nav, setNav] = useState<"people" | "chats" | "transfers" | "games" | "saved">("chats");
   const [scanning, setScanning] = useState(false);
   const [transfers, setTransfers] = useState<TransferLog[]>([]);
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
@@ -569,7 +606,7 @@ function ChatScreen({
   const [snippetOpen, setSnippetOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
-  const [gamesOn, setGamesOn] = useState(true);
+  const [gamesOn, setGamesOn] = useState(false);
   const filePickRef = useRef<HTMLInputElement | null>(null);
   const pauseRef = useRef(false);
   const [chatSearch, setChatSearch] = useState("");
@@ -590,6 +627,11 @@ function ChatScreen({
 
   const [status, setStatus] = useState("");
   const [pinOpen, setPinOpen] = useState<Peer | null>(null);
+  /** Inbound first message from someone you have not trusted/pinned yet. */
+  const [firstContact, setFirstContact] = useState<{
+    peer: Peer;
+    conversationId: string;
+  } | null>(null);
 
   const [members, setMembers] = useState<Member[]>([]);
   const [membersLoaded, setMembersLoaded] = useState(false);
@@ -611,6 +653,8 @@ function ChatScreen({
 
   // Ref for the active game's inbound message dispatcher (set by each game component)
   const gameDispatchRef = useRef<GameDispatchFn | null>(null);
+  const [pendingGameInvite, setPendingGameInvite] = useState<PendingGameInvite | null>(null);
+  const [gameInviteBusy, setGameInviteBusy] = useState(false);
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLInputElement | null>(null);
@@ -643,13 +687,11 @@ function ChatScreen({
   const filteredConvs = useMemo(() => {
     const q = chatSearch.trim().toLowerCase();
     return convs.filter((c) => {
-      if (nav === "groups" && c.kind !== "group") return false;
-      if (nav === "chats" && c.kind !== "dm") return false;
       if (!q) return true;
       const title = (c.kind === "dm" ? c.peer_name : c.title) || "";
       return title.toLowerCase().includes(q);
     });
-  }, [convs, chatSearch, nav]);
+  }, [convs, chatSearch]);
 
   const isAdmin = useMemo(
     () =>
@@ -769,33 +811,37 @@ function ChatScreen({
     return peerApi.memberIds(conv.id);
   }
 
-  async function refresh() {
-    setScanning(true);
+  async function refresh(opts?: { manual?: boolean }) {
+    const manual = !!opts?.manual;
+    if (manual) setScanning(true);
     try {
       await peerApi.discoverPeers();
     } catch {
       /* ignore */
     }
-    const [p, c, hosts, logs, saved, gamesFlag] = await Promise.all([
-      peerApi.listPeers(),
-      peerApi.listConversations(),
-      peerApi.listLanHosts().catch(() => []),
-      peerApi.listTransfers().catch(() => [] as TransferLog[]),
-      peerApi.listSavedItems().catch(() => [] as SavedItem[]),
-      FEATURE_GAMES ? peerApi.getAppSetting("games_enabled").catch(() => "1") : Promise.resolve("0"),
-    ]);
-    setScanning(false);
-    setPeers(p);
-    setConvs(c);
-    setLanHosts(hosts);
-    setTransfers(logs);
-    setSavedItems(saved);
-    setGamesOn(FEATURE_GAMES && gamesFlag !== "0");
-    setActive((prev) => {
-      if (!prev) return prev;
-      const fresh = c.find((x) => x.id === prev.id);
-      return fresh ?? prev;
-    });
+    try {
+      const [p, c, hosts, logs, saved, gamesFlag] = await Promise.all([
+        peerApi.listPeers(),
+        peerApi.listConversations(),
+        peerApi.listLanHosts().catch(() => []),
+        peerApi.listTransfers().catch(() => [] as TransferLog[]),
+        peerApi.listSavedItems().catch(() => [] as SavedItem[]),
+        FEATURE_GAMES ? peerApi.getAppSetting("games_enabled").catch(() => "0") : Promise.resolve("0"),
+      ]);
+      setPeers(p);
+      setConvs(c);
+      setLanHosts(hosts);
+      setTransfers(logs);
+      setSavedItems(saved);
+      setGamesOn(FEATURE_GAMES && gamesFlag === "1");
+      setActive((prev) => {
+        if (!prev) return prev;
+        const fresh = c.find((x) => x.id === prev.id);
+        return fresh ?? prev;
+      });
+    } finally {
+      if (manual) setScanning(false);
+    }
   }
 
   useEffect(() => {
@@ -911,46 +957,66 @@ function ChatScreen({
       from_id?: string;
       kind?: string;
     }>("inbox-updated", (ev) => {
-      refresh().catch(() => {});
       const p = ev.payload || {};
       const cid = p.conversation_id || "";
-      if (!cid) return;
-      if (p.from_id === profile.id) return;
+      const fromId = p.from_id || "";
       const kind = p.kind || "";
-      if (kind === "reaction" || kind === "pin" || kind === "unpin" || kind === "deleted") return;
+      void (async () => {
+        await refresh().catch(() => {});
+        if (!cid || fromId === profile.id) return;
+        if (kind === "reaction" || kind === "pin" || kind === "unpin" || kind === "deleted") return;
 
-      // Route game_move messages to the active game component.
-      if (kind === "game_move" && gameDispatchRef.current && p.from_id) {
-        const fromId = p.from_id;
-        void (async () => {
+        // Decrypt game_move for session persistence + active game UI.
+        if (kind === "game_move") {
           try {
             const msgs = await peerApi.listMessages(cid);
             const latest = msgs.filter((m) => m.kind === "game_move" && m.sender_id === fromId).at(-1);
             if (!latest) return;
-            const peer = peers.find((x) => x.user_id === fromId);
+            const peerList = await peerApi.listPeers();
+            const peer = peerList.find((x) => x.user_id === fromId);
             if (!peer) return;
-            const pubs: Record<string, string> = {
-              [peer.user_id]: peer.x25519_public,
-              [profile.id]: exportPublic(identity).x25519_public,
-            };
-            const plaintext = await decryptMessage({ ...latest, wrapped_keys: latest.wrapped_keys || {} }, profile.id, identity);
+            const plaintext = await decryptMessage(
+              { ...latest, wrapped_keys: latest.wrapped_keys || {} },
+              profile.id,
+              identity
+            );
             const gameMsg = JSON.parse(plaintext) as GameMsg;
+            // Always keep LAN session in sync even when GamesHub is unmounted.
+            applyInboundToSession(fromId, gameMsg, peerList, profile.id);
             gameDispatchRef.current?.(fromId, gameMsg);
-          } catch { /* ignore malformed game messages */ }
-        })();
-        return; // don't toast for game moves
-      }
+          } catch {
+            /* ignore malformed game messages */
+          }
+          return;
+        }
 
-      // Native OS toast (not Web Notification — that flash-prompted on WebView2).
-      void (async () => {
+        // Surface first contact from an untrusted peer so inbound DMs are obvious.
+        if (fromId && kind !== "system" && kind !== "group_event") {
+          try {
+            const peerList = await peerApi.listPeers();
+            const peer = peerList.find((x) => x.user_id === fromId);
+            if (peer && !peer.pinned) {
+              setNav("chats");
+              setTab(1);
+              setFirstContact({ peer, conversationId: cid });
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+
+        // Native OS toast (not Web Notification — that flash-prompted on WebView2).
         try {
           const enabled = await peerApi.getNotificationsEnabled();
           if (!enabled) return;
           const muted = await peerApi.conversationIsMuted(cid).catch(() => false);
           if (muted) return;
-          const focused = await getCurrentWindow().isFocused().catch(() => true);
+          const win = getCurrentWindow();
+          const visible = await win.isVisible().catch(() => true);
+          const focused = await win.isFocused().catch(() => true);
           const viewing = activeRef.current?.id === cid;
-          if (focused && viewing) return;
+          // Always toast when the window is hidden (tray / background).
+          if (visible && focused && viewing) return;
           let granted = await isPermissionGranted();
           if (!granted) {
             granted = (await requestPermission()) === "granted";
@@ -972,7 +1038,7 @@ function ChatScreen({
       unlisten = fn;
     });
     return () => unlisten?.();
-  }, [profile.id]);
+  }, [profile.id, identity]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -2367,6 +2433,10 @@ function ChatScreen({
       ? active.peer_name || "Direct"
       : active.title || "Group"
     : "";
+  const activeDmPeer =
+    active?.kind === "dm" && active.peer_id
+      ? peers.find((p) => p.user_id === active.peer_id)
+      : undefined;
 
   return (
     <Box
@@ -2396,10 +2466,11 @@ function ChatScreen({
         {(
           [
             ["chats", "Chats", <ChatIcon key="c" />],
-            ["groups", "Groups", <GroupsIcon key="g" />],
             ["people", "People", <PeopleAltIcon key="p" />],
             ["transfers", "Transfers", <DownloadingIcon key="t" />],
-            ...(FEATURE_GAMES ? [["games", "Games", <SportsEsportsIcon key="s" />] as const] : []),
+            ...(FEATURE_GAMES && gamesOn
+              ? [["games", "Games", <SportsEsportsIcon key="s" />] as const]
+              : []),
             ["saved", "Saved", <BookmarkBorderIcon key="b" />],
           ] as const
         ).map(([id, label, icon]) => (
@@ -2408,9 +2479,9 @@ function ChatScreen({
               color={nav === id ? "primary" : "default"}
               aria-label={label}
               onClick={() => {
-                setNav(id);
+                setNav(id as typeof nav);
                 if (id === "people") setTab(0);
-                if (id === "chats" || id === "groups") setTab(1);
+                if (id === "chats") setTab(1);
               }}
               sx={{
                 bgcolor: nav === id ? "action.selected" : "transparent",
@@ -2454,7 +2525,11 @@ function ChatScreen({
               {scanning ? "Scanning LAN…" : profile.display_name}
             </Typography>
           </Box>
-          <IconButton size="small" aria-label="Refresh peers" onClick={() => refresh()}>
+          <IconButton
+            size="small"
+            aria-label="Refresh peers"
+            onClick={() => refresh({ manual: true })}
+          >
             <RefreshIcon fontSize="small" />
           </IconButton>
         </Box>
@@ -2487,7 +2562,7 @@ function ChatScreen({
                     </Tooltip>
                   </InputAdornment>
                 ) : undefined,
-              sx: { borderRadius: 999, bgcolor: "#F3F6F4" },
+              sx: { borderRadius: 999, bgcolor: "action.hover" },
             }}
           />
         </Box>
@@ -2593,10 +2668,12 @@ function ChatScreen({
             <List dense disablePadding>
               {filteredConvs.map((c) => {
                 const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
-                const peerOnline =
+                const dmPeer =
                   c.kind === "dm" && c.peer_id
-                    ? peers.find((p) => p.user_id === c.peer_id)?.online
-                    : false;
+                    ? peers.find((p) => p.user_id === c.peer_id)
+                    : undefined;
+                const peerOnline = !!dmPeer?.online;
+                const needsTrust = !!dmPeer && !dmPeer.pinned;
                 const preview = lastPreviews[c.id] || "";
                 const timeLabel = formatPreviewTime(c.last_message_at || c.created_at);
                 const unread = !!c.unread_count && active?.id !== c.id;
@@ -2677,6 +2754,14 @@ function ChatScreen({
                         </Typography>
                       </Box>
                       <Box display="flex" alignItems="center" gap={0.5} mt={0.15}>
+                        {needsTrust && (
+                          <Chip
+                            size="small"
+                            label="New"
+                            color="warning"
+                            sx={{ height: 18, fontSize: 10, fontWeight: 700, flexShrink: 0 }}
+                          />
+                        )}
                         {c.muted && (
                           <VolumeOffIcon sx={{ fontSize: 14, color: "text.disabled", flexShrink: 0 }} />
                         )}
@@ -2690,7 +2775,7 @@ function ChatScreen({
                           flex={1}
                           sx={{ fontSize: 13, lineHeight: 1.35 }}
                         >
-                          {preview || "\u00a0"}
+                          {preview || (needsTrust ? "First message — tap to open" : "\u00a0")}
                         </Typography>
                         {unread && (
                           <Box
@@ -2731,7 +2816,9 @@ function ChatScreen({
               })}
               {!filteredConvs.length && (
                 <Typography sx={{ p: 2 }} color="text.secondary" variant="body2">
-                  {chatSearch ? "No chats match your search." : "No chats yet. Start one from People."}
+                  {chatSearch
+                    ? "No chats match your search."
+                    : "No chats yet. When someone messages you, their chat appears here — or start one from People."}
                 </Typography>
               )}
             </List>
@@ -2762,13 +2849,15 @@ function ChatScreen({
             }}
           />
         )}
-        {FEATURE_GAMES && nav === "games" && (gamesOn ? (
+        {FEATURE_GAMES && nav === "games" && (gamesOn || pendingGameInvite ? (
           <GamesHub
             peers={peers}
             myId={profile.id}
             myName={profile.display_name}
             sendGameMsg={sendGameMsg}
             dispatchRef={gameDispatchRef}
+            pendingInvite={pendingGameInvite}
+            onPendingConsumed={() => setPendingGameInvite(null)}
           />
         ) : (
           <Box p={3}><Alert severity="info">Games are turned off in Settings.</Alert></Box>
@@ -2780,7 +2869,7 @@ function ChatScreen({
               const conv = convs.find((c) => c.id === id);
               if (conv) {
                 selectConversation(conv);
-                setNav(conv.kind === "group" ? "groups" : "chats");
+                setNav("chats");
                 setTab(1);
               }
             }}
@@ -2792,7 +2881,7 @@ function ChatScreen({
         )}
         <Box
           sx={{
-            display: nav === "chats" || nav === "groups" || nav === "people" ? "flex" : "none",
+            display: nav === "chats" || nav === "people" ? "flex" : "none",
             flexDirection: "column",
             flex: 1,
             minHeight: 0,
@@ -2827,16 +2916,23 @@ function ChatScreen({
               <Typography variant="subtitle1" fontWeight={700} noWrap>
                 {active ? activeTitle : "Select a conversation"}
               </Typography>
-              {active?.kind === "group" && membersLoaded && !typingLabel && (
-                <Typography variant="caption" color="text.secondary">
-                  {members.length} {members.length === 1 ? "member" : "members"}
-                </Typography>
-              )}
-              {typingLabel && (
+              {typingLabel ? (
                 <Typography variant="caption" color="primary" display="block">
                   {typingLabel}
                 </Typography>
-              )}
+              ) : active?.kind === "group" && membersLoaded ? (
+                <Typography variant="caption" color="text.secondary" display="block">
+                  {members.length} {members.length === 1 ? "member" : "members"}
+                </Typography>
+              ) : active?.kind === "dm" && activeDmPeer ? (
+                <Typography
+                  variant="caption"
+                  display="block"
+                  sx={{ color: activeDmPeer.online ? "success.main" : "text.secondary" }}
+                >
+                  {activeDmPeer.online ? "Online" : lastSeenLabel(activeDmPeer.last_seen_at)}
+                </Typography>
+              ) : null}
             </Box>
             {isAdmin && (
               <Chip
@@ -2864,6 +2960,25 @@ function ChatScreen({
             )}
           </Toolbar>
         </AppBar>
+
+        {active?.kind === "dm" && activeDmPeer && !activeDmPeer.pinned && (
+          <Alert
+            severity="warning"
+            sx={{ borderRadius: 0, flexShrink: 0 }}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                onClick={() => setPinOpen(activeDmPeer)}
+              >
+                Trust
+              </Button>
+            }
+          >
+            First contact with <strong>{activeDmPeer.display_name}</strong>. You can read their
+            messages now — tap Trust to pin their identity.
+          </Alert>
+        )}
 
         <Box
           ref={scroller}
@@ -2903,11 +3018,12 @@ function ChatScreen({
                   sx={{
                     height: 22,
                     px: 0.75,
-                    bgcolor: "rgba(255,255,255,0.92)",
+                    bgcolor: "background.paper",
                     color: "text.secondary",
                     fontWeight: 600,
                     fontSize: 11,
-                    border: "1px solid #D5E3DD",
+                    border: "1px solid",
+                    borderColor: "divider",
                   }}
                 />
               </Box>
@@ -2928,8 +3044,9 @@ function ChatScreen({
                             py: 0.55,
                             px: 0.5,
                             maxWidth: "85%",
-                            bgcolor: "rgba(255,255,255,0.92)",
-                            border: "1px solid #D5E3DD",
+                            bgcolor: "background.paper",
+                            border: "1px solid",
+                            borderColor: "divider",
                             color: "text.secondary",
                             fontWeight: 600,
                             fontSize: 12,
@@ -2940,6 +3057,127 @@ function ChatScreen({
                             },
                           }}
                         />
+                      </Box>
+                    </Grow>
+                  );
+                }
+                if (m.kind === "game_move") {
+                  const gm = parseGameMsg(plain[m.id] || "");
+                  if (!gm || gm.payload.type !== "invite") return null;
+                  const mid = matchIdOf(gm);
+                  const related = messages
+                    .filter((x) => x.kind === "game_move" && x.id !== m.id)
+                    .map((x) => ({
+                      msg: parseGameMsg(plain[x.id] || ""),
+                      senderId: x.sender_id,
+                    }))
+                    .filter((x): x is { msg: GameMsg; senderId: string } => !!x.msg);
+                  const status = resolveGameCardStatus({
+                    invite: gm,
+                    mine,
+                    myId: profile.id,
+                    related,
+                  });
+                  const peerName =
+                    active?.kind === "dm"
+                      ? active.peer_name ||
+                        peers.find((p) => p.user_id === active.peer_id)?.display_name ||
+                        "Peer"
+                      : senderLabel(m.sender_id);
+                  const fromName = mine
+                    ? peerName
+                    : (gm.payload as { fromName?: string }).fromName || senderLabel(m.sender_id);
+                  return (
+                    <Grow in key={m.id} timeout={180}>
+                      <Box
+                        sx={{
+                          alignSelf: mine ? "flex-end" : "flex-start",
+                          maxWidth: "min(72%, 320px)",
+                        }}
+                      >
+                        <Paper
+                          elevation={0}
+                          sx={{
+                            px: 1.25,
+                            py: 1,
+                            bgcolor: mine
+                              ? dark
+                                ? "rgba(76,141,255,0.22)"
+                                : "#DCEFE9"
+                              : "background.paper",
+                            border: "1px solid",
+                            borderColor: "divider",
+                            borderRadius: mine ? "10px 10px 3px 10px" : "10px 10px 10px 3px",
+                          }}
+                        >
+                          <GameInviteCard
+                            game={gm.game}
+                            fromName={fromName}
+                            mine={mine}
+                            status={status}
+                            busy={gameInviteBusy}
+                            onAccept={async () => {
+                              if (!FEATURE_GAMES) {
+                                setStatus("Games are not available in this build.");
+                                return;
+                              }
+                              setGameInviteBusy(true);
+                              try {
+                                if (!gamesOn) {
+                                  setGamesOn(true);
+                                  await peerApi.setAppSetting("games_enabled", "1").catch(() => {});
+                                }
+                                const invite: PendingGameInvite = {
+                                  game: gm.game,
+                                  matchId: mid,
+                                  fromId: m.sender_id,
+                                  fromName,
+                                };
+                                if (gm.game === "rps") {
+                                  invite.format = (gm.payload as { format?: 1 | 3 | 5 }).format || 3;
+                                }
+                                if (gm.game === "dab") {
+                                  invite.rows = (gm.payload as { rows?: number }).rows || 4;
+                                  invite.cols = (gm.payload as { cols?: number }).cols || 4;
+                                }
+                                setPendingGameInvite(invite);
+                                setNav("games");
+                              } finally {
+                                setGameInviteBusy(false);
+                              }
+                            }}
+                            onDecline={async () => {
+                              setGameInviteBusy(true);
+                              try {
+                                await sendGameMsg(m.sender_id, {
+                                  game: gm.game,
+                                  payload: { type: "decline", matchId: mid },
+                                });
+                                if (active) {
+                                  setMessages(await peerApi.listMessages(active.id));
+                                }
+                              } catch (err: any) {
+                                setStatus(err?.message || String(err));
+                              } finally {
+                                setGameInviteBusy(false);
+                              }
+                            }}
+                            onOpenGame={() => {
+                              if (!gamesOn) {
+                                setGamesOn(true);
+                                peerApi.setAppSetting("games_enabled", "1").catch(() => {});
+                              }
+                              setNav("games");
+                            }}
+                          />
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ display: "block", textAlign: "right", fontSize: 10.5, mt: 0.5 }}
+                          >
+                            {formatClock(m.created_at)}
+                          </Typography>
+                        </Paper>
                       </Box>
                     </Grow>
                   );
@@ -2964,19 +3202,26 @@ function ChatScreen({
                             py: 0.4,
                             bgcolor:
                               m.kind === "deleted"
-                                ? "#F1F4F3"
+                                ? "action.selected"
                                 : mine
-                                  ? "#DCEFE9"
-                                  : "#FFFFFF",
-                            border:
+                                  ? dark
+                                    ? "rgba(76,141,255,0.22)"
+                                    : "#DCEFE9"
+                                  : "background.paper",
+                            border: "1px solid",
+                            borderColor:
                               m.kind === "deleted"
-                                ? "1px solid #C8D5CF"
+                                ? "divider"
                                 : mine
-                                  ? "1px solid #C5DFD6"
-                                  : "1px solid #D5E3DD",
+                                  ? dark
+                                    ? "rgba(76,141,255,0.35)"
+                                    : "#C5DFD6"
+                                  : "divider",
                             borderRadius: mine ? "10px 10px 3px 10px" : "10px 10px 10px 3px",
                             position: "relative",
-                            boxShadow: "0 1px 1px rgba(20,32,28,0.04)",
+                            boxShadow: dark
+                              ? "0 1px 2px rgba(0,0,0,0.25)"
+                              : "0 1px 1px rgba(20,32,28,0.04)",
                           }}
                         >
                           {m.pinned && (
@@ -3163,7 +3408,7 @@ function ChatScreen({
                               <Tooltip
                                 title={
                                   m.last_error ||
-                                  "Could not reach the other PC (offline / no LAN IP). Keep PeerChat open on both sides, then Retry."
+                                  "Could not deliver for over 2 days. Keep PeerChat open on both PCs on the same LAN, then Retry."
                                 }
                               >
                                 <Typography
@@ -3184,6 +3429,21 @@ function ChatScreen({
                                   >
                                     Retry
                                   </Box>
+                                </Typography>
+                              </Tooltip>
+                            ) : m.queued || (mine && !m.delivered && m.kind !== "deleted") ? (
+                              <Tooltip title="Saved on this PC — will send when their PeerChat is open on the LAN">
+                                <Typography
+                                  variant="caption"
+                                  sx={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 0.35,
+                                    fontSize: 10.5,
+                                    color: "text.secondary",
+                                  }}
+                                >
+                                  {formatClock(m.created_at)} · Queued
                                 </Typography>
                               </Tooltip>
                             ) : (
@@ -3241,8 +3501,9 @@ function ChatScreen({
                 alignSelf: "flex-end",
                 maxWidth: "70%",
                 p: 1.5,
-                bgcolor: "#E8EEEC",
-                border: "1px dashed #B7C7C1",
+                bgcolor: "action.hover",
+                border: "1px dashed",
+                borderColor: "divider",
                 opacity: 0.85,
               }}
             >
@@ -3292,8 +3553,9 @@ function ChatScreen({
                 alignSelf: "flex-start",
                 maxWidth: "70%",
                 p: 1.5,
-                bgcolor: "#E8EEEC",
-                border: "1px dashed #B7C7C1",
+                bgcolor: "action.hover",
+                border: "1px dashed",
+                borderColor: "divider",
                 opacity: 0.85,
               }}
             >
@@ -3343,11 +3605,12 @@ function ChatScreen({
               flexShrink: 0,
               px: 1.5,
               py: 1.25,
-              borderTop: "1px solid #D5E3DD",
+              borderTop: "1px solid",
+              borderColor: "divider",
               display: "flex",
               flexDirection: "column",
               gap: 0.85,
-              bgcolor: "#FFFFFF",
+              bgcolor: "background.paper",
               zIndex: 2,
             }}
           >
@@ -3358,9 +3621,10 @@ function ChatScreen({
                   alignItems: "center",
                   gap: 1,
                   p: 1,
-                  border: "1px solid #D5E3DD",
+                  border: "1px solid",
+                  borderColor: "divider",
                   borderRadius: 2,
-                  bgcolor: "#F7FBFA",
+                  bgcolor: "action.hover",
                 }}
               >
                 <EditIcon fontSize="small" color="primary" />
@@ -3384,9 +3648,10 @@ function ChatScreen({
                   alignItems: "center",
                   gap: 1,
                   p: 1,
-                  border: "1px solid #D5E3DD",
+                  border: "1px solid",
+                  borderColor: "divider",
                   borderRadius: 2,
-                  bgcolor: "#F7FBFA",
+                  bgcolor: "action.hover",
                 }}
               >
                 <ReplyIcon fontSize="small" color="primary" />
@@ -3413,9 +3678,10 @@ function ChatScreen({
                       alignItems: "center",
                       gap: 1,
                       p: 1,
-                      border: "1px solid #D5E3DD",
+                      border: "1px solid",
+                      borderColor: "divider",
                       borderRadius: 2,
-                      bgcolor: "#F7FBFA",
+                      bgcolor: "action.hover",
                     }}
                   >
                     {sf.previewUrl ? (
@@ -3476,7 +3742,7 @@ function ChatScreen({
                 border: "1px solid",
                 borderColor: "divider",
                 borderRadius: 999,
-                bgcolor: dark ? "action.hover" : "#F7FBFA",
+                bgcolor: "action.hover",
                 px: 0.75,
                 py: 0.35,
               }}
@@ -3582,7 +3848,10 @@ function ChatScreen({
                   width: 36,
                   height: 36,
                   "&:hover": { bgcolor: "primary.dark" },
-                  "&.Mui-disabled": { bgcolor: "#C5D5CF", color: "#FFFFFF" },
+                  "&.Mui-disabled": {
+                    bgcolor: "action.disabledBackground",
+                    color: "action.disabled",
+                  },
                 }}
               >
                 {editingMessage ? <EditIcon fontSize="small" /> : <SendIcon fontSize="small" />}
@@ -3597,9 +3866,10 @@ function ChatScreen({
             sx={{
               flexShrink: 0,
               p: 2,
-              borderTop: "1px solid #D5E3DD",
+              borderTop: "1px solid",
+              borderColor: "divider",
               textAlign: "center",
-              bgcolor: "#FFFFFF",
+              bgcolor: "background.paper",
               zIndex: 2,
             }}
           >
@@ -3771,6 +4041,54 @@ function ChatScreen({
       </Menu>
         </Box>
 
+      <Dialog open={!!firstContact} onClose={() => setFirstContact(null)}>
+        <DialogTitle>New message</DialogTitle>
+        <DialogContent>
+          <Typography gutterBottom>
+            <strong>{firstContact?.peer.display_name}</strong> messaged you for the first time.
+            Their chat is in your Chats list — you do not need to accept before reading it.
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Trusting them pins their certificate so you can spot impersonation later.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setFirstContact(null)}>Later</Button>
+          <Button
+            onClick={async () => {
+              if (!firstContact) return;
+              const conv =
+                convs.find((c) => c.id === firstContact.conversationId) ||
+                (await peerApi.openDm(firstContact.peer.user_id));
+              setFirstContact(null);
+              selectConversation(conv);
+              setNav("chats");
+              setTab(1);
+            }}
+          >
+            Open chat
+          </Button>
+          <Button
+            variant="contained"
+            onClick={async () => {
+              if (!firstContact) return;
+              const peer = firstContact.peer;
+              if (peer.tls_fingerprint) {
+                await peerApi.pinPeer(peer.user_id, peer.tls_fingerprint);
+              }
+              const conv = await peerApi.openDm(peer.user_id);
+              setFirstContact(null);
+              selectConversation(conv);
+              setNav("chats");
+              setTab(1);
+              await refresh();
+            }}
+          >
+            Trust & open
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={!!pinOpen} onClose={() => setPinOpen(null)}>
         <DialogTitle>Trust this peer?</DialogTitle>
         <DialogContent>
@@ -3792,6 +4110,7 @@ function ChatScreen({
               const c = await peerApi.openDm(pinOpen.user_id);
               setPinOpen(null);
               selectConversation(c);
+              setNav("chats");
               setTab(1);
               await refresh();
             }}
@@ -3888,7 +4207,7 @@ function ChatScreen({
             minHeight: 240,
             display: "grid",
             placeItems: "center",
-            bgcolor: "#EEF2F0",
+            bgcolor: "action.hover",
             p: 2,
           }}
         >
@@ -3913,7 +4232,7 @@ function ChatScreen({
               component="iframe"
               src={filePreview.url}
               title={filePreview.name}
-              sx={{ width: "100%", height: "65vh", border: 0, bgcolor: "white" }}
+              sx={{ width: "100%", height: "65vh", border: 0, bgcolor: "background.paper" }}
             />
           ) : filePreview?.mime.startsWith("text/") ||
             filePreview?.mime === "application/json" ? (
@@ -3925,7 +4244,7 @@ function ChatScreen({
                 overflow: "auto",
                 m: 0,
                 p: 2,
-                bgcolor: "white",
+                bgcolor: "background.paper",
                 borderRadius: 1,
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-word",
@@ -3964,7 +4283,7 @@ function ChatScreen({
               <>
                 <Paper
                   variant="outlined"
-                  sx={{ p: 1.5, borderColor: "#D5E3DD", borderRadius: 2 }}
+                  sx={{ p: 1.5, borderColor: "divider", borderRadius: 2 }}
                 >
                   <Typography variant="overline" color="text.secondary" display="block" mb={1}>
                     Group name
@@ -3991,7 +4310,7 @@ function ChatScreen({
 
                 <Paper
                   variant="outlined"
-                  sx={{ px: 1.5, py: 0.75, borderColor: "#D5E3DD", borderRadius: 2 }}
+                  sx={{ px: 1.5, py: 0.75, borderColor: "divider", borderRadius: 2 }}
                 >
                   <FormControlLabel
                     sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
@@ -4019,7 +4338,7 @@ function ChatScreen({
               </>
             )}
 
-            <Paper variant="outlined" sx={{ borderColor: "#D5E3DD", borderRadius: 2, overflow: "hidden" }}>
+            <Paper variant="outlined" sx={{ borderColor: "divider", borderRadius: 2, overflow: "hidden" }}>
               <Typography variant="overline" color="text.secondary" sx={{ px: 1.5, pt: 1.25, display: "block" }}>
                 Members
               </Typography>
@@ -4068,7 +4387,7 @@ function ChatScreen({
             </Paper>
 
             {canAddMembers && (
-              <Paper variant="outlined" sx={{ borderColor: "#D5E3DD", borderRadius: 2, overflow: "hidden" }}>
+              <Paper variant="outlined" sx={{ borderColor: "divider", borderRadius: 2, overflow: "hidden" }}>
                 <Box
                   sx={{
                     px: 1.5,
@@ -4173,7 +4492,7 @@ function ChatScreen({
           const conv = convs.find((c) => c.id === conversationId);
           if (conv) {
             selectConversation(conv);
-            setNav(conv.kind === "group" ? "groups" : "chats");
+            setNav("chats");
             setTab(1);
           }
           setSearchOpen(false);
@@ -4280,7 +4599,7 @@ function SettingsScreen(props: {
   const [notifOn, setNotifOn] = useState(true);
   const [notifBusy, setNotifBusy] = useState(false);
   const [downloadDir, setDownloadDir] = useState("");
-  const [gamesEnabled, setGamesEnabled] = useState(true);
+  const [gamesEnabled, setGamesEnabled] = useState(false);
   const [shellExt, setShellExt] = useState(false);
   const [shellBusy, setShellBusy] = useState(false);
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
@@ -4289,7 +4608,7 @@ function SettingsScreen(props: {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
     peerApi.getNotificationsEnabled().then(setNotifOn).catch(() => setNotifOn(true));
     peerApi.getAppSetting("download_dir").then((v) => setDownloadDir(v || "")).catch(() => {});
-    peerApi.getAppSetting("games_enabled").then((v) => setGamesEnabled(v !== "0")).catch(() => setGamesEnabled(true));
+    peerApi.getAppSetting("games_enabled").then((v) => setGamesEnabled(v === "1")).catch(() => setGamesEnabled(false));
     peerApi.shellExtensionInstalled().then(setShellExt).catch(() => setShellExt(false));
   }, []);
 
@@ -4378,7 +4697,8 @@ function SettingsScreen(props: {
           />
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             Uses Windows toast notifications (not the browser prompt). Muted chats stay quiet.
-            Toasts appear when the chat is not open or PeerChat is in the background.
+            Closing the window keeps PeerChat in the system tray so messages can still arrive —
+            right-click the tray icon and choose Quit PeerChat to fully exit.
           </Typography>
         </Paper>
 

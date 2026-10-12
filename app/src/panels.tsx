@@ -458,9 +458,10 @@ export function SnakeGame() {
   const [best, setBest] = useState(() => Number(localStorage.getItem("peerchat.snake.best") || "0"));
   const [alive, setAlive] = useState(true);
   const [tick, setTick] = useState(0);
-  const size = 16;
+  const size = 18;
+  const cellPx = 28;
   const state = useMemo(() => {
-    const start = { x: 8, y: 8 };
+    const start = { x: 9, y: 9 };
     return { snake: [start], dir: { x: 1, y: 0 }, food: { x: 3, y: 3 } };
   }, []);
   const [, force] = useState(0);
@@ -519,7 +520,7 @@ export function SnakeGame() {
   }, [tick]);
 
   function restart() {
-    state.snake = [{ x: 8, y: 8 }];
+    state.snake = [{ x: 9, y: 9 }];
     state.dir = { x: 1, y: 0 };
     state.food = { x: 3, y: 3 };
     setScore(0);
@@ -537,8 +538,9 @@ export function SnakeGame() {
         <Box
           key={`${x}-${y}`}
           sx={{
-            width: 16,
-            height: 16,
+            width: cellPx,
+            height: cellPx,
+            borderRadius: 0.5,
             bgcolor: on ? "primary.main" : food ? "secondary.main" : "action.hover",
           }}
         />
@@ -552,7 +554,19 @@ export function SnakeGame() {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
         Offline. Arrow keys. Score {score} · Best {best}
       </Typography>
-      <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${size}, 16px)`, gap: "1px", width: "fit-content" }}>
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${size}, ${cellPx}px)`,
+          gap: "2px",
+          width: "fit-content",
+          p: 1,
+          borderRadius: 2,
+          bgcolor: "background.paper",
+          border: "1px solid",
+          borderColor: "divider",
+        }}
+      >
         {cells}
       </Box>
       {!alive && (

@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 
@@ -112,12 +113,73 @@ pub fn spawn_listener(
                 let _ = tls.write_all(resp.as_bytes()).await;
                 let _ = tls.shutdown().await;
                 if let Some(info) = notify {
+                    desktop_notify_if_needed(&app, &db, &info);
                     let _ = app.emit("inbox-updated", info);
                 }
             });
         }
     });
     Ok(())
+}
+
+/// OS toast from Rust so notifications still fire when the window is hidden in the tray
+/// (WebView2 may suspend JS listeners while not visible).
+fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
+    let kind = info.get("kind").and_then(|v| v.as_str()).unwrap_or("text");
+    if matches!(
+        kind,
+        "reaction" | "pin" | "unpin" | "deleted" | "game_move"
+    ) {
+        return;
+    }
+    let enabled = {
+        let conn = db.lock();
+        db::get_setting(&conn, "notifications_enabled")
+            .ok()
+            .flatten()
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    };
+    if !enabled {
+        return;
+    }
+    let cid = info
+        .get("conversation_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !cid.is_empty() {
+        let muted = {
+            let conn = db.lock();
+            db::conversation_muted(&conn, cid).unwrap_or(false)
+        };
+        if muted {
+            return;
+        }
+    }
+    let win = app.get_webview_window("main");
+    let visible = win
+        .as_ref()
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    let focused = win
+        .as_ref()
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false);
+    // User is actively looking at the app — frontend can toast for other chats if needed.
+    if visible && focused {
+        return;
+    }
+    let title = info
+        .get("from_name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("PeerChat");
+    let body = match kind {
+        "file_notice" => "Sent a file",
+        "system" | "group_event" => "Group update",
+        _ => "New message",
+    };
+    let _ = app.notification().builder().title(title).body(body).show();
 }
 
 /// Returns `(http_response, Some(notify_payload))` when the UI should refresh.
