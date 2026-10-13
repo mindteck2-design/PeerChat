@@ -22,9 +22,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, EnumWindows, FindWindowW, GetWindowTextW, GetWindowThreadProcessId,
 };
 
-const MUTEX_NAME: &str = "com.lanmsg.app-sim";
-const CLASS_NAME: &str = "com.lanmsg.app-sic";
-const WINDOW_NAME: &str = "com.lanmsg.app-siw";
+const MUTEX_NAME: &str = "com.peerchat.app-sim";
+const CLASS_NAME: &str = "com.peerchat.app-sic";
+const WINDOW_NAME: &str = "com.peerchat.app-siw";
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -32,7 +32,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 fn app_data_dir() -> Option<std::path::PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")?;
-    let dir = std::path::PathBuf::from(local).join("com.lanmsg.app");
+    let dir = std::path::PathBuf::from(local).join("com.peerchat.app");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
 }

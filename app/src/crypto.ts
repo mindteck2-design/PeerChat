@@ -77,6 +77,7 @@ function wrapKey(contentKey: Uint8Array, recipientX25519PubB64: string, senderX2
   const ephPriv = randomBytes(32);
   const ephPub = x25519.getPublicKey(ephPriv);
   const shared = x25519.getSharedSecret(ephPriv, fromB64(recipientX25519PubB64));
+  // Stable KDF label — do not rename or existing wrapped keys will not unwrap.
   const kek = hkdf(sha256, shared, undefined, new TextEncoder().encode("lanmsg-wrap-v1"), 32);
   const nonce = randomBytes(12);
   const cipher = gcm(kek, nonce);
@@ -92,6 +93,7 @@ function wrapKey(contentKey: Uint8Array, recipientX25519PubB64: string, senderX2
 
 function unwrapKey(bundle: { eph_pub: string; nonce: string; wrapped: string }, priv: Uint8Array) {
   const shared = x25519.getSharedSecret(priv, fromB64(bundle.eph_pub));
+  // Stable KDF label — do not rename or existing wrapped keys will not unwrap.
   const kek = hkdf(sha256, shared, undefined, new TextEncoder().encode("lanmsg-wrap-v1"), 32);
   const cipher = gcm(kek, fromB64(bundle.nonce));
   return cipher.decrypt(fromB64(bundle.wrapped));

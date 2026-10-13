@@ -125,12 +125,37 @@ pub fn spawn_listener(
 /// OS toast from Rust so notifications still fire when the window is hidden in the tray
 /// (WebView2 may suspend JS listeners while not visible).
 fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
+    // Skip redelivered / already-known messages (duplicate OS toasts).
+    if info.get("fresh").and_then(|v| v.as_bool()) == Some(false) {
+        return;
+    }
     let kind = info.get("kind").and_then(|v| v.as_str()).unwrap_or("text");
     if matches!(
         kind,
         "reaction" | "pin" | "unpin" | "deleted" | "game_move"
     ) {
         return;
+    }
+    let from_id = info.get("from_id").and_then(|v| v.as_str()).unwrap_or("");
+    let my_id = {
+        let conn = db.lock();
+        db::get_profile(&conn)
+            .ok()
+            .flatten()
+            .and_then(|p| p.get("id")?.as_str().map(|s| s.to_string()))
+            .unwrap_or_default()
+    };
+    if !from_id.is_empty() && !my_id.is_empty() && from_id == my_id {
+        return;
+    }
+    if !from_id.is_empty() {
+        let blocked = {
+            let conn = db.lock();
+            db::peer_blocked(&conn, from_id).unwrap_or(false)
+        };
+        if blocked {
+            return;
+        }
     }
     let enabled = {
         let conn = db.lock();
@@ -165,7 +190,7 @@ fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
         .as_ref()
         .and_then(|w| w.is_focused().ok())
         .unwrap_or(false);
-    // User is actively looking at the app — frontend can toast for other chats if needed.
+    // App is open and focused — no OS toasts (any conversation).
     if visible && focused {
         return;
     }
@@ -239,6 +264,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
             let has_inbox = payload.get("message").is_some()
                 || payload.get("file").is_some()
                 || payload.get("group_event").is_some();
+            let mut fresh_message = false;
             let conn = db.lock();
             if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
                 return (http_json(500, json!({"error":"db busy"})), None);
@@ -251,6 +277,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                 let sender_id = msg.get("sender_id").and_then(|v| v.as_str()).unwrap_or("");
                 let is_group = payload.get("wrapped_group_key").is_some()
                     || payload.get("group_event").is_some()
+                    || msg_conv.starts_with("group:")
                     || conn
                         .query_row(
                             "SELECT kind FROM conversations WHERE id=?1",
@@ -262,6 +289,14 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                         .flatten()
                         .as_deref()
                         == Some("group");
+                // Local block: drop DM traffic from blocked peers (ack OK so they stop retrying).
+                if !is_group
+                    && !sender_id.is_empty()
+                    && db::peer_blocked(&conn, sender_id).unwrap_or(false)
+                {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return (http_json(200, json!({"ok": true, "blocked": true})), None);
+                }
                 if !is_group && !msg_conv.is_empty() && !sender_id.is_empty() {
                     if let Err(e) =
                         db::reconcile_dm_on_deliver(&conn, &my_id, sender_id, msg_conv)
@@ -274,7 +309,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                 let mut inbound = msg.clone();
                 inbound["sort_at"] = json!(chrono::Utc::now().to_rfc3339());
                 let is_edit = payload.get("edit").and_then(|v| v.as_bool()).unwrap_or(false);
-                let insert_result = if payload
+                let insert_result: Result<bool, String> = if payload
                     .get("delete_for_everyone")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
@@ -285,7 +320,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                         let _ = db::tombstone_message(&conn, mid);
                         r
                     } else {
-                        Ok(())
+                        Ok(false)
                     }
                 } else if inbound.get("kind").and_then(|v| v.as_str()) == Some("deleted") {
                     if let Some(mid) = inbound.get("id").and_then(|v| v.as_str()) {
@@ -293,7 +328,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                         let _ = db::tombstone_message(&conn, mid);
                         r
                     } else {
-                        Ok(())
+                        Ok(false)
                     }
                 } else if is_edit {
                     if inbound
@@ -304,16 +339,46 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                     {
                         inbound["edited_at"] = json!(chrono::Utc::now().to_rfc3339());
                     }
-                    db::apply_message_edit(&conn, &inbound)
+                    db::apply_message_edit(&conn, &inbound).map(|_| false)
                 } else {
                     db::insert_message(&conn, &inbound)
                 };
-                if let Err(e) = insert_result {
-                    let _ = conn.execute_batch("ROLLBACK");
-                    return (http_json(500, json!({"error": e})), None);
+                match insert_result {
+                    Ok(is_new) => fresh_message = is_new,
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return (http_json(500, json!({"error": e})), None);
+                    }
                 }
             }
             if let Some(file) = payload.get("file") {
+                let file_cid = file
+                    .get("conversation_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let uploader = file
+                    .get("uploader_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let file_is_group = file_cid.starts_with("group:")
+                    || conn
+                        .query_row(
+                            "SELECT kind FROM conversations WHERE id=?1",
+                            rusqlite::params![file_cid],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .optional()
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        == Some("group");
+                if !file_is_group
+                    && !uploader.is_empty()
+                    && db::peer_blocked(&conn, uploader).unwrap_or(false)
+                {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return (http_json(200, json!({"ok": true, "blocked": true})), None);
+                }
                 let _ = db::insert_file(&conn, file);
                 // Ensure downloader is a member so later chunk auth succeeds on the uploader.
                 if let (Some(cid), Some(uid)) = (
@@ -336,43 +401,30 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
             }
             if let Some(peer) = payload.get("from_peer") {
                 let uid = peer["user_id"].as_str().unwrap_or("").to_string();
-                let mut dn = peer["display_name"]
+                let dn = peer["display_name"]
                     .as_str()
                     .unwrap_or("peer")
                     .to_string();
-                let mut x = peer["x25519_public"].as_str().unwrap_or("").to_string();
-                let mut e = peer["ed25519_public"].as_str().unwrap_or("").to_string();
-                let mut fp = peer
+                let x = peer["x25519_public"].as_str().unwrap_or("").to_string();
+                let e = peer["ed25519_public"].as_str().unwrap_or("").to_string();
+                let fp = peer
                     .get("tls_fingerprint")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                // Archive previous keys before overwriting, then refresh reachability.
                 if let Ok(Some(existing)) = db::get_peer(&conn, &uid) {
-                    if existing["pinned"].as_bool().unwrap_or(false) {
-                        let same_fp = existing["tls_fingerprint"].as_str() == fp.as_deref()
-                            || fp.as_ref().map(|s| s.is_empty()).unwrap_or(true);
-                        let same_x = existing["x25519_public"].as_str() == Some(x.as_str());
-                        let same_e = existing["ed25519_public"].as_str() == Some(e.as_str());
-                        if !(same_fp && same_x && same_e) {
-                            let _ = db::set_peer_pending_identity(
-                                &conn,
-                                &uid,
-                                peer.get("tls_fingerprint").and_then(|v| v.as_str()).unwrap_or(""),
-                                peer["x25519_public"].as_str().unwrap_or(""),
-                                peer["ed25519_public"].as_str().unwrap_or(""),
-                            );
-                            if let Some(s) = existing["display_name"].as_str() {
-                                dn = s.to_string();
-                            }
-                            if let Some(s) = existing["x25519_public"].as_str() {
-                                x = s.to_string();
-                            }
-                            if let Some(s) = existing["ed25519_public"].as_str() {
-                                e = s.to_string();
-                            }
-                            fp = existing["tls_fingerprint"]
-                                .as_str()
-                                .map(|s| s.to_string());
-                        }
+                    let same_fp = existing["tls_fingerprint"].as_str() == fp.as_deref()
+                        || fp.as_ref().map(|s| s.is_empty()).unwrap_or(true);
+                    let same_x = existing["x25519_public"].as_str() == Some(x.as_str());
+                    let same_e = existing["ed25519_public"].as_str() == Some(e.as_str());
+                    if !(same_fp && same_x && same_e) {
+                        let _ = db::adopt_peer_identity(
+                            &conn,
+                            &uid,
+                            fp.as_deref().unwrap_or(""),
+                            &x,
+                            &e,
+                        );
                     }
                 }
                 let _ = db::upsert_peer(
@@ -500,6 +552,8 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                 let _ = conn.execute_batch("ROLLBACK");
                 return (http_json(500, json!({"error":"commit failed"})), None);
             }
+            // Toast only for newly inserted messages (redelivery must not double-notify).
+            // Still emit inbox-updated for UI refresh whenever anything arrived.
             let notify = if has_inbox {
                 let from = payload.get("from_peer");
                 let msg = payload.get("message");
@@ -523,6 +577,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                     "from_name": from.and_then(|p| p.get("display_name")).and_then(|v| v.as_str()).unwrap_or("Peer"),
                     "from_id": from.and_then(|p| p.get("user_id")).and_then(|v| v.as_str()).unwrap_or(""),
                     "kind": kind,
+                    "fresh": fresh_message || (payload.get("message").is_none() && has_inbox),
                 }))
             } else {
                 None
@@ -533,7 +588,35 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
             let Ok(payload) = serde_json::from_str::<Value>(body) else {
                 return (http_json(400, json!({"error":"bad json"})), None);
             };
-            let _ = app.emit("peer-typing", payload);
+            let from = payload
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let cid = payload
+                .get("conversation_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let blocked = {
+                let conn = db.lock();
+                let is_dm = cid.starts_with("dm:")
+                    || conn
+                        .query_row(
+                            "SELECT kind FROM conversations WHERE id=?1",
+                            rusqlite::params![cid],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .optional()
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        == Some("dm");
+                is_dm
+                    && !from.is_empty()
+                    && db::peer_blocked(&conn, from).unwrap_or(false)
+            };
+            if !blocked {
+                let _ = app.emit("peer-typing", payload);
+            }
             (http_json(200, json!({"ok": true})), None)
         }
         ("POST", "/v1/file/chunk") => {

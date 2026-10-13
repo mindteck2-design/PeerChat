@@ -7,6 +7,8 @@ export type Profile = {
   ed25519_public: string;
   listen_port: number;
   created_at?: string;
+  /** Team / project label, e.g. HMIS, Shakti */
+  team?: string;
 };
 
 export type Peer = {
@@ -18,10 +20,14 @@ export type Peer = {
   last_port?: number | null;
   tls_fingerprint?: string | null;
   pinned?: boolean;
+  /** Local-only: drop inbound DMs and refuse outbound DMs. */
+  blocked?: boolean;
   online?: boolean;
   last_seen_at?: string | null;
   identity_changed?: boolean;
   pending_tls_fingerprint?: string | null;
+  /** Project / team label from discovery beacon */
+  team?: string | null;
 };
 
 export type Conversation = {
@@ -99,6 +105,7 @@ export const peerApi = {
     x25519Public: string;
     ed25519Public: string;
     listenPort?: number;
+    team?: string;
   }) =>
     inv<Profile>("setup_profile", {
       displayName: body.displayName,
@@ -106,18 +113,26 @@ export const peerApi = {
       x25519Public: body.x25519Public,
       ed25519Public: body.ed25519Public,
       listenPort: body.listenPort ?? null,
+      team: body.team ?? null,
     }),
-  updateDisplayName: (displayName: string) =>
-    inv<Profile>("update_display_name", { displayName }),
+  updateDisplayName: (displayName: string, team?: string) =>
+    inv<Profile>("update_display_name", {
+      displayName,
+      team: team ?? null,
+    }),
   myFingerprint: () => inv<string>("my_fingerprint"),
   discoverPeers: () => inv<Peer[]>("discover_peers"),
   listLanHosts: () => inv<LanHost[]>("list_lan_hosts"),
   listPeers: () => inv<Peer[]>("list_peers"),
   pinPeer: (userId: string, fingerprint: string) =>
     inv<void>("pin_peer", { userId, fingerprint }),
+  setPeerBlocked: (userId: string, blocked: boolean) =>
+    inv<void>("set_peer_blocked", { userId, blocked }),
   listConversations: () => inv<Conversation[]>("list_conversations"),
   setConversationPinned: (conversationId: string, pinned: boolean) =>
     inv<void>("set_conversation_pinned", { conversationId, pinned }),
+  clearConversationMessages: (conversationId: string, includeFiles: boolean) =>
+    inv<void>("clear_conversation_messages", { conversationId, includeFiles }),
   setConversationMuted: (conversationId: string, muted: boolean) =>
     inv<void>("set_conversation_muted", { conversationId, muted }),
   listPinnedMessages: (conversationId: string) =>
@@ -159,6 +174,8 @@ export const peerApi = {
     inv<void>("send_typing", { conversationId, recipientIds }),
   getGroupKey: (conversationId: string) =>
     inv<string | null>("get_group_key", { conversationId }),
+  setMyGroupKey: (conversationId: string, wrappedGroupKey: string) =>
+    inv<void>("set_my_group_key", { conversationId, wrappedGroupKey }),
   memberIds: (conversationId: string) => inv<string[]>("member_ids", { conversationId }),
   listMembers: (conversationId: string) =>
     inv<Member[]>("list_group_members", { conversationId }),
@@ -183,6 +200,16 @@ export const peerApi = {
     inv<void>("rename_group", { conversationId, title }),
   deleteGroup: (conversationId: string) =>
     inv<void>("delete_group", { conversationId }),
+  deleteConversationLocal: (conversationId: string) =>
+    inv<void>("delete_conversation_local", { conversationId }),
+  openExternalUrl: (url: string) => inv<void>("open_external_url", { url }),
+  ensureAnnouncementBoards: () =>
+    inv<Conversation[]>("ensure_announcement_boards"),
+  syncTeamAnnouncementMembers: (peerIds: string[], wrappedGroupKeys: Record<string, string>) =>
+    inv<void>("sync_team_announcement_members", {
+      peerIds,
+      wrappedGroupKeys,
+    }),
   setGroupMembersCanAdd: (conversationId: string, allowed: boolean) =>
     inv<void>("set_group_members_can_add", { conversationId, allowed }),
   setGroupMemberRole: (conversationId: string, userId: string, role: string) =>
@@ -245,6 +272,8 @@ export const peerApi = {
   acceptPendingIdentity: (userId: string) => inv<void>("accept_pending_identity", { userId }),
   upsertTransfer: (row: Record<string, unknown>) => inv<void>("upsert_transfer", { row }),
   listTransfers: () => inv<TransferLog[]>("list_transfers"),
+  deleteTransfer: (id: string) => inv<void>("delete_transfer", { id }),
+  clearTransferHistory: () => inv<number>("clear_transfer_history"),
   saveItem: (row: Record<string, unknown>) => inv<void>("save_item", { row }),
   deleteSavedItem: (id: string) => inv<void>("delete_saved_item", { id }),
   listSavedItems: () => inv<SavedItem[]>("list_saved_items"),
@@ -262,6 +291,9 @@ export const peerApi = {
     inv<{ path: string; size: number; count: number; name: string }>("pack_bundle", { entries }),
   readBundleChunk: (path: string, offset: number, len: number) =>
     inv<string>("read_bundle_chunk", { path, offset, len }),
+  /** Read any regular disk file (drag-drop / Share); not limited to bundles/. */
+  readFileChunk: (path: string, offset: number, len: number) =>
+    inv<string>("read_file_chunk", { path, offset, len }),
   deleteBundleFile: (path: string) => inv<void>("delete_bundle_file", { path }),
   scanFile: (path: string) => inv<ScanResult>("scan_file", { path }),
   localPathMeta: (path: string) =>

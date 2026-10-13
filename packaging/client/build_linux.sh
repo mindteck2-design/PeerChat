@@ -9,4 +9,4 @@ npm run tauri:build
 mkdir -p "$ROOT/dist/linux"
 cp -f src-tauri/target/release/bundle/deb/*.deb "$ROOT/dist/linux/" 2>/dev/null || true
 ls -la "$ROOT/dist/linux/" || ls -la src-tauri/target/release/bundle/deb/
-echo "Install with: sudo apt install ./dist/linux/lanmsg_*.deb"
+echo "Install with: sudo apt install ./dist/linux/peerchat_*.deb"

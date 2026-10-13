@@ -10,7 +10,7 @@ use base64::Engine;
 use discovery::{DiscoveryHub, PeerBeacon};
 use parking_lot::Mutex;
 use peer_http::SharedDb;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -34,39 +34,82 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+const APP_ID: &str = "com.peerchat.app";
+const LEGACY_APP_ID: &str = "com.lanmsg.app";
+
 fn drain_pending_show(app: &AppHandle) {
     let Ok(local) = std::env::var("LOCALAPPDATA") else {
         return;
     };
-    let path = std::path::PathBuf::from(local)
-        .join("com.lanmsg.app")
-        .join("pending-show");
-    if !path.exists() {
-        return;
+    for id in [APP_ID, LEGACY_APP_ID] {
+        let path = PathBuf::from(&local).join(id).join("pending-show");
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            show_main_window(app);
+            return;
+        }
     }
-    let _ = std::fs::remove_file(&path);
-    show_main_window(app);
 }
 
 fn drain_pending_share(app: &AppHandle) {
     let Ok(local) = std::env::var("LOCALAPPDATA") else {
         return;
     };
-    let path = std::path::PathBuf::from(local)
-        .join("com.lanmsg.app")
-        .join("pending-share.json");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let _ = std::fs::remove_file(&path);
-    let Ok(files) = serde_json::from_str::<Vec<String>>(&raw) else {
-        return;
-    };
-    if files.is_empty() {
+    for id in [APP_ID, LEGACY_APP_ID] {
+        let path = PathBuf::from(&local).join(id).join("pending-share.json");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let _ = std::fs::remove_file(&path);
+        let Ok(files) = serde_json::from_str::<Vec<String>>(&raw) else {
+            continue;
+        };
+        if files.is_empty() {
+            continue;
+        }
+        show_main_window(app);
+        let _ = app.emit("share-files", files);
         return;
     }
-    show_main_window(app);
-    let _ = app.emit("share-files", files);
+}
+
+fn wipe_dir_contents(dir: &PathBuf) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// One-time clean break: PeerChat must not inherit LanMsg chats/keys/certs.
+/// Migrating old data left mismatched identities → "[unable to decrypt]" and
+/// false "certificate changed" reviews. After this wipe, setup runs as a new app.
+fn ensure_clean_break(data: &PathBuf) {
+    let marker = data.join(".clean_break_v1");
+    if marker.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(data);
+    wipe_dir_contents(data);
+
+    // Remove leftover LanMsg app data so it cannot be re-imported.
+    for env_key in ["APPDATA", "LOCALAPPDATA"] {
+        let Ok(base) = std::env::var(env_key) else {
+            continue;
+        };
+        let legacy = PathBuf::from(&base).join(LEGACY_APP_ID);
+        if legacy.exists() && legacy != *data {
+            let _ = std::fs::remove_dir_all(&legacy);
+        }
+    }
+
+    let _ = std::fs::write(&marker, b"1");
 }
 
 /// Poll flags left by a second Start Menu / Apps launch (or --share).
@@ -84,13 +127,25 @@ struct AppState {
     started: Mutex<bool>,
     /// Live discovery beacon display name (updated on rename).
     live_display_name: Arc<Mutex<String>>,
+    /// Live discovery beacon team label.
+    live_team: Arc<Mutex<String>>,
 }
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-const MAX_FILE_BYTES: i64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+fn same_local_calendar_day(created_at: &str) -> bool {
+    use chrono::{Datelike, Local};
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+        return false;
+    };
+    let local = dt.with_timezone(&Local);
+    let today = Local::now();
+    local.year() == today.year() && local.month() == today.month() && local.day() == today.day()
+}
+
+const MAX_FILE_BYTES: i64 = 5 * 1024 * 1024 * 1024; // 5 GiB
 const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHUNKS: i64 = 65_536;
 
@@ -285,9 +340,11 @@ fn setup_profile(
     x25519_public: String,
     ed25519_public: String,
     listen_port: Option<i64>,
+    team: Option<String>,
 ) -> Result<Value, String> {
     let preferred = listen_port.unwrap_or(9876) as u16;
     let port = peer_http::allocate_listen_port(preferred)?;
+    let team_name = team.unwrap_or_default().trim().to_string();
     {
         let conn = state.db.lock();
         db::upsert_profile(
@@ -297,6 +354,7 @@ fn setup_profile(
             &x25519_public,
             &ed25519_public,
             port as i64,
+            &team_name,
         )?;
     }
     start_runtime_inner(
@@ -313,7 +371,11 @@ fn setup_profile(
 }
 
 #[tauri::command]
-fn update_display_name(state: State<AppState>, display_name: String) -> Result<Value, String> {
+fn update_display_name(
+    state: State<AppState>,
+    display_name: String,
+    team: Option<String>,
+) -> Result<Value, String> {
     let name = display_name.trim();
     if name.is_empty() {
         return Err("display name required".into());
@@ -322,6 +384,15 @@ fn update_display_name(state: State<AppState>, display_name: String) -> Result<V
         let conn = state.db.lock();
         let profile = db::get_profile(&conn)?.ok_or("no profile")?;
         let id = profile["id"].as_str().unwrap_or("");
+        let team_name = team
+            .as_deref()
+            .map(|t| t.trim().to_string())
+            .unwrap_or_else(|| {
+                profile["team"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            });
         db::upsert_profile(
             &conn,
             id,
@@ -329,6 +400,7 @@ fn update_display_name(state: State<AppState>, display_name: String) -> Result<V
             profile["x25519_public"].as_str().unwrap_or(""),
             profile["ed25519_public"].as_str().unwrap_or(""),
             profile["listen_port"].as_i64().unwrap_or(9876),
+            &team_name,
         )?;
         let updated = db::get_profile(&conn)?.ok_or_else(|| "profile missing".to_string())?;
         let fp = state.fingerprint.lock().clone();
@@ -352,6 +424,7 @@ fn update_display_name(state: State<AppState>, display_name: String) -> Result<V
     };
     let _ = fingerprint;
     *state.live_display_name.lock() = name.to_string();
+    *state.live_team.lock() = profile["team"].as_str().unwrap_or("").to_string();
     kick_flush(&state);
     Ok(profile)
 }
@@ -431,6 +504,15 @@ fn start_runtime_inner(
     let cert = tls_cert::ensure(&state.data_dir)?;
     *state.fingerprint.lock() = cert.fingerprint.clone();
     *state.live_display_name.lock() = display_name.to_string();
+    let team_label = {
+        let conn = state.db.lock();
+        db::get_profile(&conn)
+            .ok()
+            .flatten()
+            .and_then(|p| p["team"].as_str().map(|s| s.to_string()))
+            .unwrap_or_default()
+    };
+    *state.live_team.lock() = team_label.clone();
     peer_http::spawn_listener(
         cert.clone(),
         port,
@@ -439,12 +521,18 @@ fn start_runtime_inner(
         app.clone(),
     )?;
 
+    // Best-effort firewall allow for LAN discovery (UDP 41234) + peer TLS (TCP listen).
+    // Silent no-op if netsh needs elevation or is blocked by policy.
+    #[cfg(windows)]
+    ensure_windows_firewall_rules();
+
     let (tx, rx) = tokio::sync::watch::channel(false);
     *state.stop_tx.lock() = Some(tx);
     let hub = state.discovery.clone();
     let live_name = state.live_display_name.clone();
+    let live_team = state.live_team.clone();
     let beacon = PeerBeacon {
-        magic: "LANMSG".into(),
+        magic: "PEERCHAT".into(),
         v: "4".into(),
         kind: "peer".into(),
         ip: discovery::lan_ip(),
@@ -454,10 +542,11 @@ fn start_runtime_inner(
         fingerprint: cert.fingerprint.clone(),
         x25519_public: x25519_public.into(),
         ed25519_public: ed25519_public.into(),
+        team: team_label,
         ts: 0.0,
     };
     tauri::async_runtime::spawn(async move {
-        discovery::run_beacon(hub, port, 41234, rx, beacon, live_name).await;
+        discovery::run_beacon(hub, port, 41234, rx, beacon, live_name, live_team).await;
     });
 
     // outbox flusher
@@ -528,7 +617,7 @@ async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            peer_http::peer_request(&ip, port as u16, "/v1/deliver", Some(payload), fp),
+            peer_http::peer_request(&ip, port as u16, "/v1/deliver", Some(payload.clone()), fp),
         )
         .await;
 
@@ -537,8 +626,20 @@ async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
                 let conn = db.lock();
                 let _ = db::bump_outbox_error(&conn, &id, "request timed out after 10 s");
             }
-            Ok(Ok((resp, _))) if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
+            Ok(Ok((resp, observed_fp))) if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
                 let conn = db.lock();
+                if pinned && !observed_fp.is_empty() {
+                    let cur = peer["tls_fingerprint"].as_str().unwrap_or("");
+                    if cur != observed_fp {
+                        let _ = db::adopt_peer_identity(
+                            &conn,
+                            &recipient,
+                            &observed_fp,
+                            peer["x25519_public"].as_str().unwrap_or(""),
+                            peer["ed25519_public"].as_str().unwrap_or(""),
+                        );
+                    }
+                }
                 let _ = db::mark_outbox_delivered(&conn, &id);
             }
             Ok(Ok((resp, _))) => {
@@ -550,17 +651,51 @@ async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
                 let conn = db.lock();
                 let _ = db::bump_outbox_error(&conn, &id, &err);
             }
+            Ok(Err(e)) if e.contains("tls fingerprint mismatch") => {
+                // Peer reinstalled / cert rotated — reconnect once without a pin, adopt new cert.
+                let retry = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    peer_http::peer_request(&ip, port as u16, "/v1/deliver", Some(payload), None),
+                )
+                .await;
+                match retry {
+                    Ok(Ok((resp, observed_fp)))
+                        if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) =>
+                    {
+                        let conn = db.lock();
+                        if !observed_fp.is_empty() {
+                            let _ = db::adopt_peer_identity(
+                                &conn,
+                                &recipient,
+                                &observed_fp,
+                                peer["x25519_public"].as_str().unwrap_or(""),
+                                peer["ed25519_public"].as_str().unwrap_or(""),
+                            );
+                        }
+                        let _ = db::mark_outbox_delivered(&conn, &id);
+                    }
+                    Ok(Ok((resp, _))) => {
+                        let err = resp
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("deliver rejected")
+                            .to_string();
+                        let conn = db.lock();
+                        let _ = db::bump_outbox_error(&conn, &id, &err);
+                    }
+                    Ok(Err(e2)) => {
+                        let conn = db.lock();
+                        let _ = db::bump_outbox_error(&conn, &id, &e2);
+                    }
+                    Err(_) => {
+                        let conn = db.lock();
+                        let _ = db::bump_outbox_error(&conn, &id, "request timed out after 10 s");
+                    }
+                }
+            }
             Ok(Err(e)) => {
-                // Classify TLS fingerprint mismatch as a security failure so the UI can
-                // surface it distinctly from ordinary network errors.
-                let msg = if e.contains("tls fingerprint mismatch") {
-                    "[SECURITY] TLS fingerprint mismatch — peer identity may have changed. \
-                     Go to People and accept or reject the new identity.".to_string()
-                } else {
-                    e
-                };
                 let conn = db.lock();
-                let _ = db::bump_outbox_error(&conn, &id, &msg);
+                let _ = db::bump_outbox_error(&conn, &id, &e);
             }
         }
     }
@@ -658,52 +793,22 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
             let ip_changed = old_ip.as_deref() != Some(p.ip.as_str())
                 && discovery::is_usable_lan_ip(&p.ip);
 
-            // Pinned peers: freeze identity keys / TLS fingerprint on change.
+            // Auto-adopt new TLS / crypto keys; archive previous keys for history.
             if let Some(ref ex) = existing {
-                let pinned = ex["pinned"].as_bool().unwrap_or(false);
-                if pinned {
-                    let same_fp = ex["tls_fingerprint"].as_str() == Some(p.fingerprint.as_str());
-                    let same_x = ex["x25519_public"].as_str() == Some(p.x25519_public.as_str());
-                    let same_e = ex["ed25519_public"].as_str() == Some(p.ed25519_public.as_str());
-                    if !(same_fp && same_x && same_e) {
-                        // Keep old keys; still refresh IP/online for delivery.
-                        db::upsert_peer(
-                            &conn,
-                            &p.user_id,
-                            ex["display_name"].as_str().unwrap_or(&p.display_name),
-                            ex["x25519_public"].as_str().unwrap_or(&p.x25519_public),
-                            ex["ed25519_public"].as_str().unwrap_or(&p.ed25519_public),
-                            Some(&p.ip),
-                            Some(p.port as i64),
-                            ex["tls_fingerprint"].as_str(),
-                            true,
-                        )?;
-                        let _ = db::set_peer_pending_identity(
-                            &conn,
-                            &p.user_id,
-                            &p.fingerprint,
-                            &p.x25519_public,
-                            &p.ed25519_public,
-                        );
-                        if ip_changed {
-                            peers_to_kick.push(p.user_id.clone());
-                        }
-                        out.push(json!({
-                            "user_id": p.user_id,
-                            "display_name": ex["display_name"],
-                            "x25519_public": ex["x25519_public"],
-                            "ed25519_public": ex["ed25519_public"],
-                            "last_ip": p.ip,
-                            "last_port": p.port,
-                            "tls_fingerprint": p.fingerprint,
-                            "online": true,
-                            "identity_changed": true,
-                        }));
-                        continue;
-                    }
+                let same_fp = ex["tls_fingerprint"].as_str() == Some(p.fingerprint.as_str());
+                let same_x = ex["x25519_public"].as_str() == Some(p.x25519_public.as_str());
+                let same_e = ex["ed25519_public"].as_str() == Some(p.ed25519_public.as_str());
+                if !(same_fp && same_x && same_e) {
+                    let _ = db::adopt_peer_identity(
+                        &conn,
+                        &p.user_id,
+                        &p.fingerprint,
+                        &p.x25519_public,
+                        &p.ed25519_public,
+                    );
                 }
             }
-            db::upsert_peer(
+            db::upsert_peer_with_team(
                 &conn,
                 &p.user_id,
                 &p.display_name,
@@ -713,6 +818,7 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
                 Some(p.port as i64),
                 Some(&p.fingerprint),
                 true,
+                Some(p.team.as_str()),
             )?;
             if ip_changed {
                 peers_to_kick.push(p.user_id.clone());
@@ -727,8 +833,10 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
                 "tls_fingerprint": p.fingerprint,
                 "online": true,
                 "identity_changed": false,
+                "team": p.team,
             }));
         }
+        let _ = db::auto_accept_all_pending_identities(&conn);
         let _ = db::mark_peers_offline_except(&conn, &online_ids);
         let _ = db::mark_stale_peers_offline(&conn, 45);
     }
@@ -775,6 +883,16 @@ fn list_peers(state: State<AppState>) -> Result<Vec<Value>, String> {
 fn pin_peer(state: State<AppState>, user_id: String, fingerprint: String) -> Result<(), String> {
     let conn = state.db.lock();
     db::pin_peer(&conn, &user_id, &fingerprint)
+}
+
+#[tauri::command]
+fn set_peer_blocked(
+    state: State<AppState>,
+    user_id: String,
+    blocked: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::set_peer_blocked(&conn, &user_id, blocked)
 }
 
 #[tauri::command]
@@ -900,6 +1018,9 @@ fn delete_message_for_everyone(
         .as_str()
         .unwrap_or("")
         .to_string();
+    if !same_local_calendar_day(&created_at) {
+        return Err("Cannot delete this message".into());
+    }
     db::cancel_outbox_for_message(&conn, &message_id)?;
     db::tombstone_message(&conn, &message_id)?;
     let tombstone = json!({
@@ -1015,15 +1136,44 @@ fn send_message(
     let fingerprint = state.fingerprint.lock().clone();
     let profile = {
         let conn = state.db.lock();
+        // Refuse outbound DMs to a blocked peer.
+        {
+            let kind: Option<String> = conn
+                .query_row(
+                    "SELECT kind FROM conversations WHERE id=?1",
+                    rusqlite::params![conversation_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let is_dm = kind.as_deref() == Some("dm") || conversation_id.starts_with("dm:");
+            if is_dm {
+                for rid in &recipient_ids {
+                    if db::peer_blocked(&conn, rid).unwrap_or(false) {
+                        return Err("This person is blocked. Unblock them to send messages.".into());
+                    }
+                }
+            }
+        }
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| e.to_string())?;
         let result = (|| -> Result<Value, String> {
+            let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+            let me = profile["id"].as_str().unwrap_or("");
             if is_edit {
+                let mid = msg["id"].as_str().unwrap_or("");
+                let existing = db::get_message(&conn, mid)?.ok_or("message missing")?;
+                if existing["sender_id"].as_str() != Some(me) {
+                    return Err("Only the sender can edit".into());
+                }
+                let created = existing["created_at"].as_str().unwrap_or("");
+                if !same_local_calendar_day(created) {
+                    return Err("Cannot edit this message".into());
+                }
                 db::apply_message_edit(&conn, &msg)?;
             } else {
                 db::insert_message(&conn, &msg)?;
             }
-            let profile = db::get_profile(&conn)?.ok_or("no profile")?;
             let from_peer = json!({
                 "user_id": profile["id"],
                 "display_name": profile["display_name"],
@@ -1033,7 +1183,6 @@ fn send_message(
                 "tls_fingerprint": fingerprint,
                 "last_ip": discovery::lan_ip(),
             });
-            let me = profile["id"].as_str().unwrap_or("");
             let title = conn
                 .query_row(
                     "SELECT title FROM conversations WHERE id=?1",
@@ -1060,6 +1209,14 @@ fn send_message(
                 if is_edit {
                     payload["edit"] = json!(true);
                 }
+                // Announcements (and similar) can carry a file_id — ship file metadata so peers can download.
+                if let Some(fid) = msg.get("file_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    if let Ok(Some(mut file)) = db::get_file(&conn, fid) {
+                        file["staging_dir"] = Value::Null;
+                        file["local_path"] = Value::Null;
+                        payload["file"] = file;
+                    }
+                }
                 if let Ok(Some(w)) = db::get_wrapped_group_key(&conn, conversation_id.as_str(), rid) {
                     payload["wrapped_group_key"] = json!(w);
                 }
@@ -1073,6 +1230,9 @@ fn send_message(
                     conversation_id.as_str(),
                     &payload.to_string(),
                 )?;
+            }
+            if let Some(fid) = msg.get("file_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                let _ = db::ack_file(&conn, fid, me);
             }
             Ok(profile)
         })();
@@ -1103,6 +1263,33 @@ fn get_group_key(state: State<AppState>, conversation_id: String) -> Result<Opti
         .unwrap_or("")
         .to_string();
     db::get_wrapped_group_key(&conn, &conversation_id, &me)
+}
+
+/// Persist / repair the signed-in user's wrapped group key (e.g. solo group).
+#[tauri::command]
+fn set_my_group_key(
+    state: State<AppState>,
+    conversation_id: String,
+    wrapped_group_key: String,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    let me = db::get_profile(&conn)?
+        .ok_or("no profile")?
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if me.is_empty() {
+        return Err("no profile".into());
+    }
+    if !db::is_conversation_member(&conn, &conversation_id, &me)? {
+        return Err("not a member of this group".into());
+    }
+    db::update_member_wraps(
+        &conn,
+        &conversation_id,
+        &[(me, wrapped_group_key)],
+    )
 }
 
 #[tauri::command]
@@ -1361,6 +1548,177 @@ fn delete_group(state: State<AppState>, conversation_id: String) -> Result<(), S
     drop(conn);
     kick_flush(&state);
     Ok(())
+}
+
+/// Clear messages in a chat on this device only (does not notify peers).
+/// Remove a conversation from this device only (e.g. a group after leaving).
+#[tauri::command]
+fn delete_conversation_local(
+    state: State<AppState>,
+    conversation_id: String,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("");
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM conversations WHERE id=?1",
+            rusqlite::params![conversation_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(kind) = kind else {
+        return Err("conversation not found".into());
+    };
+    if kind == "group" {
+        let still_member = db::member_ids(&conn, &conversation_id)?
+            .iter()
+            .any(|id| id == me);
+        if still_member {
+            return Err("Leave the group before removing it from your chat list".into());
+        }
+    }
+    db::delete_conversation_local(&conn, &conversation_id)
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("Only http(s) links can be opened".into());
+    }
+    if url.chars().any(|c| c.is_control() || c == '"' || c == '\'') {
+        return Err("Invalid link".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn board_slug(team: &str) -> Option<String> {
+    let slug: String = team
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug)
+    }
+}
+
+#[tauri::command]
+fn ensure_announcement_boards(state: State<AppState>) -> Result<Vec<Value>, String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    if me.is_empty() {
+        return Err("no profile".into());
+    }
+    let team = profile["team"].as_str().unwrap_or("").to_string();
+    let mut out = Vec::new();
+    out.push(db::ensure_announcement_board(
+        &conn,
+        "board:org",
+        "Org updates",
+        &me,
+    )?);
+    if let Some(slug) = board_slug(&team) {
+        let title = format!("{} · Announcements", team.trim());
+        out.push(db::ensure_announcement_board(
+            &conn,
+            &format!("board:team:{slug}"),
+            &title,
+            &me,
+        )?);
+    }
+    Ok(out)
+}
+
+/// Add discovered peers that share our team onto the team announcement board.
+#[tauri::command]
+fn sync_team_announcement_members(
+    state: State<AppState>,
+    peer_ids: Vec<String>,
+    wrapped_group_keys: Value,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    let team = profile["team"].as_str().unwrap_or("").to_string();
+    let Some(slug) = board_slug(&team) else {
+        return Ok(());
+    };
+    let board_id = format!("board:team:{slug}");
+    let _ = db::ensure_announcement_board(
+        &conn,
+        &board_id,
+        &format!("{} · Announcements", team.trim()),
+        &me,
+    )?;
+    let wraps = wrapped_group_keys
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for pid in peer_ids {
+        if pid == me || pid.is_empty() {
+            continue;
+        }
+        if let Some(w) = wraps.get(&pid).and_then(|v| v.as_str()) {
+            pairs.push((pid, w.to_string()));
+        }
+    }
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    // Reuse add path: upsert members + wraps, notify via existing add_group_members logic is heavier;
+    // here we only upsert local membership/wraps — peers get wraps when they sync their own board.
+    for (uid, wrap) in &pairs {
+        db::upsert_member(&conn, &board_id, uid, Some(wrap.as_str()), None)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_conversation_messages(
+    state: State<AppState>,
+    conversation_id: String,
+    include_files: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM conversations WHERE id=?1",
+            rusqlite::params![conversation_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if exists == 0 {
+        return Err("conversation not found".into());
+    }
+    db::clear_conversation_messages(&conn, &conversation_id, include_files)
 }
 
 #[tauri::command]
@@ -2014,6 +2372,18 @@ fn list_transfers(state: State<AppState>) -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
+fn delete_transfer(state: State<AppState>, id: String) -> Result<(), String> {
+    let conn = state.db.lock();
+    db::delete_transfer(&conn, &id)
+}
+
+#[tauri::command]
+fn clear_transfer_history(state: State<AppState>) -> Result<u64, String> {
+    let conn = state.db.lock();
+    db::clear_transfer_history(&conn)
+}
+
+#[tauri::command]
 fn save_item(state: State<AppState>, row: Value) -> Result<(), String> {
     let preview = row["preview"].as_str().unwrap_or("");
     if preview.chars().count() > 4000 {
@@ -2121,6 +2491,29 @@ fn read_bundle_chunk(app: AppHandle, path: String, offset: u64, len: u32) -> Res
         .join("bundles");
     let bytes = bundle::read_under(base.as_path(), std::path::Path::new(&path), offset, len as usize)?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Read a chunk from any regular local file (drag-drop / share paths outside bundles/).
+#[tauri::command]
+fn read_file_chunk(path: String, offset: u64, len: u32) -> Result<String, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    if len == 0 || (len as usize) > MAX_CHUNK_BYTES {
+        return Err(format!("invalid read length (max {MAX_CHUNK_BYTES} bytes)"));
+    }
+    let p = std::path::PathBuf::from(&path);
+    let meta = std::fs::symlink_metadata(&p).map_err(|e| e.to_string())?;
+    if meta.file_type().is_symlink() {
+        return Err("refusing symbolic link".into());
+    }
+    if !meta.is_file() {
+        return Err("not a file".into());
+    }
+    let mut file = std::fs::File::open(&p).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; len as usize];
+    let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+    buf.truncate(n);
+    Ok(base64::engine::general_purpose::STANDARD.encode(buf))
 }
 
 #[tauri::command]
@@ -2256,6 +2649,52 @@ fn windows_defender_scan(path: &str) -> ScanResult {
     }
 }
 
+// ─── Windows Firewall (LAN discovery) ─────────────────────────────────────────
+
+/// Allow inbound TCP/UDP for this PeerChat.exe so LAN beacons and DMs work.
+/// Uses Domain+Private+Public — corporate Ethernet is often Domain-profiled.
+#[cfg(windows)]
+fn ensure_windows_firewall_rules() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(exe_str) = exe.to_str() else {
+        return;
+    };
+    // Delete stale rules with the same name, then recreate for the running path.
+    let _ = std::process::Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            "name=PeerChat LAN",
+        ])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output();
+    for proto in ["UDP", "TCP"] {
+        let _ = std::process::Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=PeerChat LAN",
+                "dir=in",
+                "action=allow",
+                &format!("program={exe_str}"),
+                &format!("protocol={proto}"),
+                "profile=any",
+                "enable=yes",
+            ])
+            .creation_flags(0x08000000)
+            .output();
+    }
+}
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 // ─── Windows shell integration ("Share in PeerChat" right-click) ──────────────
 
 /// Write HKCU shell verb so "Share in PeerChat" appears on right-click for all files.
@@ -2375,9 +2814,14 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&data).ok();
-            let db_path = data.join("lanmsg.sqlite");
+            ensure_clean_break(&data);
+            let db_path = data.join("peerchat.sqlite");
             let conn = db::open(&db_path)?;
             let shared: SharedDb = Arc::new(Mutex::new(conn));
+            {
+                let conn = shared.lock();
+                let _ = db::auto_accept_all_pending_identities(&conn);
+            }
             app.manage(AppState {
                 db: shared.clone(),
                 data_dir: data.clone(),
@@ -2386,6 +2830,7 @@ pub fn run() {
                 fingerprint: Mutex::new(String::new()),
                 started: Mutex::new(false),
                 live_display_name: Arc::new(Mutex::new(String::new())),
+                live_team: Arc::new(Mutex::new(String::new())),
             });
             // auto-start if profile exists (drop DB lock before starting runtime —
             // holding it across start_runtime_inner deadlocks on the same Mutex).
@@ -2519,6 +2964,7 @@ pub fn run() {
             list_lan_hosts,
             list_peers,
             pin_peer,
+            set_peer_blocked,
             list_conversations,
             open_dm,
             create_group,
@@ -2530,6 +2976,7 @@ pub fn run() {
             mark_conversation_read,
             send_message,
             get_group_key,
+            set_my_group_key,
             member_ids,
             list_group_members,
             add_group_members,
@@ -2537,6 +2984,11 @@ pub fn run() {
             leave_group,
             rename_group,
             delete_group,
+            delete_conversation_local,
+            open_external_url,
+            ensure_announcement_boards,
+            sync_team_announcement_members,
+            clear_conversation_messages,
             set_group_members_can_add,
             set_group_member_role,
             send_typing,
@@ -2560,6 +3012,8 @@ pub fn run() {
             accept_pending_identity,
             upsert_transfer,
             list_transfers,
+            delete_transfer,
+            clear_transfer_history,
             save_item,
             delete_saved_item,
             list_saved_items,
@@ -2569,6 +3023,7 @@ pub fn run() {
             list_directory_files,
             pack_bundle,
             read_bundle_chunk,
+            read_file_chunk,
             delete_bundle_file,
             scan_file,
             local_path_meta,

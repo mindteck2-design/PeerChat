@@ -140,6 +140,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE conversation_members ADD COLUMN display_name TEXT",
         [],
     );
+    let _ = conn.execute("ALTER TABLE profile ADD COLUMN team TEXT NOT NULL DEFAULT ''", []);
     let _ = conn.execute("ALTER TABLE files ADD COLUMN local_path TEXT", []);
     let _ = conn.execute("ALTER TABLE files ADD COLUMN content_sha256 TEXT", []);
     let _ = conn.execute("ALTER TABLE files ADD COLUMN file_crypto_v INTEGER DEFAULT 1", []);
@@ -152,6 +153,25 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE peers ADD COLUMN pending_tls_fingerprint TEXT", []);
     let _ = conn.execute("ALTER TABLE peers ADD COLUMN pending_x25519_public TEXT", []);
     let _ = conn.execute("ALTER TABLE peers ADD COLUMN pending_ed25519_public TEXT", []);
+    let _ = conn.execute("ALTER TABLE peers ADD COLUMN team TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute(
+        "ALTER TABLE peers ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS peer_identity_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            tls_fingerprint TEXT,
+            x25519_public TEXT NOT NULL,
+            ed25519_public TEXT NOT NULL,
+            retired_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_peer_identity_history_user
+          ON peer_identity_history(user_id, retired_at);
+        "#,
+    );
 
     if version < 2 {
         conn.execute_batch(
@@ -626,23 +646,140 @@ pub fn mark_stale_peers_offline(conn: &Connection, max_age_secs: i64) -> Result<
     Ok(n as u64)
 }
 
-pub fn set_peer_pending_identity(
+fn archive_peer_identity(
+    conn: &Connection,
+    user_id: &str,
+    tls_fingerprint: Option<&str>,
+    x25519_public: &str,
+    ed25519_public: &str,
+) -> Result<(), String> {
+    if x25519_public.is_empty() && ed25519_public.is_empty() {
+        return Ok(());
+    }
+    let exists: i64 = conn
+        .query_row(
+            r#"SELECT COUNT(*) FROM peer_identity_history
+               WHERE user_id=?1 AND x25519_public=?2 AND ed25519_public=?3
+                 AND IFNULL(tls_fingerprint,'')=IFNULL(?4,'')"#,
+            params![user_id, x25519_public, ed25519_public, tls_fingerprint],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if exists > 0 {
+        return Ok(());
+    }
+    conn.execute(
+        r#"INSERT INTO peer_identity_history(user_id, tls_fingerprint, x25519_public, ed25519_public, retired_at)
+           VALUES (?1,?2,?3,?4,?5)"#,
+        params![
+            user_id,
+            tls_fingerprint,
+            x25519_public,
+            ed25519_public,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Adopt a peer's new TLS / crypto keys immediately. Old keys are retained in
+/// peer_identity_history so previously encrypted material can still be verified.
+pub fn adopt_peer_identity(
     conn: &Connection,
     user_id: &str,
     tls_fingerprint: &str,
     x25519_public: &str,
     ed25519_public: &str,
 ) -> Result<(), String> {
+    if user_id.is_empty() {
+        return Ok(());
+    }
+    let existing = get_peer(conn, user_id)?;
+    if let Some(ref ex) = existing {
+        let old_x = ex["x25519_public"].as_str().unwrap_or("");
+        let old_e = ex["ed25519_public"].as_str().unwrap_or("");
+        let old_fp = ex["tls_fingerprint"].as_str();
+        let same = old_x == x25519_public
+            && old_e == ed25519_public
+            && (tls_fingerprint.is_empty() || old_fp == Some(tls_fingerprint));
+        if same {
+            let _ = conn.execute(
+                r#"UPDATE peers SET identity_changed=0,
+                       pending_tls_fingerprint=NULL,
+                       pending_x25519_public=NULL,
+                       pending_ed25519_public=NULL
+                   WHERE user_id=?1"#,
+                params![user_id],
+            );
+            return Ok(());
+        }
+        archive_peer_identity(conn, user_id, old_fp, old_x, old_e)?;
+    }
+    let fp = if tls_fingerprint.is_empty() {
+        existing
+            .as_ref()
+            .and_then(|e| e["tls_fingerprint"].as_str())
+            .unwrap_or("")
+    } else {
+        tls_fingerprint
+    };
+    let x = if x25519_public.is_empty() {
+        existing
+            .as_ref()
+            .and_then(|e| e["x25519_public"].as_str())
+            .unwrap_or("")
+    } else {
+        x25519_public
+    };
+    let e = if ed25519_public.is_empty() {
+        existing
+            .as_ref()
+            .and_then(|e| e["ed25519_public"].as_str())
+            .unwrap_or("")
+    } else {
+        ed25519_public
+    };
     conn.execute(
-        r#"UPDATE peers SET identity_changed=1,
-               pending_tls_fingerprint=?2,
-               pending_x25519_public=?3,
-               pending_ed25519_public=?4
+        r#"UPDATE peers SET
+               tls_fingerprint=?2,
+               x25519_public=?3,
+               ed25519_public=?4,
+               identity_changed=0,
+               pending_tls_fingerprint=NULL,
+               pending_x25519_public=NULL,
+               pending_ed25519_public=NULL
            WHERE user_id=?1"#,
-        params![user_id, tls_fingerprint, x25519_public, ed25519_public],
+        params![user_id, fp, x, e],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Apply any leftover pending identity rows (from older builds that required Review).
+pub fn auto_accept_all_pending_identities(conn: &Connection) -> Result<u64, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"SELECT user_id,
+                      COALESCE(pending_tls_fingerprint,''),
+                      COALESCE(pending_x25519_public,''),
+                      COALESCE(pending_ed25519_public,'')
+               FROM peers
+               WHERE identity_changed=1 AND pending_tls_fingerprint IS NOT NULL"#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+    let mut n = 0u64;
+    for (uid, fp, x, e) in rows {
+        adopt_peer_identity(conn, &uid, &fp, &x, &e)?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 pub fn upsert_profile(
@@ -652,17 +789,19 @@ pub fn upsert_profile(
     x25519_public: &str,
     ed25519_public: &str,
     listen_port: i64,
+    team: &str,
 ) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        r#"INSERT INTO profile(id, display_name, x25519_public, ed25519_public, listen_port, created_at)
-           VALUES (?1,?2,?3,?4,?5,?6)
+        r#"INSERT INTO profile(id, display_name, x25519_public, ed25519_public, listen_port, created_at, team)
+           VALUES (?1,?2,?3,?4,?5,?6,?7)
            ON CONFLICT(id) DO UPDATE SET
              display_name=excluded.display_name,
              x25519_public=excluded.x25519_public,
              ed25519_public=excluded.ed25519_public,
-             listen_port=excluded.listen_port"#,
-        params![id, display_name, x25519_public, ed25519_public, listen_port, now],
+             listen_port=excluded.listen_port,
+             team=excluded.team"#,
+        params![id, display_name, x25519_public, ed25519_public, listen_port, now, team],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -670,7 +809,7 @@ pub fn upsert_profile(
 
 pub fn get_profile(conn: &Connection) -> Result<Option<Value>, String> {
     conn.query_row(
-        "SELECT id, display_name, x25519_public, ed25519_public, listen_port, created_at FROM profile LIMIT 1",
+        "SELECT id, display_name, x25519_public, ed25519_public, listen_port, created_at, COALESCE(team,'') FROM profile LIMIT 1",
         [],
         |r| {
             Ok(serde_json::json!({
@@ -680,6 +819,7 @@ pub fn get_profile(conn: &Connection) -> Result<Option<Value>, String> {
                 "ed25519_public": r.get::<_, String>(3)?,
                 "listen_port": r.get::<_, i64>(4)?,
                 "created_at": r.get::<_, String>(5)?,
+                "team": r.get::<_, String>(6)?,
             }))
         },
     )
@@ -698,12 +838,39 @@ pub fn upsert_peer(
     tls_fingerprint: Option<&str>,
     online: bool,
 ) -> Result<(), String> {
+    upsert_peer_with_team(
+        conn,
+        user_id,
+        display_name,
+        x25519_public,
+        ed25519_public,
+        ip,
+        port,
+        tls_fingerprint,
+        online,
+        None,
+    )
+}
+
+pub fn upsert_peer_with_team(
+    conn: &Connection,
+    user_id: &str,
+    display_name: &str,
+    x25519_public: &str,
+    ed25519_public: &str,
+    ip: Option<&str>,
+    port: Option<i64>,
+    tls_fingerprint: Option<&str>,
+    online: bool,
+    team: Option<&str>,
+) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
     // Never persist loopback / garbage — that poisons reverse delivery.
     let ip = ip.filter(|s| crate::discovery::is_usable_lan_ip(s));
+    let team = team.unwrap_or("").trim();
     conn.execute(
-        r#"INSERT INTO peers(user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, last_seen_at, online)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+        r#"INSERT INTO peers(user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, last_seen_at, online, team)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
            ON CONFLICT(user_id) DO UPDATE SET
              display_name=excluded.display_name,
              x25519_public=excluded.x25519_public,
@@ -712,7 +879,8 @@ pub fn upsert_peer(
              last_port=COALESCE(excluded.last_port, peers.last_port),
              tls_fingerprint=COALESCE(excluded.tls_fingerprint, peers.tls_fingerprint),
              last_seen_at=excluded.last_seen_at,
-             online=excluded.online"#,
+             online=excluded.online,
+             team=CASE WHEN excluded.team != '' THEN excluded.team ELSE peers.team END"#,
         params![
             user_id,
             display_name,
@@ -722,10 +890,50 @@ pub fn upsert_peer(
             port,
             tls_fingerprint,
             now,
-            online as i64
+            online as i64,
+            team
         ],
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn peer_blocked(conn: &Connection, user_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT COALESCE(blocked,0) FROM peers WHERE user_id=?1",
+        params![user_id],
+        |r| Ok(r.get::<_, i64>(0)? == 1),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+    .map(|o| o.unwrap_or(false))
+}
+
+/// Block or unblock a peer for DMs. Blocking also unpins trust and mutes the DM thread.
+pub fn set_peer_blocked(conn: &Connection, user_id: &str, blocked: bool) -> Result<(), String> {
+    let n = conn
+        .execute(
+            "UPDATE peers SET blocked=?2, pinned=CASE WHEN ?2=1 THEN 0 ELSE pinned END WHERE user_id=?1",
+            params![user_id, blocked as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("unknown peer".into());
+    }
+    if blocked {
+        if let Some(profile) = get_profile(conn)? {
+            let me = profile.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if !me.is_empty() {
+                let cid = dm_conversation_id(me, user_id);
+                let _ = set_conversation_muted(conn, &cid, true);
+                if let Ok(Some(legacy)) = dm_id_for_peer(conn, user_id) {
+                    if legacy != cid {
+                        let _ = set_conversation_muted(conn, &legacy, true);
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -746,7 +954,7 @@ pub fn pin_peer(conn: &Connection, user_id: &str, fingerprint: &str) -> Result<(
             fingerprint.to_string()
         };
         conn.execute(
-            r#"UPDATE peers SET pinned=1, tls_fingerprint=?2,
+            r#"UPDATE peers SET pinned=1, blocked=0, tls_fingerprint=?2,
                    x25519_public=?3, ed25519_public=?4,
                    identity_changed=0,
                    pending_tls_fingerprint=NULL,
@@ -758,7 +966,7 @@ pub fn pin_peer(conn: &Connection, user_id: &str, fingerprint: &str) -> Result<(
         .map_err(|e| e.to_string())?;
     } else {
         conn.execute(
-            "UPDATE peers SET pinned=1, tls_fingerprint=?2, identity_changed=0 WHERE user_id=?1",
+            "UPDATE peers SET pinned=1, blocked=0, tls_fingerprint=?2, identity_changed=0 WHERE user_id=?1",
             params![user_id, fingerprint],
         )
         .map_err(|e| e.to_string())?;
@@ -769,7 +977,7 @@ pub fn pin_peer(conn: &Connection, user_id: &str, fingerprint: &str) -> Result<(
 pub fn list_peers(conn: &Connection) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, last_seen_at, online, COALESCE(identity_changed,0), pending_tls_fingerprint FROM peers ORDER BY display_name",
+            "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, last_seen_at, online, COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(team,''), COALESCE(blocked,0) FROM peers ORDER BY display_name",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -794,6 +1002,8 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<Value>, String> {
                 "online": r.get::<_, i64>(9)? == 1,
                 "identity_changed": identity_changed,
                 "pending_tls_fingerprint": pending_fp,
+                "team": r.get::<_, String>(12)?,
+                "blocked": r.get::<_, i64>(13)? == 1,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -806,7 +1016,7 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<Value>, String> {
 
 pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, String> {
     conn.query_row(
-        "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, online FROM peers WHERE user_id=?1",
+        "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, online, COALESCE(blocked,0) FROM peers WHERE user_id=?1",
         params![user_id],
         |r| {
             Ok(serde_json::json!({
@@ -819,6 +1029,7 @@ pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, Strin
                 "tls_fingerprint": r.get::<_, Option<String>>(6)?,
                 "pinned": r.get::<_, i64>(7)? == 1,
                 "online": r.get::<_, i64>(8)? == 1,
+                "blocked": r.get::<_, i64>(9)? == 1,
             }))
         },
     )
@@ -889,6 +1100,47 @@ pub fn create_group(
     Ok(())
 }
 
+pub fn is_announcement_board_id(id: &str) -> bool {
+    id == "board:org" || id.starts_with("board:team:")
+}
+
+/// Create or reopen a local announcement board conversation for this user.
+pub fn ensure_announcement_board(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    me: &str,
+) -> Result<Value, String> {
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM conversations WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if exists == 0 {
+        create_group(conn, id, title, me, &[(me.to_string(), None)])?;
+    } else {
+        conn.execute(
+            "UPDATE conversations SET title=?2 WHERE id=?1",
+            params![id, title],
+        )
+        .map_err(|e| e.to_string())?;
+        upsert_member(conn, id, me, None, None)?;
+        // First member who created the board stays admin; ensure at least one admin.
+        let _ = ensure_group_admin(conn, id);
+    }
+    Ok(serde_json::json!({
+        "id": id,
+        "kind": "group",
+        "title": title,
+        "peer_id": Value::Null,
+        "peer_name": Value::Null,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "is_announcement_board": true,
+    }))
+}
+
 pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
     let me = get_profile(conn)?
         .and_then(|p| p["id"].as_str().map(|s| s.to_string()))
@@ -954,6 +1206,10 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
         if kind == "dm" && peer_id.is_none() {
             continue;
         }
+        // Announcement boards have their own nav page.
+        if is_announcement_board_id(&id) {
+            continue;
+        }
         let peer_name = peer_id.as_ref().and_then(|pid| {
             conn.query_row(
                 "SELECT display_name FROM peers WHERE user_id=?1",
@@ -989,7 +1245,8 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
-pub fn insert_message(conn: &Connection, msg: &Value) -> Result<(), String> {
+/// Returns `true` when a new row was written (used to avoid duplicate OS toasts).
+pub fn insert_message(conn: &Connection, msg: &Value) -> Result<bool, String> {
     let id = msg["id"].as_str().unwrap_or("");
     let incoming_kind = msg["kind"].as_str().unwrap_or("text");
     let existing: Option<String> = conn
@@ -1004,9 +1261,10 @@ pub fn insert_message(conn: &Connection, msg: &Value) -> Result<(), String> {
         // Don't revive a tombstone; don't clobber an existing non-delete row.
         if kind == "deleted" || incoming_kind != "deleted" {
             if incoming_kind == "deleted" && kind != "deleted" {
-                return tombstone_message(conn, id);
+                tombstone_message(conn, id)?;
+                return Ok(true);
             }
-            return Ok(());
+            return Ok(false);
         }
     }
     let created = msg["created_at"].as_str().unwrap_or("");
@@ -1031,7 +1289,7 @@ pub fn insert_message(conn: &Connection, msg: &Value) -> Result<(), String> {
             ],
         )
         .map_err(|e| e.to_string())?;
-        return Ok(());
+        return Ok(true);
     }
     conn.execute(
         r#"INSERT INTO messages(id, conversation_id, sender_id, kind, ciphertext, nonce, wrapped_keys, signature, file_id, created_at, delivered, reply_to, sort_at)
@@ -1055,7 +1313,7 @@ pub fn insert_message(conn: &Connection, msg: &Value) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     // Side-effects for reaction / pin sync messages.
     apply_control_message(conn, msg)?;
-    Ok(())
+    Ok(true)
 }
 
 /// Replace ciphertext for an existing text message (edit sync).
@@ -1070,7 +1328,8 @@ pub fn apply_message_edit(conn: &Connection, msg: &Value) -> Result<(), String> 
         .map_err(|e| e.to_string())?;
     let Some(kind) = kind else {
         // Original never arrived — insert as normal.
-        return insert_message(conn, msg);
+        insert_message(conn, msg)?;
+        return Ok(());
     };
     if kind == "deleted" || kind != "text" {
         return Ok(());
@@ -1186,6 +1445,58 @@ pub fn members_can_add(conn: &Connection, conversation_id: &str) -> Result<bool,
     Ok(n == 1)
 }
 
+/// Delete all messages in a chat on this device. Keeps the conversation row.
+/// When `include_files` is true, also removes file records and staging folders.
+pub fn clear_conversation_messages(
+    conn: &Connection,
+    conversation_id: &str,
+    include_files: bool,
+) -> Result<(), String> {
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(|e| e.to_string())?;
+    let _ = conn.execute(
+        "DELETE FROM message_pins WHERE conversation_id=?1",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE conversation_id=?1)",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM hidden_messages WHERE message_id IN (SELECT id FROM messages WHERE conversation_id=?1)",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM message_reads WHERE message_id IN (SELECT id FROM messages WHERE conversation_id=?1)",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM messages WHERE conversation_id=?1",
+        params![conversation_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM outbox WHERE conversation_id=?1",
+        params![conversation_id],
+    );
+    if include_files {
+        let mut stmt = conn
+            .prepare("SELECT id FROM files WHERE conversation_id=?1")
+            .map_err(|e| e.to_string())?;
+        let ids: Vec<String> = stmt
+            .query_map(params![conversation_id], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        for id in ids {
+            let _ = delete_file_record(conn, &id);
+        }
+    }
+    conn.execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Wipe a group conversation and related rows for this device.
 pub fn delete_conversation_local(conn: &Connection, conversation_id: &str) -> Result<(), String> {
     conn.execute_batch("PRAGMA foreign_keys=OFF;")
@@ -1210,10 +1521,21 @@ pub fn delete_conversation_local(conn: &Connection, conversation_id: &str) -> Re
         "DELETE FROM messages WHERE conversation_id=?1",
         params![conversation_id],
     );
-    let _ = conn.execute(
-        "DELETE FROM files WHERE conversation_id=?1",
-        params![conversation_id],
-    );
+    // Always purge files when removing the whole conversation.
+    {
+        let mut stmt = conn
+            .prepare("SELECT id FROM files WHERE conversation_id=?1")
+            .map_err(|e| e.to_string())?;
+        let ids: Vec<String> = stmt
+            .query_map(params![conversation_id], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        for id in ids {
+            let _ = delete_file_record(conn, &id);
+        }
+    }
     let _ = conn.execute(
         "DELETE FROM outbox WHERE conversation_id=?1",
         params![conversation_id],
@@ -2476,25 +2798,21 @@ pub fn upsert_receive_progress(
 }
 
 pub fn accept_pending_identity(conn: &Connection, user_id: &str) -> Result<(), String> {
-    let n = conn
-        .execute(
-            r#"UPDATE peers SET
-                 tls_fingerprint = pending_tls_fingerprint,
-                 x25519_public = COALESCE(NULLIF(pending_x25519_public, ''), x25519_public),
-                 ed25519_public = COALESCE(NULLIF(pending_ed25519_public, ''), ed25519_public),
-                 identity_changed = 0,
-                 pending_tls_fingerprint = NULL,
-                 pending_x25519_public = NULL,
-                 pending_ed25519_public = NULL
-               WHERE user_id=?1 AND identity_changed=1
-                 AND pending_tls_fingerprint IS NOT NULL"#,
+    let pending: Option<(String, String, String)> = conn
+        .query_row(
+            r#"SELECT COALESCE(pending_tls_fingerprint,''),
+                      COALESCE(pending_x25519_public,''),
+                      COALESCE(pending_ed25519_public,'')
+               FROM peers WHERE user_id=?1 AND identity_changed=1"#,
             params![user_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
+        .optional()
         .map_err(|e| e.to_string())?;
-    if n == 0 {
+    let Some((fp, x, e)) = pending else {
         return Err("No pending identity change for this peer".into());
-    }
-    Ok(())
+    };
+    adopt_peer_identity(conn, user_id, &fp, &x, &e)
 }
 
 pub fn upsert_transfer(conn: &Connection, row: &Value) -> Result<(), String> {
@@ -2564,6 +2882,22 @@ pub fn list_transfers(conn: &Connection, limit: i64) -> Result<Vec<Value>, Strin
         out.push(row.map_err(|e| e.to_string())?);
     }
     Ok(out)
+}
+
+pub fn delete_transfer(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM transfer_log WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn clear_transfer_history(conn: &Connection) -> Result<u64, String> {
+    let n = conn
+        .execute(
+            "DELETE FROM transfer_log WHERE status NOT IN ('queued','transferring','verifying')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n as u64)
 }
 
 pub fn save_item(conn: &Connection, row: &Value) -> Result<(), String> {

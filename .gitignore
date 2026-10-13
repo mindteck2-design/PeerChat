@@ -1,16 +1,14 @@
-# Server
-server/data/
-server/config.json
-server/lanmsg-server
-server/lanmsg-server.exe
-server/dist/
-*.exe
-
 # Client
 app/node_modules/
 app/dist/
 app/src-tauri/target/
 app/src-tauri/gen/
+
+# Build output
+dist/
+*.exe
+*.deb
+*.msi
 
 # OS / IDE
 .DS_Store

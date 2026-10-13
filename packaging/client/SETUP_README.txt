@@ -24,10 +24,26 @@ Updates
 3. Your chats stay put.
 4. Check Settings inside PeerChat — the version number is shown there.
 
+Uninstall
+---------
+Normal: Start Menu → PeerChat → Uninstall PeerChat
+   or Settings → Apps → PeerChat → Uninstall
+
+If uninstall does nothing: quit PeerChat (tray → Quit), then run:
+  powershell -ExecutionPolicy Bypass -File Force-Uninstall-PeerChat.ps1
+Or delete the folder: %LOCALAPPDATA%\Programs\PeerChat
+Chat data stays in %APPDATA%\com.peerchat.app unless you delete it yourself.
+
 Requirements
 ------------
 PeerChat needs Microsoft Edge WebView2 Runtime.
 Most Windows 10/11 PCs already have it.
+
+If people don't appear under People → refresh:
+- Both PCs must be on the same LAN / VLAN with PeerChat running.
+- Allow PeerChat in Windows Firewall when prompted (UDP 41234 + TCP).
+- On corporate Domain networks, an admin may need to allow the app.
+- Click the refresh icon in the sidebar (People) after both apps are open.
 
 Optional NSIS installer
 -----------------------

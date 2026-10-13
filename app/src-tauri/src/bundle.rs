@@ -95,8 +95,8 @@ pub fn pack(dest: &Path, entries: &[BundleEntry]) -> Result<(u64, u32), String> 
         let canon = path.canonicalize().map_err(|e| e.to_string())?;
         let mut src = File::open(&canon).map_err(|e| e.to_string())?;
         total = total.saturating_add(meta.len());
-        if total > 2 * 1024 * 1024 * 1024 {
-            return Err("bundle exceeds 2 GiB".into());
+        if total > 5 * 1024 * 1024 * 1024 {
+            return Err("bundle exceeds 5 GiB".into());
         }
         zip.start_file(rel, opts).map_err(|e| e.to_string())?;
         std::io::copy(&mut src, &mut zip).map_err(|e| e.to_string())?;

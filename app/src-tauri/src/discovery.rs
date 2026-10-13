@@ -35,6 +35,8 @@ pub struct PeerBeacon {
     pub fingerprint: String,
     pub x25519_public: String,
     pub ed25519_public: String,
+    #[serde(default)]
+    pub team: String,
     pub ts: f64,
 }
 
@@ -76,9 +78,24 @@ pub fn lan_ip() -> String {
     ip
 }
 
+fn is_virtual_adapter_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("vethernet")
+        || n.contains("hyper-v")
+        || n.contains("wsl")
+        || n.contains("virtualbox")
+        || n.contains("vmware")
+        || n.contains("loopback")
+        || n.contains("bluetooth")
+        || n.contains("docker")
+}
+
 fn resolve_lan_ip() -> String {
+    // Prefer a real NIC from the OS list (skip Hyper-V / WSL switches).
+    if let Some(ip) = lan_ips_from_os(true).into_iter().next() {
+        return ip;
+    }
     // UDP "connect" only selects a route; destinations need not be reachable.
-    // Prefer private probes so intranet PCs without internet still get a real NIC IP.
     const PROBES: &[&str] = &[
         "172.195.0.1:1",
         "172.16.0.1:1",
@@ -98,40 +115,83 @@ fn resolve_lan_ip() -> String {
             }
         }
     }
-    if let Some(ip) = lan_ip_from_os() {
+    if let Some(ip) = lan_ips_from_os(false).into_iter().next() {
         return ip;
     }
     "127.0.0.1".into()
 }
 
-fn lan_ip_from_os() -> Option<String> {
+/// Local IPv4 addresses. When `physical_only`, skip Hyper-V / WSL / VM adapters.
+fn lan_ips_from_os(physical_only: bool) -> Vec<String> {
     #[cfg(windows)]
     {
-        let out = silent_command("ipconfig").output().ok()?;
+        let Some(out) = silent_command("ipconfig").output().ok() else {
+            return Vec::new();
+        };
         let text = String::from_utf8_lossy(&out.stdout);
-        let mut best: Option<String> = None;
+        let mut cur_adapter = String::new();
+        let mut preferred = Vec::new();
+        let mut other = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for line in text.lines() {
-            let lower = line.to_ascii_lowercase();
+            let trimmed = line.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.contains("adapter") && trimmed.ends_with(':') {
+                cur_adapter = trimmed.trim_end_matches(':').to_string();
+                continue;
+            }
             if !lower.contains("ipv4") {
+                continue;
+            }
+            if physical_only && is_virtual_adapter_name(&cur_adapter) {
                 continue;
             }
             if let Some(pos) = line.rfind(':') {
                 let candidate = line[pos + 1..].trim().to_string();
-                if is_usable_lan_ip(&candidate) {
-                    // Prefer Mindteck-style intranet / RFC1918 ranges.
-                    if candidate.starts_with("172.") || candidate.starts_with("10.") || candidate.starts_with("192.168.")
+                if is_usable_lan_ip(&candidate) && seen.insert(candidate.clone()) {
+                    if candidate.starts_with("172.")
+                        || candidate.starts_with("10.")
+                        || candidate.starts_with("192.168.")
                     {
-                        return Some(candidate);
+                        preferred.push(candidate);
+                    } else {
+                        other.push(candidate);
                     }
-                    best = Some(candidate);
                 }
             }
         }
-        return best;
+        preferred.extend(other);
+        return preferred;
     }
     #[cfg(not(windows))]
     {
-        None
+        let _ = physical_only;
+        Vec::new()
+    }
+}
+
+/// Send UDP payload as broadcast out every usable NIC.
+/// Binding per-IP forces Windows to egress that interface (0.0.0.0 often picks Hyper-V).
+async fn broadcast_datagram(payload: &[u8], discovery_port: u16) {
+    let mut ips = lan_ips_from_os(true);
+    if ips.is_empty() {
+        ips = lan_ips_from_os(false);
+    }
+    if ips.is_empty() {
+        ips.push(lan_ip());
+    }
+    let dest_global = format!("255.255.255.255:{discovery_port}");
+    let dest_loop = format!("127.0.0.1:{discovery_port}");
+    for ip in ips {
+        if let Ok(sock) = UdpSocket::bind(format!("{ip}:0")).await {
+            let _ = sock.set_broadcast(true);
+            let _ = sock.send_to(payload, &dest_global).await;
+        }
+    }
+    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await {
+        let _ = sock.set_broadcast(true);
+        let _ = sock.send_to(payload, &dest_global).await;
+        let _ = sock.send_to(payload, &dest_loop).await;
     }
 }
 
@@ -142,6 +202,7 @@ pub async fn run_beacon(
     stop: tokio::sync::watch::Receiver<bool>,
     mut beacon: PeerBeacon,
     live_display_name: Arc<parking_lot::Mutex<String>>,
+    live_team: Arc<parking_lot::Mutex<String>>,
 ) {
     let sock = match UdpSocket::bind(format!("0.0.0.0:{discovery_port}")).await {
         Ok(s) => s,
@@ -162,13 +223,13 @@ pub async fn run_beacon(
                 beacon.ip = lan_ip();
                 beacon.port = listen_port;
                 beacon.display_name = live_display_name.lock().clone();
+                beacon.team = live_team.lock().clone();
                 beacon.ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0);
                 if let Ok(raw) = serde_json::to_vec(&beacon) {
-                    let _ = sock.send_to(&raw, format!("255.255.255.255:{discovery_port}")).await;
-                    let _ = sock.send_to(&raw, format!("127.0.0.1:{discovery_port}")).await;
+                    broadcast_datagram(&raw, discovery_port).await;
                 }
             }
             res = sock.recv_from(&mut buf) => {
@@ -190,7 +251,9 @@ async fn handle_packet(
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(data) else {
         return;
     };
-    if v.get("magic").and_then(|x| x.as_str()) != Some("LANMSG") {
+    let magic = v.get("magic").and_then(|x| x.as_str()).unwrap_or("");
+    // Accept legacy LanMsg beacons so mixed fleets still discover each other.
+    if magic != "PEERCHAT" && magic != "LANMSG" {
         return;
     }
     let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
@@ -302,7 +365,9 @@ pub async fn scan(discovery_port: u16, self_id: &str) -> Result<Vec<PeerBeacon>,
         .await
         .map_err(|e| e.to_string())?;
     sock.set_broadcast(true).map_err(|e| e.to_string())?;
-    let who = br#"{"magic":"LANMSG","type":"who","v":"4"}"#;
+    let who = br#"{"magic":"PEERCHAT","type":"who","v":"4"}"#;
+    // Ask every NIC to solicit replies — critical on PCs with Hyper-V/WSL switches.
+    broadcast_datagram(who, discovery_port).await;
     let _ = sock
         .send_to(who, format!("255.255.255.255:{discovery_port}"))
         .await;
@@ -319,7 +384,8 @@ pub async fn scan(discovery_port: u16, self_id: &str) -> Result<Vec<PeerBeacon>,
                 let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf[..n]) else {
                     continue;
                 };
-                if v.get("magic").and_then(|x| x.as_str()) != Some("LANMSG") {
+                let magic = v.get("magic").and_then(|x| x.as_str()).unwrap_or("");
+                if magic != "PEERCHAT" && magic != "LANMSG" {
                     continue;
                 }
                 if v.get("type").and_then(|x| x.as_str()) != Some("peer") {

@@ -1,12 +1,12 @@
 [package]
-name = "lanmsg"
-version = "0.4.1"
+name = "peerchat"
+version = "0.4.2"
 description = "PeerChat secure P2P LAN messenger"
 authors = ["PeerChat"]
 edition = "2021"
 
 [lib]
-name = "lanmsg_lib"
+name = "peerchat_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

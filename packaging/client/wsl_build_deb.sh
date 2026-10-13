@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-LOG=/mnt/d/LanMsg/wsl-build.log
+LOG=/mnt/d/PeerChat/wsl-build.log
 exec > >(tee "$LOG") 2>&1
 echo "START $(date)"
-cd /mnt/d/LanMsg/app
+cd /mnt/d/PeerChat/app
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -38,8 +38,8 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
 npm install
 npm run tauri:build
 
-mkdir -p /mnt/d/LanMsg/dist/linux
-cp -f src-tauri/target/release/bundle/deb/*.deb /mnt/d/LanMsg/dist/linux/ || true
-ls -la /mnt/d/LanMsg/dist/linux/ || true
+mkdir -p /mnt/d/PeerChat/dist/linux
+cp -f src-tauri/target/release/bundle/deb/*.deb /mnt/d/PeerChat/dist/linux/ || true
+ls -la /mnt/d/PeerChat/dist/linux/ || true
 ls -la src-tauri/target/release/bundle/deb/ || true
 echo "END $(date) EXIT=$?"

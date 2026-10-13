@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-exec > >(tee /mnt/d/LanMsg/wsl-rust.txt) 2>&1
+exec > >(tee /mnt/d/PeerChat/wsl-rust.txt) 2>&1
 echo START
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
 sh /tmp/rustup.sh -y

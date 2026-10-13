@@ -1999,34 +1999,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lanmsg"
-version = "0.4.1"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "hex",
- "parking_lot",
- "rcgen",
- "rusqlite",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-single-instance",
- "tauri-plugin-store",
- "tokio",
- "tokio-rustls",
- "uuid",
- "windows-sys 0.59.0",
- "zip",
-]
-
-[[package]]
 name = "libappindicator"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2578,6 +2550,34 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "peerchat"
+version = "0.4.2"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "parking_lot",
+ "rcgen",
+ "rusqlite",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-store",
+ "tokio",
+ "tokio-rustls",
+ "uuid",
+ "windows-sys 0.59.0",
+ "zip",
 ]
 
 [[package]]

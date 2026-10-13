@@ -1,7 +1,7 @@
 #!/bin/bash
 export PATH="/c/Users/vikas/.cargo/bin:$PATH"
-cd /d/LanMsg/app
-exec > /d/LanMsg/build-out.txt 2>&1
+cd /d/PeerChat/app
+exec > /d/PeerChat/build-out.txt 2>&1
 echo "START $(date)"
 cargo --version
 node -v

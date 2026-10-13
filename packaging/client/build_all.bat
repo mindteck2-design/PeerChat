@@ -5,7 +5,7 @@ echo PATH has cargo:
 where cargo
 where node
 echo.
-echo Building LanMsg (NSIS + deb if supported)...
+echo Building PeerChat (NSIS + deb if supported)...
 call npm run tauri:build
 echo EXIT=%ERRORLEVEL%
 echo.

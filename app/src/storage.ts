@@ -6,14 +6,14 @@ import {
 } from "./crypto";
 
 const KEYS = {
-  identity: "lanmsg.identity",
-  pinnedPeers: "lanmsg.pinnedPeers",
+  identity: "peerchat.identity",
+  pinnedPeers: "peerchat.pinnedPeers",
 };
 
 async function tauriStore() {
   try {
     const { Store } = await import("@tauri-apps/plugin-store");
-    return await Store.load("lanmsg.json");
+    return await Store.load("peerchat.json");
   } catch {
     return null;
   }

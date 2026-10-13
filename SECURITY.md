@@ -1,4 +1,4 @@
-# LanMsg security (P2P)
+# PeerChat security (P2P)
 
 ## Threat model
 

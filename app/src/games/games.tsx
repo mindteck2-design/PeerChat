@@ -70,7 +70,8 @@ export type GameSendFn = (peerId: string, msg: GameMsg) => Promise<void>;
 /** Called by ChatScreen when an inbox-updated message has kind=game_move */
 export type GameDispatchFn = (fromId: string, msg: GameMsg) => void;
 
-/** Accept from a chat invite card — GamesHub opens the game and joins. */
+/** Accept from a chat invite card — GamesHub opens the game and joins.
+ *  When `openOnly` is true, jump into an already-accepted match without re-sending accept. */
 export type PendingGameInvite = {
   game: "ttt" | "rps" | "dab";
   matchId: string;
@@ -79,6 +80,7 @@ export type PendingGameInvite = {
   format?: MatchFormat;
   rows?: number;
   cols?: number;
+  openOnly?: boolean;
 };
 
 // ─── Selection screen ────────────────────────────────────────────────────────
@@ -935,6 +937,29 @@ function TicTacToe({
     const fromPeer = peers.find((p) => p.user_id === pendingInvite.fromId);
     if (!fromPeer) return;
     pendingConsumed.current = true;
+    if (pendingInvite.openOnly) {
+      // Already accepted — jump into match; prefer session, else empty board + replay.
+      const s = getTttSession();
+      setMode("lan");
+      setOpponent(fromPeer);
+      setMatchId(pendingInvite.matchId);
+      if (s && s.matchId === pendingInvite.matchId) {
+        setMyRole(s.myRole);
+        setMpPhase(s.mpPhase === "idle" ? "playing" : s.mpPhase);
+        setState(s.state);
+        setSeq(s.seq);
+        setMpError(s.mpError);
+      } else {
+        setMyRole("O");
+        setMpPhase("playing");
+        setState(newTttState());
+        setSeq(0);
+      }
+      restored.current = true;
+      replayed.current = false;
+      onPendingConsumed?.();
+      return;
+    }
     setOpponent(fromPeer);
     setMatchId(pendingInvite.matchId);
     setMyRole("O");
@@ -1339,6 +1364,31 @@ function RockPaperScissors({
     const fromPeer = peers.find((p) => p.user_id === pendingInvite.fromId);
     if (!fromPeer) return;
     pendingConsumed.current = true;
+    if (pendingInvite.openOnly) {
+      const s = getRpsSession();
+      const fmt = (pendingInvite.format || s?.format || 3) as MatchFormat;
+      setFormat(fmt);
+      setOpponent(fromPeer);
+      setMatchId(pendingInvite.matchId);
+      setMode("lan");
+      if (s && s.matchId === pendingInvite.matchId) {
+        setMpPhase(s.mpPhase === "idle" ? "playing" : s.mpPhase);
+        setState(s.state);
+        setMyChoice(s.myChoice);
+        setTheyCommitted(s.theyCommitted);
+        setTheirReveal(s.theirReveal);
+        setMpError(s.mpError);
+      } else {
+        setMpPhase("playing");
+        setState(newRpsState(fmt));
+        setMyChoice(null);
+        setTheyCommitted(false);
+        setTheirReveal(null);
+      }
+      restored.current = true;
+      onPendingConsumed?.();
+      return;
+    }
     const fmt = (pendingInvite.format || 3) as MatchFormat;
     setFormat(fmt);
     setOpponent(fromPeer);
@@ -1855,6 +1905,30 @@ function DotsAndBoxes({
     const fromPeer = peers.find((p) => p.user_id === pendingInvite.fromId);
     if (!fromPeer) return;
     pendingConsumed.current = true;
+    if (pendingInvite.openOnly) {
+      const s = getDabSession();
+      const rows = pendingInvite.rows || s?.rows || 4;
+      const cols = pendingInvite.cols || s?.cols || 4;
+      setOpponent(fromPeer);
+      setMatchId(pendingInvite.matchId);
+      setMode("lan");
+      if (s && s.matchId === pendingInvite.matchId) {
+        setMyPlayer(s.myPlayer);
+        setMpPhase(s.mpPhase === "idle" ? "playing" : s.mpPhase);
+        setState(s.state);
+        setSeq(s.seq);
+        setMpError(s.mpError);
+      } else {
+        setMyPlayer("B");
+        setMpPhase("playing");
+        setState(newDabState(rows, cols));
+        setSeq(0);
+      }
+      restored.current = true;
+      replayed.current = false;
+      onPendingConsumed?.();
+      return;
+    }
     const rows = pendingInvite.rows || 4;
     const cols = pendingInvite.cols || 4;
     setOpponent(fromPeer);

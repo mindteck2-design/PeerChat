@@ -3,7 +3,7 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0..\..\app"
 set PATH=%USERPROFILE%\.cargo\bin;%PATH%
 
-set APPVER=0.4.1
+set APPVER=0.4.2
 for /f "usebackq tokens=2 delims=:," %%V in (`findstr /C:"\"version\"" package.json`) do (
   set APPVER=%%~V
   set APPVER=!APPVER: =!
@@ -24,8 +24,16 @@ call npm run tauri:build -- --bundles nsis 2>nul
 
 mkdir ..\dist\windows 2>nul
 taskkill /IM PeerChat.exe /F >nul 2>&1
+taskkill /IM peerchat.exe /F >nul 2>&1
 taskkill /IM lanmsg.exe /F >nul 2>&1
-copy /Y src-tauri\target\release\lanmsg.exe ..\dist\windows\PeerChat.exe
+if exist "src-tauri\target\release\peerchat.exe" (
+  copy /Y src-tauri\target\release\peerchat.exe ..\dist\windows\PeerChat.exe
+) else if exist "src-tauri\target\release\lanmsg.exe" (
+  copy /Y src-tauri\target\release\lanmsg.exe ..\dist\windows\PeerChat.exe
+) else (
+  echo ERROR: peerchat.exe not found under src-tauri\target\release\
+  exit /b 1
+)
 if errorlevel 1 (
   echo ERROR: Could not copy PeerChat.exe — close PeerChat and rebuild.
   exit /b 1
@@ -43,7 +51,10 @@ if errorlevel 1 (
 > "!STAGE!\VERSION.txt" echo !APPVER!
 copy /Y ..\packaging\client\Install-PeerChat.ps1 "!STAGE!\" >nul
 copy /Y ..\packaging\client\Install-PeerChat.bat "!STAGE!\" >nul
+copy /Y ..\packaging\client\Force-Uninstall-PeerChat.ps1 "!STAGE!\" >nul
 copy /Y ..\packaging\client\SETUP_README.txt "!STAGE!\README.txt" >nul
+if exist "src-tauri\icons\peerchat-nsis.ico" copy /Y "src-tauri\icons\peerchat-nsis.ico" "!STAGE!\PeerChat.ico" >nul
+if exist "src-tauri\icons\icon.ico" if not exist "!STAGE!\PeerChat.ico" copy /Y "src-tauri\icons\icon.ico" "!STAGE!\PeerChat.ico" >nul
 
 for %%F in (src-tauri\target\release\bundle\nsis\*.exe) do (
   copy /Y "%%F" "..\dist\windows\PeerChat_!APPVER!_x64-setup.exe" >nul

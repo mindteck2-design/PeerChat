@@ -1,45 +1,64 @@
-# PeerTalk (P2P)
+# PeerChat
 
-Desktop messenger for the LAN — **no central server**. Each PC runs the Tauri app (**PeerTalk**), stores data in **local SQLite**, discovers peers over **UDP**, and delivers **E2E-encrypted** messages/files directly. If a peer is offline, ciphertext stays in the **sender outbox** until they return.
+LAN peer-to-peer messenger. No central server — each PC runs the app, discovers peers on the network, and sends end-to-end encrypted chats and files directly.
 
-Stable V1 identifiers remain `com.lanmsg.app` / `lanmsg.sqlite` so existing installs keep working.
+## Requirements
 
-```
-D:\LanMsg\
-  app\                 # Tauri 2 + React + MUI client (the product)
-  archive\server\      # Old Go+Postgres design (not required)
-  packaging\client\    # Win/Linux client installers
-  DEPLOY.md
-  SECURITY.md
-```
+- **Windows 10/11** with [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (usually already installed)
+- Same LAN (or VPN) as the people you chat with
+- Firewall: allow **UDP 41234** (discovery) and **TCP 9876** (or the listen port you choose)
 
-**Remote:** https://github.com/mindteck2-design/LanMsg.git
+## Install (end users)
 
-## How it works
+1. Get a `PeerChat-Setup-<version>` folder (or zip) from your team.
+2. Run `Install-PeerChat.bat` (no admin needed).
+3. Open PeerChat from the Start Menu or Desktop shortcut.
+4. Enter a display name and start.
+5. On **People**, refresh, then **Accept** each peer’s fingerprint the first time you talk.
 
-1. Install/run LanMsg on each PC; create a **local profile** (display name + listen port).
-2. Peers announce on UDP **41234**; HTTPS peer API on TCP **9876** (configurable).
-3. First chat with a peer: **TOFU** — accept their TLS fingerprint.
-4. DMs/groups/files use the same E2E crypto as before; staging files live on the **sender** until ACKs.
+Updates: run `Install-PeerChat.bat` again from a newer setup folder. Chat history is kept.
 
-## Limits
+Uninstall: Start Menu → PeerChat → Uninstall PeerChat  
+(or `Force-Uninstall-PeerChat.ps1` if uninstall is stuck)
 
-- No delivery if the **sender** PC is offline (outbox is local).
-- No global directory — only peers discovered on the current network.
-- New device = new keys unless you add a backup feature later.
-- Firewall must allow UDP 41234 and each peer’s TCP listen port.
+Data lives in `%APPDATA%\com.peerchat.app` and is not removed by uninstall.
 
-## Build (laptop / open network)
+## Develop / build
+
+Needs **Node 20+**, **Rust stable** (MSVC toolchain on Windows), and WebView2.
 
 ```bash
 cd app
 npm install
-npm run tauri:dev      # development
-npm run tauri:build    # NSIS/MSI/deb under src-tauri/target/release/bundle/
+npm run tauri:dev      # hot reload
+npm run tauri:build    # release binary + optional NSIS under src-tauri/target/release/
 ```
 
-Requires Node 20+, Rust stable (MSVC on Windows), WebView2.
+### Windows install pack
 
-## Deploy notes
+```bash
+cd packaging/client
+cmd //c build_windows.bat
+```
 
-See [DEPLOY.md](DEPLOY.md). Postgres is **not** used.
+Output:
+
+- `dist/windows/PeerChat.exe` — portable
+- `dist/windows/PeerChat-Setup-<version>/` — share this folder; recipients run `Install-PeerChat.bat`
+
+### Linux `.deb`
+
+Build on Linux or WSL (not from Windows MSVC):
+
+```bash
+packaging/client/build_linux.sh
+sudo apt install ./dist/linux/peerchat_*.deb
+```
+
+## Layout
+
+```
+app/                 Tauri + React client
+packaging/client/    Windows/Linux install scripts
+dist/                Build output (generated)
+```

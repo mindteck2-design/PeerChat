@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { APP_VERSION_FALLBACK, appVersion } from "./version";
 import {
   Alert,
@@ -8,6 +8,7 @@ import {
   Avatar,
   Box,
   Button,
+  Checkbox,
   Chip,
   Dialog,
   DialogActions,
@@ -19,6 +20,7 @@ import {
   IconButton,
   InputAdornment,
   List,
+  ListItemAvatar,
   ListItemButton,
   ListItemIcon,
   ListItemText,
@@ -26,8 +28,11 @@ import {
   MenuItem,
   Paper,
   Popover,
+  Snackbar,
   Stack,
   Switch,
+  Tab,
+  Tabs,
   TextField,
   Toolbar,
   Tooltip,
@@ -51,6 +56,8 @@ import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFileRounded";
 import DownloadIcon from "@mui/icons-material/DownloadRounded";
 import GroupIcon from "@mui/icons-material/GroupRounded";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemoveRounded";
+import PersonOffIcon from "@mui/icons-material/PersonOffRounded";
+import BlockIcon from "@mui/icons-material/BlockRounded";
 import PeopleAltIcon from "@mui/icons-material/PeopleAltRounded";
 import DoneIcon from "@mui/icons-material/DoneRounded";
 import DoneAllIcon from "@mui/icons-material/DoneAllRounded";
@@ -72,12 +79,14 @@ import VolumeOffIcon from "@mui/icons-material/VolumeOffRounded";
 import SearchIcon from "@mui/icons-material/SearchRounded";
 import DriveFileRenameOutlineIcon from "@mui/icons-material/DriveFileRenameOutlineRounded";
 import SendIcon from "@mui/icons-material/SendRounded";
+import LogoutIcon from "@mui/icons-material/LogoutRounded";
+import PersonAddAltIcon from "@mui/icons-material/PersonAddAltRounded";
+import VisibilityIcon from "@mui/icons-material/VisibilityRounded";
 
 import {
   isPermissionGranted,
   onAction,
   requestPermission,
-  sendNotification,
 } from "@tauri-apps/plugin-notification";
 import {
   peerApi,
@@ -120,13 +129,17 @@ import {
   AnnounceDialog,
   BundleDialog,
   HelpDialog,
+  LinkifiedText,
+  openExternalLink,
   PollDialog,
   SavedPanel,
   SearchDialog,
   SnippetDialog,
   TransfersPanel,
+  URL_RE,
   type BundleItem,
 } from "./panels";
+import CampaignIcon from "@mui/icons-material/CampaignRounded";
 import type { SavedItem, ScanResult, TransferLog } from "./peer";
 import { ThemeMode } from "./theme";
 import { FEATURE_GAMES } from "./features";
@@ -267,8 +280,12 @@ function formatBytes(n: number) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function extOfName(name: string) {
+  return name.split(".").pop()?.toLowerCase() || "";
+}
+
 function mimeForName(name: string) {
-  const ext = name.split(".").pop()?.toLowerCase();
+  const ext = extOfName(name);
   const types: Record<string, string> = {
     png: "image/png",
     jpg: "image/jpeg",
@@ -276,17 +293,41 @@ function mimeForName(name: string) {
     gif: "image/gif",
     webp: "image/webp",
     svg: "image/svg+xml",
+    bmp: "image/bmp",
+    ico: "image/x-icon",
     pdf: "application/pdf",
     mp4: "video/mp4",
     webm: "video/webm",
+    mov: "video/quicktime",
+    mkv: "video/x-matroska",
     mp3: "audio/mpeg",
     wav: "audio/wav",
+    ogg: "audio/ogg",
+    m4a: "audio/mp4",
     txt: "text/plain",
     csv: "text/csv",
     json: "application/json",
     md: "text/markdown",
+    log: "text/plain",
+    html: "text/html",
+    htm: "text/html",
+    xml: "text/xml",
   };
   return (ext && types[ext]) || "application/octet-stream";
+}
+
+/** True when we can show an in-app preview (not zip/exe/archives/etc.). */
+function canPreviewFileName(name: string) {
+  const ext = extOfName(name);
+  if (!ext) return false;
+  const previewable = new Set([
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico",
+    "pdf",
+    "mp4", "webm", "mov", "mkv",
+    "mp3", "wav", "ogg", "m4a",
+    "txt", "csv", "json", "md", "log", "html", "htm", "xml",
+  ]);
+  return previewable.has(ext);
 }
 
 function lastSeenLabel(iso?: string | null) {
@@ -309,6 +350,18 @@ function truncate(s: string, n: number) {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
 
+function canMutateMessageToday(createdAt: string | null | undefined) {
+  if (!createdAt) return false;
+  const d = new Date(createdAt);
+  if (Number.isNaN(d.getTime())) return false;
+  const now = new Date();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
+}
+
 type FilePreview = {
   fileId: string;
   uploaderId: string;
@@ -325,8 +378,13 @@ type StagedFile = {
   source: File | { path: string; name: string; size: number };
   name: string;
   size: number;
+  /** True only for disk folders (ZIP on send). Never infer from display name. */
+  isDir: boolean;
   previewUrl: string | null;
 };
+
+const BUNDLE_MAX_FILES = 5000;
+const BUNDLE_MAX_BYTES = 5 * 1024 * 1024 * 1024;
 
 type OutgoingFileState = {
   conversationId: string;
@@ -342,6 +400,8 @@ type IncomingFileState = {
   name: string;
   done: number;
   total: number;
+  /** Progress chip label — "Downloading…" for saves, "Opening…" only for in-app preview. */
+  label?: string;
 };
 
 export default function App() {
@@ -429,6 +489,7 @@ function SetupScreen(props: {
   onReady: (p: Profile) => void;
 }) {
   const [name, setName] = useState("");
+  const [team, setTeam] = useState("");
   const [busy, setBusy] = useState(false);
   const pubs = exportPublic(props.identity);
 
@@ -446,6 +507,7 @@ function SetupScreen(props: {
         userId: newUserId(),
         x25519Public: pubs.x25519_public,
         ed25519Public: pubs.ed25519_public,
+        team: team.trim(),
       });
       props.onReady(p);
     } catch (e: any) {
@@ -497,6 +559,20 @@ function SetupScreen(props: {
                 }
               }}
             />
+            <TextField
+              label="Team"
+              fullWidth
+              value={team}
+              onChange={(e) => setTeam(e.target.value)}
+              placeholder="HMIS"
+              helperText="Your project or team — e.g. HMIS, Shakti"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  create();
+                }
+              }}
+            />
             {props.error && <Alert severity="error">{props.error}</Alert>}
             <Button variant="contained" size="large" disabled={busy} onClick={create}>
               {busy ? "Starting…" : "Start PeerChat"}
@@ -514,12 +590,22 @@ function RichCard({
   votes,
   plain,
   onVote,
+  fileId,
+  fileName,
+  mine,
+  onOpenFile,
+  onDownloadFile,
 }: {
   kind: string;
   raw: string;
   votes: Message[];
   plain: Record<string, string>;
   onVote: (option: string) => void;
+  fileId?: string | null;
+  fileName?: string;
+  mine?: boolean;
+  onOpenFile?: (fileId: string) => void;
+  onDownloadFile?: (fileId: string) => void;
 }) {
   let parsed: any = null;
   try {
@@ -559,17 +645,49 @@ function RichCard({
     return (
       <Box sx={{ pr: 1 }}>
         <Typography variant="overline" color="primary">{title}</Typography>
-        <Typography component="pre" sx={{ m: 0, fontFamily: "ui-monospace, monospace", fontSize: 12, whiteSpace: "pre-wrap" }}>{body}</Typography>
+        <Typography component="pre" sx={{ m: 0, fontFamily: "ui-monospace, monospace", fontSize: 12, whiteSpace: "pre-wrap" }}>
+          <LinkifiedText text={body} sx={{ fontFamily: "inherit", fontSize: "inherit" }} />
+        </Typography>
       </Box>
     );
   }
   const title = parsed?.title || "Announcement";
   const body = parsed?.body || raw;
+  const attachedName =
+    fileName ||
+    (typeof parsed?.filename === "string" ? parsed.filename : "") ||
+    "Attachment";
   return (
     <Box sx={{ pr: 1 }}>
       <Typography variant="overline" color="primary">Announcement</Typography>
       <Typography fontWeight={700}>{title}</Typography>
-      <Typography variant="body2" whiteSpace="pre-wrap">{body}</Typography>
+      <LinkifiedText text={body} sx={{ display: "block", fontSize: 14 }} />
+      {fileId && (
+        <Button
+          size="small"
+          startIcon={
+            mine ? (
+              <InsertDriveFileIcon sx={{ fontSize: 16 }} />
+            ) : (
+              <DownloadIcon sx={{ fontSize: 16 }} />
+            )
+          }
+          onClick={() => {
+            if (mine) onOpenFile?.(fileId);
+            else onDownloadFile?.(fileId);
+          }}
+          sx={{
+            mt: 1,
+            textTransform: "none",
+            fontWeight: 700,
+            fontSize: 13,
+            px: 0,
+            justifyContent: "flex-start",
+          }}
+        >
+          {attachedName}
+        </Button>
+      )}
     </Box>
   );
 }
@@ -594,8 +712,12 @@ function ChatScreen({
   const [messages, setMessages] = useState<Message[]>([]);
   const [plain, setPlain] = useState<Record<string, string>>({});
   const [groupKeys, setGroupKeys] = useState<Record<string, Uint8Array>>({});
-  const [tab, setTab] = useState(0);
-  const [nav, setNav] = useState<"people" | "chats" | "transfers" | "games" | "saved">("chats");
+  // tab 1 = chats list (must match default nav "chats")
+  const [tab, setTab] = useState(1);
+  const [nav, setNav] = useState<"people" | "chats" | "transfers" | "games" | "saved" | "announcements">("chats");
+  const [announceBoards, setAnnounceBoards] = useState<Conversation[]>([]);
+  const [announceCompose, setAnnounceCompose] = useState({ title: "", body: "" });
+  const [announceBusy, setAnnounceBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [transfers, setTransfers] = useState<TransferLog[]>([]);
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
@@ -630,6 +752,15 @@ function ChatScreen({
   const [renameDraft, setRenameDraft] = useState("");
 
   const [status, setStatus] = useState("");
+  const statusClearRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!status) return;
+    if (statusClearRef.current) window.clearTimeout(statusClearRef.current);
+    statusClearRef.current = window.setTimeout(() => setStatus(""), 8000);
+    return () => {
+      if (statusClearRef.current) window.clearTimeout(statusClearRef.current);
+    };
+  }, [status]);
   const [pinOpen, setPinOpen] = useState<Peer | null>(null);
   /** Inbound first message from someone you have not trusted/pinned yet. */
   const [firstContact, setFirstContact] = useState<{
@@ -650,6 +781,10 @@ function ChatScreen({
   const [msgMenu, setMsgMenu] = useState<{ anchor: HTMLElement; message: Message } | null>(null);
   const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
   const [forwardPick, setForwardPick] = useState<string[]>([]);
+  const [forwardQuery, setForwardQuery] = useState("");
+  const [clearChatTarget, setClearChatTarget] = useState<Conversation | null>(null);
+  const [clearIncludeFiles, setClearIncludeFiles] = useState(false);
+  const [clearBusy, setClearBusy] = useState(false);
 
   const [fileNames, setFileNames] = useState<Record<string, string>>({});
   const [pendingShareFiles, setPendingShareFiles] = useState<string[]>([]);
@@ -663,7 +798,14 @@ function ChatScreen({
   } | null>(null);
   const [dragOverChat, setDragOverChat] = useState(false);
   const stickToBottomRef = useRef(true);
+  const ignoreScrollRef = useRef(false);
+  const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
+  /** Hide scroller until first bottom-pin so chat never flashes at the top. */
+  const [chatPaintReady, setChatPaintReady] = useState(true);
+  const groupUnlockWarnedRef = useRef<string | null>(null);
   const [highlightMsgId, setHighlightMsgId] = useState<string | null>(null);
+  const [chatInfoOpen, setChatInfoOpen] = useState(false);
+  const [chatInfoTab, setChatInfoTab] = useState(0);
   const convsRef = useRef(convs);
   convsRef.current = convs;
 
@@ -696,7 +838,7 @@ function ChatScreen({
   }, [text]);
 
   const others = useMemo(
-    () => peers.filter((p) => p.user_id !== profile.id),
+    () => peers.filter((p) => p.user_id !== profile.id && !p.blocked),
     [peers, profile.id]
   );
 
@@ -720,10 +862,13 @@ function ChatScreen({
   const inGroup =
     active?.kind !== "group" || !membersLoaded || members.some((m) => m.user_id === profile.id);
 
+  const isAnnounceBoard = !!active && (active.id === "board:org" || active.id.startsWith("board:team:"));
+
   const canAddMembers =
     !!active &&
     active.kind === "group" &&
     inGroup &&
+    !isAnnounceBoard &&
     (isAdmin || active.members_can_add !== false);
 
   const GROUP_KEY_HIST_PREFIX = "group_key_history:";
@@ -790,21 +935,58 @@ function ChatScreen({
     throw new Error("unable to decrypt");
   }
 
+  async function persistMyGroupWrap(convId: string, gk: Uint8Array) {
+    const pubs = { [profile.id]: exportPublic(identity).x25519_public };
+    const wraps = wrapGroupKeyForMembers(gk, identity, pubs);
+    const mine = wraps[profile.id];
+    if (mine) await peerApi.setMyGroupKey(convId, mine);
+  }
+
   async function syncGroupKeyIfRotated(convId: string) {
     const wrap = await peerApi.getGroupKey(convId);
-    if (!wrap) return;
-    const gk = unwrapGroupKey(wrap, identity);
     const current = groupKeysRef.current[convId];
-    if (!current) {
+    if (!wrap) {
+      // Solo / unrepaired group: keep working key in memory and save a wrap for next launch.
+      if (current) {
+        try {
+          await persistMyGroupWrap(convId, current);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      return;
+    }
+    try {
+      const gk = unwrapGroupKey(wrap, identity);
+      if (!current) {
+        const hist = await loadPersistedKeyHistory(convId);
+        groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
+        setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
+        groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
+        setGroupKeys((g) => ({ ...g, [convId]: gk }));
+        return;
+      }
+      if (!groupKeysEqual(current, gk)) {
+        await adoptGroupKey(convId, gk);
+      }
+    } catch (err) {
+      // Wrap present but not for this identity — keep in-memory key, or mint for solo use.
+      if (current) {
+        try {
+          await persistMyGroupWrap(convId, current);
+        } catch (e) {
+          console.error(e);
+        }
+        return;
+      }
+      const gk = createGroupKey();
+      await persistMyGroupWrap(convId, gk);
       const hist = await loadPersistedKeyHistory(convId);
       groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
       setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
       groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
       setGroupKeys((g) => ({ ...g, [convId]: gk }));
-      return;
-    }
-    if (!groupKeysEqual(current, gk)) {
-      await adoptGroupKey(convId, gk);
+      console.warn("Repaired group key after unwrap failure", err);
     }
   }
 
@@ -812,8 +994,21 @@ function ChatScreen({
     const existing = groupKeysRef.current[convId];
     if (existing) return existing;
     const wrap = await peerApi.getGroupKey(convId);
-    if (!wrap) throw new Error("Missing group key");
-    const gk = unwrapGroupKey(wrap, identity);
+    if (wrap) {
+      try {
+        const gk = unwrapGroupKey(wrap, identity);
+        const hist = await loadPersistedKeyHistory(convId);
+        groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
+        setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
+        groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
+        setGroupKeys((g) => ({ ...g, [convId]: gk }));
+        return gk;
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    const gk = createGroupKey();
+    await persistMyGroupWrap(convId, gk);
     const hist = await loadPersistedKeyHistory(convId);
     groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
     setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
@@ -1011,7 +1206,7 @@ function ChatScreen({
           try {
             const peerList = await peerApi.listPeers();
             const peer = peerList.find((x) => x.user_id === fromId);
-            if (peer && !peer.pinned) {
+            if (peer && !peer.pinned && !peer.blocked) {
               setNav("chats");
               setTab(1);
               setFirstContact({ peer, conversationId: cid });
@@ -1020,39 +1215,7 @@ function ChatScreen({
             /* ignore */
           }
         }
-
-        // Native OS toast (not Web Notification — that flash-prompted on WebView2).
-        try {
-          const enabled = await peerApi.getNotificationsEnabled();
-          if (!enabled) return;
-          const muted = await peerApi.conversationIsMuted(cid).catch(() => false);
-          if (muted) return;
-          const win = getCurrentWindow();
-          const visible = await win.isVisible().catch(() => true);
-          const focused = await win.isFocused().catch(() => true);
-          const viewing = activeRef.current?.id === cid;
-          // Always toast when the window is hidden (tray / background).
-          if (visible && focused && viewing) return;
-          let granted = await isPermissionGranted();
-          if (!granted) {
-            granted = (await requestPermission()) === "granted";
-          }
-          if (!granted) return;
-          const title = (p.from_name || "PeerChat").trim() || "PeerChat";
-          const body =
-            kind === "file_notice"
-              ? "Sent a file"
-              : kind === "system" || kind === "group_event"
-                ? "Group update"
-                : "New message";
-          sendNotification({
-            title,
-            body,
-            extra: cid ? { conversation_id: cid } : undefined,
-          });
-        } catch (err) {
-          console.error("notify", err);
-        }
+        // OS toasts are owned by Rust (desktop_notify_if_needed) to avoid duplicates.
       })();
     }).then((fn) => {
       unlisten = fn;
@@ -1060,7 +1223,7 @@ function ChatScreen({
     return () => unlisten?.();
   }, [profile.id, identity]);
 
-  // Toast click (JS-sent notifications) + Rust tray toasts via notification-open event.
+  // Toast click: Rust tray toasts + onAction when a listener is registered.
   useEffect(() => {
     let unAction: { unregister: () => Promise<void> } | undefined;
     let unListen: (() => void) | undefined;
@@ -1126,9 +1289,14 @@ function ChatScreen({
   }, [profile.id]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active) {
+      setChatPaintReady(true);
+      return;
+    }
     const conv = active;
     let cancel = false;
+    stickToBottomRef.current = true;
+    setChatPaintReady(false);
     setMessages([]);
     setPlain({});
     setMembers([]);
@@ -1142,13 +1310,21 @@ function ChatScreen({
     setText(draftsRef.current[conv.id] ?? "");
     clearStagedFiles();
 
-    async function pull() {
+    async function pull(isInitial = false) {
       if (conv.kind === "group") {
         try {
           if (!cancel) await syncGroupKeyIfRotated(conv.id);
         } catch (err) {
           console.error(err);
-          if (!cancel) setStatus("Couldn't unlock this group");
+          if (
+            !cancel &&
+            isInitial &&
+            !groupKeysRef.current[conv.id] &&
+            groupUnlockWarnedRef.current !== conv.id
+          ) {
+            groupUnlockWarnedRef.current = conv.id;
+            setStatus("Couldn't unlock this group");
+          }
         }
       }
       if (conv.kind === "group") {
@@ -1163,14 +1339,44 @@ function ChatScreen({
         }
       }
       const msgs = await peerApi.listMessages(conv.id);
-      if (!cancel) setMessages(msgs);
+      if (cancel) return;
+      // Avoid churning React state (and scroll) when the poll returns the same list.
+      setMessages((prev) => {
+        if (
+          prev.length === msgs.length &&
+          prev.every(
+            (m, i) =>
+              m.id === msgs[i].id &&
+              m.kind === msgs[i].kind &&
+              m.delivered === msgs[i].delivered &&
+              m.pinned === msgs[i].pinned &&
+              (m.edited_at || "") === (msgs[i].edited_at || "")
+          )
+        ) {
+          return prev;
+        }
+        return msgs;
+      });
+      if (isInitial) {
+        // After messages commit, pin once then reveal — no top→bottom flash.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (cancel) return;
+            if (stickToBottomRef.current && !highlightMsgId) scrollChatToBottom("auto");
+            setChatPaintReady(true);
+          });
+        });
+      }
     }
 
-    pull().catch(console.error);
-    const t = setInterval(() => pull().catch(() => {}), 750);
+    pull(true).catch((err) => {
+      console.error(err);
+      if (!cancel) setChatPaintReady(true);
+    });
+    const t = setInterval(() => pull(false).catch(() => {}), 750);
     let unlisten: (() => void) | undefined;
     listen("inbox-updated", () => {
-      pull().catch(() => {});
+      pull(false).catch(() => {});
     }).then((fn) => {
       if (cancel) fn();
       else unlisten = fn;
@@ -1183,29 +1389,45 @@ function ChatScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.id]);
 
-  useEffect(() => {
-    stickToBottomRef.current = true;
-  }, [active?.id]);
-
-  useEffect(() => {
-    if (!stickToBottomRef.current || highlightMsgId) return;
+  function scrollChatToBottom(_behavior: ScrollBehavior = "auto") {
     const el = scroller.current;
     if (!el) return;
-    const snap = () => {
-      el.scrollTop = el.scrollHeight;
-    };
-    snap();
-    requestAnimationFrame(snap);
-    const t = window.setTimeout(snap, 80);
-    return () => window.clearTimeout(t);
+    // Prevent onScroll from treating a programmatic snap as "user scrolled up".
+    ignoreScrollRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    stickToBottomRef.current = true;
+    window.setTimeout(() => {
+      ignoreScrollRef.current = false;
+    }, 50);
+  }
+
+  // Keep pinned before paint when content changes (no visible jump while already revealed).
+  useLayoutEffect(() => {
+    if (!active?.id || highlightMsgId) return;
+    if (!stickToBottomRef.current) return;
+    scrollChatToBottom("auto");
   }, [
-    messages.length,
+    messages,
     active?.id,
     outgoingFile?.done,
     incomingFile?.done,
     Object.keys(plain).length,
     highlightMsgId,
   ]);
+
+  // Keep pinned to bottom when bubbles grow (decrypt / images) without yanking
+  // the user if they scrolled up.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const inner = el.firstElementChild;
+    const ro = new ResizeObserver(() => {
+      if (!stickToBottomRef.current || highlightMsgId) return;
+      scrollChatToBottom("auto");
+    });
+    if (inner) ro.observe(inner);
+    return () => ro.disconnect();
+  }, [active?.id, highlightMsgId, messages.length]);
 
   // WhatsApp-style jump + flash when opening a saved message.
   useEffect(() => {
@@ -1270,7 +1492,13 @@ function ChatScreen({
     (async () => {
       const next: Record<string, string> = {};
       for (const m of messages) {
-        if (m.kind !== "file_notice" || !m.file_id || fileNames[m.file_id]) continue;
+        if (
+          (m.kind !== "file_notice" && m.kind !== "announcement") ||
+          !m.file_id ||
+          fileNames[m.file_id]
+        ) {
+          continue;
+        }
         try {
           const file = await peerApi.getFile(m.file_id);
           if (!file?.wrapped_keys || !file.filename_nonce || !file.enc_filename) continue;
@@ -1369,6 +1597,13 @@ function ChatScreen({
   }
 
   async function openDm(peer: Peer) {
+    if (peer.blocked) {
+      const c = await peerApi.openDm(peer.user_id);
+      selectConversation(c);
+      setTab(1);
+      await refresh();
+      return;
+    }
     if (!peer.pinned && peer.tls_fingerprint) {
       setPinOpen(peer);
       return;
@@ -1379,12 +1614,23 @@ function ChatScreen({
     await refresh();
   }
 
+  async function toggleBlockPeer(peerId: string, blocked: boolean) {
+    try {
+      await peerApi.setPeerBlocked(peerId, blocked);
+      await refresh();
+      setStatus(blocked ? "Blocked — they can no longer DM you" : "Unblocked");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
   function stageFiles(files: File[]) {
     const next: StagedFile[] = files.map((file) => ({
       id: `${file.name}-${file.size}-${Math.random().toString(16).slice(2)}`,
       source: file,
       name: file.name,
       size: file.size,
+      isDir: false,
       previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
     }));
     setStagedFiles((prev) => [...prev, ...next]);
@@ -1396,12 +1642,12 @@ function ChatScreen({
       try {
         const meta = await peerApi.localPathMeta(path);
         if (meta.is_dir) {
-          // Folders: pack as ZIP via existing bundle path on send.
           next.push({
             id: `${meta.name}-dir-${Math.random().toString(16).slice(2)}`,
             source: { path: meta.path, name: meta.name, size: meta.size },
-            name: `${meta.name}/ (folder)`,
+            name: `${meta.name}/`,
             size: meta.size,
+            isDir: true,
             previewUrl: null,
           });
         } else {
@@ -1410,6 +1656,7 @@ function ChatScreen({
             source: { path: meta.path, name: meta.name, size: meta.size },
             name: meta.name,
             size: meta.size,
+            isDir: false,
             previewUrl: null,
           });
         }
@@ -1418,6 +1665,32 @@ function ChatScreen({
       }
     }
     if (next.length) setStagedFiles((prev) => [...prev, ...next]);
+  }
+
+  async function packFolderAndSend(folderPath: string, folderName: string) {
+    const entries = await peerApi.listDirectoryFiles(folderPath);
+    if (!entries.length) {
+      setStatus(`Folder empty: ${folderName}`);
+      return;
+    }
+    if (entries.length > BUNDLE_MAX_FILES) {
+      setStatus(
+        `Folder has ${entries.length} files (max ${BUNDLE_MAX_FILES}). Try a smaller folder — large trees like node_modules often exceed this.`
+      );
+      return;
+    }
+    const totalBytes = entries.reduce((sum, e) => sum + (Number(e.size) || 0), 0);
+    if (totalBytes > BUNDLE_MAX_BYTES) {
+      setStatus(
+        `Folder is about ${formatBytes(totalBytes)} (max 5 GiB). Choose fewer/smaller files.`
+      );
+      return;
+    }
+    const packed = await peerApi.packBundle(
+      entries.map((e) => ({ abs_path: e.abs_path, rel_path: e.rel_path }))
+    );
+    await sendFile({ path: packed.path, name: packed.name, size: packed.size });
+    await peerApi.deleteBundleFile(packed.path).catch(() => {});
   }
 
   function removeStagedFile(id: string) {
@@ -1487,6 +1760,10 @@ function ChatScreen({
 
   function startEdit(message: Message) {
     if (message.kind !== "text" || message.sender_id !== profile.id) return;
+    if (!canMutateMessageToday(message.created_at)) {
+      setMsgMenu(null);
+      return;
+    }
     setEditingMessage(message);
     setReplyTo(null);
     setText(plain[message.id] || "");
@@ -1515,6 +1792,7 @@ function ChatScreen({
     if (message.kind !== "text" && message.kind !== "forwarded") return;
     setForwardMessage(message);
     setForwardPick([]);
+    setForwardQuery("");
     setMsgMenu(null);
   }
 
@@ -1578,6 +1856,34 @@ function ChatScreen({
     }
   }
 
+  async function confirmClearChatMessages() {
+    if (!clearChatTarget) return;
+    setClearBusy(true);
+    try {
+      await peerApi.clearConversationMessages(
+        clearChatTarget.id,
+        clearIncludeFiles
+      );
+      if (active?.id === clearChatTarget.id) {
+        setMessages([]);
+        setPlain({});
+        setFileNames({});
+      }
+      setClearChatTarget(null);
+      setClearIncludeFiles(false);
+      setStatus(
+        clearIncludeFiles
+          ? "Deleted messages and files in this chat"
+          : "Deleted messages in this chat"
+      );
+      await refresh();
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    } finally {
+      setClearBusy(false);
+    }
+  }
+
   async function toggleMuteChat(conv: Conversation) {
     try {
       await peerApi.setConversationMuted(conv.id, !conv.muted);
@@ -1585,6 +1891,12 @@ function ChatScreen({
     } catch (err: any) {
       setStatus(err?.message || String(err));
     }
+  }
+
+  async function blockDmFromConv(conv: Conversation) {
+    if (conv.kind !== "dm" || !conv.peer_id) return;
+    const peer = peers.find((p) => p.user_id === conv.peer_id);
+    await toggleBlockPeer(conv.peer_id, !peer?.blocked);
   }
 
   async function sendGroupSystemNotice(
@@ -1602,13 +1914,14 @@ function ChatScreen({
     );
   }
 
-  async function sendEncrypted(kind: string, body: string, replyToId?: string) {
+  async function sendEncrypted(
+    kind: string,
+    body: string,
+    replyToId?: string,
+    extra?: { file_id?: string | null }
+  ) {
     if (!active || !body.trim()) return;
     const peer = active.kind === "dm" ? peers.find((p) => p.user_id === active.peer_id) : undefined;
-    if (peer?.identity_changed) {
-      setStatus("This peer's certificate changed. Review it in People before sending.");
-      return;
-    }
     let message: any;
     if (active.kind === "dm" && active.peer_id) {
       if (!peer) {
@@ -1620,11 +1933,23 @@ function ChatScreen({
         [profile.id]: exportPublic(identity).x25519_public,
       };
       const enc = await encryptMessage(body.trim(), active.id, profile.id, identity, pubs);
-      message = { kind, sender_id: profile.id, ...enc, reply_to: replyToId ?? null };
+      message = {
+        kind,
+        sender_id: profile.id,
+        ...enc,
+        reply_to: replyToId ?? null,
+        file_id: extra?.file_id ?? null,
+      };
     } else {
       const gk = await ensureGroupKey(active.id);
       const enc = await encryptWithGroupKey(body.trim(), active.id, profile.id, gk, identity);
-      message = { kind, sender_id: profile.id, ...enc, reply_to: replyToId ?? null };
+      message = {
+        kind,
+        sender_id: profile.id,
+        ...enc,
+        reply_to: replyToId ?? null,
+        file_id: extra?.file_id ?? null,
+      };
     }
     const memberIds = await resolveMemberIds(active);
     await peerApi.sendMessage(
@@ -1719,18 +2044,9 @@ function ChatScreen({
     for (const sf of files) {
       if (queueAbortRef.current) break;
       const src = sf.source;
-      if (!(src instanceof File) && sf.name.includes("(folder)")) {
+      if (sf.isDir && !(src instanceof File)) {
         try {
-          const entries = await peerApi.listDirectoryFiles(src.path);
-          if (!entries.length) {
-            setStatus(`Folder empty: ${src.name}`);
-            continue;
-          }
-          const packed = await peerApi.packBundle(
-            entries.map((e) => ({ abs_path: e.abs_path, rel_path: e.rel_path }))
-          );
-          await sendFile({ path: packed.path, name: packed.name, size: packed.size });
-          await peerApi.deleteBundleFile(packed.path).catch(() => {});
+          await packFolderAndSend(src.path, src.name);
         } catch (err: any) {
           setStatus(err?.message || String(err));
         }
@@ -1807,6 +2123,7 @@ function ChatScreen({
 
   async function deleteForEveryone(message: Message) {
     setMsgMenu(null);
+    if (!canMutateMessageToday(message.created_at)) return;
     try {
       await peerApi.deleteMessageForEveryone(message.id);
       if (active) setMessages(await peerApi.listMessages(active.id));
@@ -1858,17 +2175,23 @@ function ChatScreen({
       const slice = source.slice(offset, offset + CHUNK_SIZE);
       return new Uint8Array(await slice.arrayBuffer());
     }
-    const data = await peerApi.readBundleChunk(source.path, offset, CHUNK_SIZE);
-    return fromB64(data);
+    // Prefer general file read — drag-drop paths live outside app bundles/.
+    // Fall back to bundle reader for staged ZIP packs under app data.
+    try {
+      const data = await peerApi.readFileChunk(source.path, offset, CHUNK_SIZE);
+      return fromB64(data);
+    } catch {
+      const data = await peerApi.readBundleChunk(source.path, offset, CHUNK_SIZE);
+      return fromB64(data);
+    }
   }
 
-  async function sendFile(file: File | { path: string; name: string; size: number }) {
-    if (!active) return;
-    const blocked = peers.find((p) => p.user_id === active.peer_id && p.identity_changed);
-    if (blocked) {
-      setStatus("This peer's certificate changed. Review it in People before sending.");
-      return;
-    }
+  /** Upload encrypted file chunks. When `skipNotice`, no separate file_notice is posted (caller attaches file_id). */
+  async function sendFile(
+    file: File | { path: string; name: string; size: number },
+    opts?: { skipNotice?: boolean }
+  ): Promise<string | undefined> {
+    if (!active) return undefined;
     const name = file instanceof File ? file.name : file.name;
     const size = file instanceof File ? file.size : file.size;
     const conversationId = active.id;
@@ -1894,7 +2217,7 @@ function ChatScreen({
       } catch (err: any) {
         if (String(err?.message || err).includes("dismissed")) {
           setStatus("File not sent (virus scan warning).");
-          return;
+          return undefined;
         }
         // scan infrastructure error — proceed (non-blocking for scanner failures)
       }
@@ -1996,12 +2319,14 @@ function ChatScreen({
       });
       const digest = finishHasher(hasher);
       await peerApi.setFileContentHash(fileId, digest);
-      await peerApi.sendFileNotice(
-        conversationId,
-        fileId,
-        memberIds.filter((id) => id !== profile.id)
-      );
-      setMessages(await peerApi.listMessages(conversationId));
+      if (!opts?.skipNotice) {
+        await peerApi.sendFileNotice(
+          conversationId,
+          fileId,
+          memberIds.filter((id) => id !== profile.id)
+        );
+        setMessages(await peerApi.listMessages(conversationId));
+      }
       const seconds = Math.max(0.1, (Date.now() - startedMs) / 1000);
       await recordTransfer({
         id: transferId,
@@ -2016,7 +2341,10 @@ function ChatScreen({
         peer_label: labelForConversation(conversationId),
         started_at: started,
       });
-      setStatus(`Sent ${name} · verified · ${Math.round(sentBytes / seconds / 1024)} KB/s`);
+      if (!opts?.skipNotice) {
+        setStatus(`Sent ${name} · verified · ${Math.round(sentBytes / seconds / 1024)} KB/s`);
+      }
+      return fileId;
     } catch (err: any) {
       const raw = String(err?.message || err);
       if (raw === "aborted") {
@@ -2054,6 +2382,7 @@ function ChatScreen({
           started_at: started,
         });
       }
+      return undefined;
     } finally {
       setOutgoingFile(null);
       abortSendRef.current = false;
@@ -2081,7 +2410,7 @@ function ChatScreen({
     }
     const totalChunks = Math.max(1, Number(file.chunk_count) || 1);
     const cryptoV = Number(file.file_crypto_v) || 1;
-    setIncomingFile({ fileId, name, done: 0, total: totalChunks });
+    setIncomingFile({ fileId, name, done: 0, total: totalChunks, label: "Opening…" });
     const parts: Uint8Array[] = [];
     for (let i = 0; i < totalChunks; i++) {
       if (abortOpenRef.current) throw new Error("aborted");
@@ -2095,7 +2424,13 @@ function ChatScreen({
         )
       );
       if (i === 0 || i + 1 === totalChunks || (i + 1) % 2 === 0) {
-        setIncomingFile({ fileId, name, done: i + 1, total: totalChunks });
+        setIncomingFile({
+          fileId,
+          name,
+          done: i + 1,
+          total: totalChunks,
+          label: "Opening…",
+        });
         await new Promise((r) => setTimeout(r, 0));
       }
     }
@@ -2117,11 +2452,24 @@ function ChatScreen({
   }
 
   async function previewFile(fileId: string, uploaderId: string) {
+    // Prefer known name so zip/exe never enter the decrypt→"Opening…" path.
+    const known = fileNames[fileId];
+    if (known && !canPreviewFileName(known)) {
+      await downloadFileToDownloads(fileId, uploaderId);
+      return;
+    }
     setPreviewBusy(true);
     setStatus("");
     try {
       const { file, name, data } = await decryptFile(fileId, uploaderId);
       if (abortOpenRef.current) return;
+      if (!canPreviewFileName(name)) {
+        setIncomingFile(null);
+        setPreviewBusy(false);
+        abortOpenRef.current = false;
+        await downloadFileToDownloads(fileId, uploaderId);
+        return;
+      }
       const mime = mimeForName(name);
       const bytes = new Uint8Array(data);
       const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
@@ -2217,7 +2565,13 @@ function ChatScreen({
       const cryptoV = Number(file.file_crypto_v) || 1;
       const progress = await peerApi.beginFileReceive(fileId);
       let next = Number(progress.next_index) || 0;
-      setIncomingFile({ fileId, name, done: next, total: totalChunks });
+      setIncomingFile({
+        fileId,
+        name,
+        done: next,
+        total: totalChunks,
+        label: "Downloading…",
+      });
       await recordTransfer({
         id: transferId,
         filename: name,
@@ -2250,7 +2604,13 @@ function ChatScreen({
         }
         const plain = decryptChunk(key, chunk.nonce, fromB64(chunk.data_b64), cryptoV >= 2 ? i : undefined);
         await peerApi.appendFileReceive(fileId, i, b64(plain));
-        setIncomingFile({ fileId, name, done: i + 1, total: totalChunks });
+        setIncomingFile({
+          fileId,
+          name,
+          done: i + 1,
+          total: totalChunks,
+          label: "Downloading…",
+        });
       }
       await recordTransfer({
         id: transferId,
@@ -2413,6 +2773,120 @@ function ChatScreen({
       await refresh();
     } catch (err: any) {
       setStatus(err?.message || String(err));
+    }
+  }
+
+  async function handleRemoveLeftGroup(conv?: Conversation | null) {
+    const target = conv || active;
+    if (!target || target.kind !== "group") return;
+    if (
+      !window.confirm(
+        "Remove this group from your chat list? Messages and files for this group will be deleted on this computer only."
+      )
+    ) {
+      return;
+    }
+    try {
+      await peerApi.deleteConversationLocal(target.id);
+      setMembersOpen(false);
+      if (active?.id === target.id) setActive(null);
+      await refresh();
+      setStatus("Group removed from your chats");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
+  async function ensureAnnounceBoards() {
+    try {
+      const boards = await peerApi.ensureAnnouncementBoards();
+      setAnnounceBoards(boards);
+      const myTeam = (profile.team || "").trim().toLowerCase();
+      for (const board of boards) {
+        try {
+          const gk = await ensureGroupKey(board.id);
+          const pubs: Record<string, string> = {};
+          for (const p of peers) {
+            if (p.user_id === profile.id) continue;
+            if (board.id === "board:org") {
+              pubs[p.user_id] = p.x25519_public;
+            } else if (
+              myTeam &&
+              (p.team || "").trim().toLowerCase() === myTeam
+            ) {
+              pubs[p.user_id] = p.x25519_public;
+            }
+          }
+          if (Object.keys(pubs).length) {
+            await peerApi.addGroupMembers(
+              board.id,
+              wrapGroupKeyForMembers(gk, identity, pubs)
+            );
+          }
+        } catch (e) {
+          console.error("announce board sync", board.id, e);
+        }
+      }
+      return boards;
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+      return [] as Conversation[];
+    }
+  }
+
+  async function postAnnouncement() {
+    if (!active) return;
+    const title = announceCompose.title.trim();
+    const body = announceCompose.body.trim();
+    const files = [...stagedFiles];
+    if (!title && !body && !files.length) return;
+    if (!title || !body) {
+      if (files.length && (!title || !body)) {
+        setStatus("Add a title and message for the announcement (file attaches to the same post).");
+        return;
+      }
+      return;
+    }
+    setAnnounceBusy(true);
+    try {
+      await ensureGroupKey(active.id);
+      let fileId: string | undefined;
+      let fileLabel: string | undefined;
+      if (files.length) {
+        if (files.length > 1) {
+          setStatus("One file per announcement — using the first attachment.");
+        }
+        const sf = files[0];
+        clearStagedFiles();
+        if (sf.isDir && !(sf.source instanceof File)) {
+          await packFolderAndSend(sf.source.path, sf.name);
+          // folder send posts its own notice; fall back to text-only announcement
+          fileId = undefined;
+        } else {
+          fileId = await sendFile(
+            sf.source instanceof File ? sf.source : sf.source,
+            { skipNotice: true }
+          );
+          fileLabel = sf.name;
+          if (fileId) setFileNames((s) => ({ ...s, [fileId!]: sf.name }));
+        }
+      }
+      await sendEncrypted(
+        "announcement",
+        JSON.stringify({
+          title,
+          body,
+          ...(fileLabel ? { filename: fileLabel } : {}),
+        }),
+        undefined,
+        { file_id: fileId ?? null }
+      );
+      setAnnounceCompose({ title: "", body: "" });
+      setStatus(fileId ? "Announcement posted with attachment" : "Announcement posted");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    } finally {
+      setAnnounceBusy(false);
     }
   }
 
@@ -2662,6 +3136,7 @@ function ChatScreen({
           [
             ["chats", "Chats", <ChatIcon key="c" />],
             ["people", "People", <PeopleAltIcon key="p" />],
+            ["announcements", "Announcements", <CampaignIcon key="a" />],
             ["transfers", "Transfers", <DownloadingIcon key="t" />],
             ...(FEATURE_GAMES && gamesOn
               ? [["games", "Games", <SportsEsportsIcon key="s" />] as const]
@@ -2677,6 +3152,17 @@ function ChatScreen({
                 setNav(id as typeof nav);
                 if (id === "people") setTab(0);
                 if (id === "chats") setTab(1);
+                if (id === "announcements") {
+                  void (async () => {
+                    const boards = await ensureAnnounceBoards();
+                    if (boards[0]) {
+                      const full =
+                        (await peerApi.listConversations()).find((c) => c.id === boards[0].id) ||
+                        boards[0];
+                      await selectConversation(full);
+                    }
+                  })();
+                }
               }}
               sx={{
                 bgcolor: nav === id ? "action.selected" : "transparent",
@@ -2711,23 +3197,37 @@ function ChatScreen({
         <Box sx={{ px: 2, pt: 1.75, pb: 1, display: "flex", alignItems: "center", gap: 1 }}>
           <Box flex={1} minWidth={0}>
             <Typography variant="subtitle1" fontWeight={700} lineHeight={1.2}>
-              PeerChat{" "}
-              <Typography component="span" variant="caption" color="text.secondary" fontWeight={500}>
-                v{version}
-              </Typography>
+              {nav === "announcements" ? "Announcements" : "PeerChat"}{" "}
+              {nav !== "announcements" && (
+                <Typography component="span" variant="caption" color="text.secondary" fontWeight={500}>
+                  v{version}
+                </Typography>
+              )}
             </Typography>
             <Typography variant="caption" color="text.secondary" noWrap display="block">
-              {scanning ? "Scanning LAN…" : profile.display_name}
+              {nav === "announcements"
+                ? profile.team?.trim()
+                  ? `${profile.team.trim()} · team board + org updates`
+                  : "Org updates — set a Team in Settings for a team board"
+                : scanning
+                  ? "Scanning LAN…"
+                  : profile.team?.trim()
+                    ? `${profile.display_name} · ${profile.team.trim()}`
+                    : profile.display_name}
             </Typography>
           </Box>
           <IconButton
             size="small"
             aria-label="Refresh peers"
-            onClick={() => refresh({ manual: true })}
+            onClick={() => {
+              if (nav === "announcements") void ensureAnnounceBoards();
+              else void refresh({ manual: true });
+            }}
           >
             <RefreshIcon fontSize="small" />
           </IconButton>
         </Box>
+        {nav !== "announcements" && (
         <Box sx={{ px: 1.5, pb: 1 }}>
           <TextField
             inputRef={chatSearchRef}
@@ -2761,8 +3261,40 @@ function ChatScreen({
             }}
           />
         </Box>
+        )}
         <Box sx={{ flex: 1, overflow: "auto", minHeight: 0, pb: 1 }}>
-          {tab === 0 && (
+          {nav === "announcements" && (
+            <List dense disablePadding>
+              {announceBoards.map((b) => (
+                <ListItemButton
+                  key={b.id}
+                  selected={active?.id === b.id}
+                  onClick={() => selectConversation(b)}
+                  sx={{ py: 1.1, px: 2 }}
+                >
+                  <ListItemIcon sx={{ minWidth: 36 }}>
+                    <CampaignIcon fontSize="small" color={active?.id === b.id ? "primary" : "action"} />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={b.title || (b.id === "board:org" ? "Org updates" : "Team board")}
+                    secondary={
+                      b.id === "board:org"
+                        ? "Everyone · builds, circulars"
+                        : "Your team only"
+                    }
+                    primaryTypographyProps={{ fontWeight: 700, fontSize: 14 }}
+                    secondaryTypographyProps={{ fontSize: 12 }}
+                  />
+                </ListItemButton>
+              ))}
+              {!announceBoards.length && (
+                <Typography sx={{ p: 2 }} color="text.secondary" variant="body2">
+                  Opening announcement boards…
+                </Typography>
+              )}
+            </List>
+          )}
+          {nav !== "announcements" && tab === 0 && (
             <List dense disablePadding>
               {others
                 .filter((p) => {
@@ -2787,35 +3319,17 @@ function ChatScreen({
                     <ListItemText
                       primary={p.display_name}
                       secondary={
-                        p.identity_changed
-                          ? "Certificate changed — review before chatting"
-                          : p.online
-                            ? "Online"
-                            : lastSeenLabel(p.last_seen_at)
+                        p.online ? "Online" : lastSeenLabel(p.last_seen_at)
                       }
                       primaryTypographyProps={{ fontWeight: 600, fontSize: 14, noWrap: true }}
                       secondaryTypographyProps={{ fontSize: 12 }}
                     />
-                    {p.identity_changed && (
-                      <Button
-                        size="small"
-                        color="warning"
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          await peerApi.acceptPendingIdentity(p.user_id);
-                          setStatus(`Accepted the new certificate for ${p.display_name}`);
-                          await refresh();
-                        }}
-                      >
-                        Review
-                      </Button>
-                    )}
                     <Box
                       sx={{
                         width: 8,
                         height: 8,
                         borderRadius: "50%",
-                        bgcolor: p.identity_changed ? "warning.main" : p.online ? "success.main" : "grey.400",
+                        bgcolor: p.online ? "success.main" : "grey.400",
                       }}
                     />
                   </ListItemButton>
@@ -2869,7 +3383,7 @@ function ChatScreen({
               )}
             </List>
           )}
-          {tab === 1 && (
+          {nav !== "announcements" && tab === 1 && (
             <List dense disablePadding>
               {filteredConvs.map((c) => {
                 const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
@@ -2878,7 +3392,8 @@ function ChatScreen({
                     ? peers.find((p) => p.user_id === c.peer_id)
                     : undefined;
                 const peerOnline = !!dmPeer?.online;
-                const needsTrust = !!dmPeer && !dmPeer.pinned;
+                const needsTrust = !!dmPeer && !dmPeer.pinned && !dmPeer.blocked;
+                const isBlocked = !!dmPeer?.blocked;
                 const preview = lastPreviews[c.id] || "";
                 const timeLabel = formatPreviewTime(c.last_message_at || c.created_at);
                 const unread = !!c.unread_count && active?.id !== c.id;
@@ -2960,6 +3475,13 @@ function ChatScreen({
                         </Typography>
                       </Box>
                       <Box display="flex" alignItems="center" gap={0.5} mt={0.15}>
+                        {isBlocked && (
+                          <Chip
+                            size="small"
+                            label="Blocked"
+                            sx={{ height: 18, fontSize: 10, fontWeight: 700, flexShrink: 0 }}
+                          />
+                        )}
                         {needsTrust && (
                           <Chip
                             size="small"
@@ -3044,13 +3566,33 @@ function ChatScreen({
         {nav === "transfers" && (
           <TransfersPanel
             rows={transfers}
-            onClose={() => setNav("chats")}
+            onClose={() => {
+              setNav("chats");
+              setTab(1);
+            }}
             onRetry={(row) => {
               if (row.direction === "recv" && row.file_id) {
                 const msg = messages.find((m) => m.file_id === row.file_id);
                 downloadFileToDownloads(row.file_id, msg?.sender_id || profile.id);
               } else {
                 setStatus("Open the conversation and send the file again to retry an upload.");
+              }
+            }}
+            onRemove={async (row) => {
+              try {
+                await peerApi.deleteTransfer(row.id);
+                setTransfers(await peerApi.listTransfers());
+              } catch (err: any) {
+                setStatus(err?.message || String(err));
+              }
+            }}
+            onClearHistory={async () => {
+              try {
+                await peerApi.clearTransferHistory();
+                setTransfers(await peerApi.listTransfers());
+                setStatus("Transfer history cleared");
+              } catch (err: any) {
+                setStatus(err?.message || String(err));
               }
             }}
           />
@@ -3108,7 +3650,8 @@ function ChatScreen({
         )}
         <Box
           sx={{
-            display: nav === "chats" || nav === "people" ? "flex" : "none",
+            display:
+              nav === "chats" || nav === "people" || nav === "announcements" ? "flex" : "none",
             flexDirection: "column",
             flex: 1,
             minHeight: 0,
@@ -3129,17 +3672,31 @@ function ChatScreen({
           <Toolbar sx={{ gap: 1, minHeight: 64 }}>
             {active && (
               <Avatar
+                onClick={() => {
+                  setChatInfoTab(0);
+                  setChatInfoOpen(true);
+                }}
                 sx={{
                   width: 40,
                   height: 40,
                   bgcolor: avatarColor(activeTitle),
                   fontSize: 16,
+                  cursor: "pointer",
                 }}
               >
                 {activeTitle.slice(0, 1).toUpperCase()}
               </Avatar>
             )}
-            <Box flex={1} minWidth={0}>
+            <Box
+              flex={1}
+              minWidth={0}
+              onClick={() => {
+                if (!active) return;
+                setChatInfoTab(0);
+                setChatInfoOpen(true);
+              }}
+              sx={{ cursor: active ? "pointer" : "default" }}
+            >
               <Typography variant="subtitle1" fontWeight={700} noWrap>
                 {active ? activeTitle : "Select a conversation"}
               </Typography>
@@ -3159,6 +3716,10 @@ function ChatScreen({
                 >
                   {activeDmPeer.online ? "Online" : lastSeenLabel(activeDmPeer.last_seen_at)}
                 </Typography>
+              ) : active ? (
+                <Typography variant="caption" color="text.secondary" display="block">
+                  Media, docs & links
+                </Typography>
               ) : null}
             </Box>
             {isAdmin && (
@@ -3169,10 +3730,6 @@ function ChatScreen({
                 color="primary"
                 variant="outlined"
               />
-            )}
-            {status && <Chip size="small" label={status} onDelete={() => setStatus("")} />}
-            {active?.kind === "dm" && peers.some((p) => p.user_id === active.peer_id && p.identity_changed) && (
-              <Chip size="small" color="warning" label="Identity changed" />
             )}
             {active?.kind === "group" && (
               <IconButton
@@ -3185,10 +3742,95 @@ function ChatScreen({
                 <GroupIcon />
               </IconButton>
             )}
+            {active && (
+              <IconButton
+                aria-label="Chat options"
+                onClick={(e) => setConvMenu({ anchor: e.currentTarget, conv: active })}
+              >
+                <MoreVertIcon />
+              </IconButton>
+            )}
           </Toolbar>
         </AppBar>
 
-        {active?.kind === "dm" && activeDmPeer && !activeDmPeer.pinned && (
+        {active && (() => {
+          const pinned = messages.filter((m) => m.pinned && m.kind !== "deleted");
+          if (!pinned.length) return null;
+          return (
+            <Box
+              sx={{
+                flexShrink: 0,
+                px: 1.5,
+                py: 0.75,
+                borderBottom: "1px solid",
+                borderColor: "divider",
+                bgcolor: dark ? "rgba(76,180,160,0.12)" : "rgba(220,239,233,0.9)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 0.5,
+                maxHeight: 120,
+                overflow: "auto",
+              }}
+            >
+              {pinned.slice(0, 5).map((m) => {
+                const preview =
+                  m.kind === "file_notice"
+                    ? `📎 ${(m.file_id && fileNames[m.file_id]) || "File"}`
+                    : (plain[m.id] || m.kind).slice(0, 120);
+                return (
+                  <Box
+                    key={m.id}
+                    onClick={() => {
+                      setHighlightMsgId(m.id);
+                      stickToBottomRef.current = false;
+                      requestAnimationFrame(() => {
+                        document.getElementById(`msg-${m.id}`)?.scrollIntoView({
+                          behavior: "smooth",
+                          block: "center",
+                        });
+                      });
+                    }}
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 0.75,
+                      cursor: "pointer",
+                      borderRadius: 1,
+                      px: 0.5,
+                      py: 0.25,
+                      "&:hover": { bgcolor: "action.hover" },
+                    }}
+                  >
+                    <PushPinIcon sx={{ fontSize: 14, color: "primary.main" }} />
+                    <Typography variant="caption" noWrap sx={{ flex: 1, fontWeight: 600 }}>
+                      {preview}
+                    </Typography>
+                  </Box>
+                );
+              })}
+            </Box>
+          );
+        })()}
+
+        {active?.kind === "dm" && activeDmPeer?.blocked && (
+          <Alert
+            severity="info"
+            sx={{ borderRadius: 0, flexShrink: 0 }}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                onClick={() => toggleBlockPeer(activeDmPeer.user_id, false)}
+              >
+                Unblock
+              </Button>
+            }
+          >
+            You blocked <strong>{activeDmPeer.display_name}</strong>. They can’t DM you until you
+            unblock them.
+          </Alert>
+        )}
+        {active?.kind === "dm" && activeDmPeer && !activeDmPeer.pinned && !activeDmPeer.blocked && (
           <Alert
             severity="warning"
             sx={{ borderRadius: 0, flexShrink: 0 }}
@@ -3214,14 +3856,14 @@ function ChatScreen({
           px={2}
           py={1.5}
           overflow="auto"
-          display="flex"
-          flexDirection="column"
-          gap={0.75}
           position="relative"
           onScroll={(e) => {
+            if (ignoreScrollRef.current) return;
             const el = e.currentTarget;
             const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-            stickToBottomRef.current = dist < 80;
+            // Hysteresis: easier to lock to bottom than to unlock while reading.
+            if (dist < 80) stickToBottomRef.current = true;
+            else if (dist > 120) stickToBottomRef.current = false;
           }}
           onDragOver={(e) => {
             e.preventDefault();
@@ -3245,8 +3887,23 @@ function ChatScreen({
             outline: dragOverChat ? "2px dashed" : "none",
             outlineColor: "primary.main",
             outlineOffset: -8,
+            // Hide until first bottom-pin so opening a chat never flashes at the top.
+            opacity: chatPaintReady ? 1 : 0,
+            transition: chatPaintReady ? "opacity 80ms ease-out" : "none",
           }}
         >
+          {/*
+            Inner column with minHeight 100% + justify flex-end keeps short threads
+            visually at the bottom without a flex:1 spacer (which inflates scrollHeight
+            and lets you scroll into empty space past the last message).
+          */}
+          <Box
+            minHeight="100%"
+            display="flex"
+            flexDirection="column"
+            justifyContent="flex-end"
+            gap={0.75}
+          >
           {dragOverChat && (
             <Box
               position="absolute"
@@ -3434,6 +4091,21 @@ function ChatScreen({
                                 setGamesOn(true);
                                 peerApi.setAppSetting("games_enabled", "1").catch(() => {});
                               }
+                              const open: PendingGameInvite = {
+                                game: gm.game,
+                                matchId: mid,
+                                fromId: mine ? (active?.peer_id || m.sender_id) : m.sender_id,
+                                fromName,
+                                openOnly: true,
+                              };
+                              if (gm.game === "rps") {
+                                open.format = (gm.payload as { format?: 1 | 3 | 5 }).format || 3;
+                              }
+                              if (gm.game === "dab") {
+                                open.rows = (gm.payload as { rows?: number }).rows || 4;
+                                open.cols = (gm.payload as { cols?: number }).cols || 4;
+                              }
+                              setPendingGameInvite(open);
                               setNav("games");
                             }}
                           />
@@ -3471,8 +4143,8 @@ function ChatScreen({
                             py: 0.4,
                             bgcolor: highlighted
                               ? dark
-                                ? "rgba(255, 193, 7, 0.28)"
-                                : "rgba(255, 236, 150, 0.95)"
+                                ? "rgba(76, 180, 160, 0.32)"
+                                : "rgba(196, 232, 220, 0.95)"
                               : m.kind === "deleted"
                                 ? "action.selected"
                                 : mine
@@ -3482,7 +4154,9 @@ function ChatScreen({
                                   : "background.paper",
                             border: "1px solid",
                             borderColor: highlighted
-                              ? "warning.main"
+                              ? dark
+                                ? "rgba(120, 210, 190, 0.7)"
+                                : "#7FBFB0"
                               : m.kind === "deleted"
                                 ? "divider"
                                 : mine
@@ -3617,36 +4291,69 @@ function ChatScreen({
                               alignItems="center"
                               sx={{ pr: 3.25 }}
                             >
-                              <Button
-                                size="small"
-                                startIcon={<DownloadIcon sx={{ fontSize: 16 }} />}
-                                disabled={previewBusy || !!incomingFile || !m.file_id}
-                                onClick={() =>
-                                  m.file_id && downloadFileToDownloads(m.file_id, m.sender_id)
-                                }
-                                sx={{
-                                  textTransform: "none",
-                                  fontWeight: 700,
-                                  fontSize: 13,
-                                  py: 0.25,
-                                  minHeight: 0,
-                                }}
-                              >
-                                {(m.file_id && fileNames[m.file_id]) || "Encrypted file"}
-                              </Button>
-                              <Tooltip title="Preview">
-                                <span>
-                                  <IconButton
-                                    size="small"
-                                    disabled={previewBusy || !!incomingFile || !m.file_id}
-                                    onClick={() => m.file_id && previewFile(m.file_id, m.sender_id)}
-                                    aria-label="Preview file"
-                                    sx={{ p: 0.5 }}
-                                  >
-                                    <OpenInNewIcon sx={{ fontSize: 16 }} />
-                                  </IconButton>
-                                </span>
-                              </Tooltip>
+                              {(() => {
+                                const fname =
+                                  (m.file_id && fileNames[m.file_id]) || "Encrypted file";
+                                const mine = m.sender_id === profile.id;
+                                const previewable =
+                                  !!m.file_id &&
+                                  !!fileNames[m.file_id] &&
+                                  canPreviewFileName(fileNames[m.file_id]);
+                                return (
+                                  <>
+                                    <Button
+                                      size="small"
+                                      startIcon={
+                                        mine ? (
+                                          <InsertDriveFileIcon sx={{ fontSize: 16 }} />
+                                        ) : (
+                                          <DownloadIcon sx={{ fontSize: 16 }} />
+                                        )
+                                      }
+                                      disabled={previewBusy || !!incomingFile || !m.file_id}
+                                      onClick={() => {
+                                        if (!m.file_id) return;
+                                        if (mine) {
+                                          peerApi.openLocalFile(m.file_id).catch(() =>
+                                            downloadFileToDownloads(m.file_id!, m.sender_id)
+                                          );
+                                        } else {
+                                          downloadFileToDownloads(m.file_id, m.sender_id);
+                                        }
+                                      }}
+                                      sx={{
+                                        textTransform: "none",
+                                        fontWeight: 700,
+                                        fontSize: 13,
+                                        py: 0.25,
+                                        minHeight: 0,
+                                      }}
+                                    >
+                                      {fname}
+                                    </Button>
+                                    {previewable && (
+                                      <Tooltip title="Preview">
+                                        <span>
+                                          <IconButton
+                                            size="small"
+                                            disabled={
+                                              previewBusy || !!incomingFile || !m.file_id
+                                            }
+                                            onClick={() =>
+                                              m.file_id &&
+                                              previewFile(m.file_id, m.sender_id)
+                                            }
+                                            aria-label="Preview file"
+                                            sx={{ p: 0.5 }}
+                                          >
+                                            <VisibilityIcon sx={{ fontSize: 16 }} />
+                                          </IconButton>
+                                        </span>
+                                      </Tooltip>
+                                    )}
+                                  </>
+                                );
+                              })()}
                             </Stack>
                           ) : (
                             m.kind === "announcement" || m.kind === "snippet" || m.kind === "poll" ? (
@@ -3656,14 +4363,29 @@ function ChatScreen({
                                 votes={messages.filter((v) => v.kind === "poll_vote" && v.reply_to === m.id)}
                                 plain={plain}
                                 onVote={(option) => sendEncrypted("poll_vote", option, m.id)}
+                                fileId={m.kind === "announcement" ? m.file_id : null}
+                                fileName={
+                                  m.kind === "announcement" && m.file_id
+                                    ? fileNames[m.file_id]
+                                    : undefined
+                                }
+                                mine={m.sender_id === profile.id}
+                                onOpenFile={(fid) => {
+                                  peerApi.openLocalFile(fid).catch(() =>
+                                    downloadFileToDownloads(fid, m.sender_id)
+                                  );
+                                }}
+                                onDownloadFile={(fid) =>
+                                  downloadFileToDownloads(fid, m.sender_id)
+                                }
                               />
                             ) : (
-                            <Typography
-                              whiteSpace="pre-wrap"
-                              sx={{ pr: 1.5, fontSize: 14, lineHeight: 1.35 }}
-                            >
-                              {plain[m.id] || "…"}
-                            </Typography>
+                            <Box sx={{ pr: 1.5, fontSize: 14, lineHeight: 1.35 }}>
+                              <LinkifiedText
+                                text={plain[m.id] || "…"}
+                                sx={{ fontSize: 14, lineHeight: 1.35 }}
+                              />
+                            </Box>
                             )
                           )}
                           <Box
@@ -3846,7 +4568,7 @@ function ChatScreen({
                     {incomingFile.name}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
-                    Opening…
+                    {incomingFile.label || "Downloading…"}
                     {incomingFile.total
                       ? ` ${Math.min(
                           100,
@@ -3875,9 +4597,129 @@ function ChatScreen({
               </Stack>
             </Paper>
           )}
+          <Box ref={bottomSentinelRef} aria-hidden sx={{ height: 1, width: "100%", flexShrink: 0 }} />
+          </Box>
         </Box>
 
-        {active && inGroup && (
+        {active && inGroup && isAnnounceBoard && (
+          <Paper
+            square
+            elevation={0}
+            sx={{
+              flexShrink: 0,
+              px: 1.5,
+              py: 1.25,
+              borderTop: "1px solid",
+              borderColor: "divider",
+              display: "flex",
+              flexDirection: "column",
+              gap: 1,
+              bgcolor: "background.paper",
+              zIndex: 2,
+            }}
+          >
+            <Typography variant="caption" color="text.secondary">
+              One-way posts — others can react. Use the message menu to reply privately to the author.
+            </Typography>
+            {stagedFiles.length > 0 && (
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                {stagedFiles.map((sf) => (
+                  <Chip
+                    key={sf.id}
+                    label={sf.name}
+                    onDelete={() => removeStagedFile(sf.id)}
+                    size="small"
+                  />
+                ))}
+              </Stack>
+            )}
+            <TextField
+              size="small"
+              fullWidth
+              placeholder="Title"
+              value={announceCompose.title}
+              onChange={(e) => setAnnounceCompose((c) => ({ ...c, title: e.target.value }))}
+            />
+            <TextField
+              size="small"
+              fullWidth
+              multiline
+              minRows={2}
+              maxRows={6}
+              placeholder="Memo, circular, or update… (links are clickable)"
+              value={announceCompose.body}
+              onChange={(e) => setAnnounceCompose((c) => ({ ...c, body: e.target.value }))}
+            />
+            <Stack direction="row" spacing={1} justifyContent="flex-end" alignItems="center">
+              <Button
+                component="label"
+                size="small"
+                startIcon={<AttachFileIcon />}
+                disabled={announceBusy || !!outgoingFile}
+                sx={{ textTransform: "none", mr: "auto" }}
+              >
+                Attach file
+                <input
+                  hidden
+                  type="file"
+                  disabled={announceBusy || !!outgoingFile}
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    if (files.length) {
+                      // One attachment per announcement post.
+                      clearStagedFiles();
+                      stageFiles(files.slice(0, 1));
+                    }
+                    e.target.value = "";
+                  }}
+                />
+              </Button>
+              <Button
+                variant="contained"
+                disabled={
+                  announceBusy ||
+                  !!outgoingFile ||
+                  !announceCompose.title.trim() ||
+                  !announceCompose.body.trim()
+                }
+                onClick={() => void postAnnouncement()}
+                sx={{ textTransform: "none", fontWeight: 700 }}
+              >
+                Post
+              </Button>
+            </Stack>
+          </Paper>
+        )}
+
+        {active && activeDmPeer?.blocked && (
+          <Paper
+            square
+            elevation={0}
+            sx={{
+              flexShrink: 0,
+              p: 2,
+              borderTop: "1px solid",
+              borderColor: "divider",
+              textAlign: "center",
+              bgcolor: "background.paper",
+              zIndex: 2,
+            }}
+          >
+            <Typography color="text.secondary" sx={{ mb: 1.25 }}>
+              Messaging is disabled while this person is blocked.
+            </Typography>
+            <Button
+              variant="outlined"
+              startIcon={<PersonOffIcon />}
+              onClick={() => toggleBlockPeer(activeDmPeer.user_id, false)}
+              sx={{ textTransform: "none", fontWeight: 700 }}
+            >
+              Unblock
+            </Button>
+          </Paper>
+        )}
+
+        {active && inGroup && !isAnnounceBoard && !activeDmPeer?.blocked && (
           <Paper
             square
             elevation={0}
@@ -4153,7 +4995,18 @@ function ChatScreen({
               zIndex: 2,
             }}
           >
-            <Typography color="text.secondary">You're no longer in this group.</Typography>
+            <Typography color="text.secondary" sx={{ mb: 1.25 }}>
+              You're no longer in this group.
+            </Typography>
+            <Button
+              color="error"
+              variant="outlined"
+              startIcon={<DeleteOutlineIcon />}
+              onClick={() => handleRemoveLeftGroup(active)}
+              sx={{ textTransform: "none", fontWeight: 700 }}
+            >
+              Remove from chat list
+            </Button>
           </Paper>
         )}
       </Box>
@@ -4219,6 +5072,59 @@ function ChatScreen({
           </ListItemIcon>
           {convMenu?.conv.muted ? "Unmute" : "Mute"}
         </MenuItem>
+        {convMenu?.conv.kind === "dm" && convMenu.conv.peer_id && (
+          <MenuItem
+            onClick={() => {
+              const c = convMenu.conv;
+              setConvMenu(null);
+              void blockDmFromConv(c);
+            }}
+          >
+            <ListItemIcon>
+              {peers.find((p) => p.user_id === convMenu.conv.peer_id)?.blocked ? (
+                <PersonOffIcon fontSize="small" />
+              ) : (
+                <BlockIcon fontSize="small" color="error" />
+              )}
+            </ListItemIcon>
+            {peers.find((p) => p.user_id === convMenu.conv.peer_id)?.blocked
+              ? "Unblock"
+              : "Block DMs"}
+          </MenuItem>
+        )}
+        <Divider />
+        <MenuItem
+          onClick={() => {
+            if (convMenu) {
+              setClearIncludeFiles(false);
+              setClearChatTarget(convMenu.conv);
+            }
+            setConvMenu(null);
+          }}
+        >
+          <ListItemIcon>
+            <DeleteOutlineIcon fontSize="small" color="error" />
+          </ListItemIcon>
+          <Typography color="error.main" fontWeight={600}>
+            Delete messages…
+          </Typography>
+        </MenuItem>
+        {convMenu?.conv.kind === "group" && (
+            <MenuItem
+              onClick={() => {
+                const c = convMenu.conv;
+                setConvMenu(null);
+                void handleRemoveLeftGroup(c);
+              }}
+            >
+              <ListItemIcon>
+                <DeleteForeverIcon fontSize="small" color="error" />
+              </ListItemIcon>
+              <Typography color="error.main" fontWeight={600}>
+                Remove left group…
+              </Typography>
+            </MenuItem>
+          )}
       </Menu>
 
       <Menu
@@ -4243,12 +5149,37 @@ function ChatScreen({
           ))}
         </Box>
         <Divider />
-        <MenuItem onClick={() => msgMenu && startReply(msgMenu.message)}>
-          <ListItemIcon>
-            <ReplyIcon fontSize="small" />
-          </ListItemIcon>
-          Reply
-        </MenuItem>
+        {(!isAnnounceBoard || !msgMenu) && (
+          <MenuItem onClick={() => msgMenu && startReply(msgMenu.message)}>
+            <ListItemIcon>
+              <ReplyIcon fontSize="small" />
+            </ListItemIcon>
+            Reply
+          </MenuItem>
+        )}
+        {msgMenu &&
+          msgMenu.message.sender_id !== profile.id &&
+          (isAnnounceBoard || msgMenu.message.kind === "announcement") && (
+            <MenuItem
+              onClick={async () => {
+                const peer = peers.find((p) => p.user_id === msgMenu.message.sender_id);
+                setMsgMenu(null);
+                if (!peer) {
+                  setStatus("Author is not on the LAN right now");
+                  return;
+                }
+                setNav("chats");
+                setTab(1);
+                await openDm(peer);
+                setStatus(`Private reply to ${peer.display_name}`);
+              }}
+            >
+              <ListItemIcon>
+                <ReplyIcon fontSize="small" />
+              </ListItemIcon>
+              Reply privately
+            </MenuItem>
+          )}
         {msgMenu && isTextLikeMessage(msgMenu.message) && (
           <MenuItem onClick={() => msgMenu && startForward(msgMenu.message)}>
             <ListItemIcon>
@@ -4267,7 +5198,8 @@ function ChatScreen({
         )}
         {msgMenu?.message.kind === "text" &&
           msgMenu.message.sender_id === profile.id &&
-          !msgMenu.message.failed && (
+          !msgMenu.message.failed &&
+          canMutateMessageToday(msgMenu.message.created_at) && (
             <MenuItem onClick={() => msgMenu && startEdit(msgMenu.message)}>
               <ListItemIcon>
                 <EditIcon fontSize="small" />
@@ -4310,7 +5242,9 @@ function ChatScreen({
           </ListItemIcon>
           Delete for me
         </MenuItem>
-        {msgMenu?.message.sender_id === profile.id && msgMenu.message.kind !== "deleted" && (
+        {msgMenu?.message.sender_id === profile.id &&
+          msgMenu.message.kind !== "deleted" &&
+          canMutateMessageToday(msgMenu.message.created_at) && (
           <MenuItem onClick={() => msgMenu && deleteForEveryone(msgMenu.message)}>
             <ListItemIcon>
               <DeleteForeverIcon fontSize="small" color="error" />
@@ -4434,37 +5368,197 @@ function ChatScreen({
         </DialogActions>
       </Dialog>
 
-      <Dialog open={!!forwardMessage} onClose={() => setForwardMessage(null)} fullWidth maxWidth="sm">
-        <DialogTitle>Forward message</DialogTitle>
+      <Dialog
+        open={!!clearChatTarget}
+        onClose={() => !clearBusy && setClearChatTarget(null)}
+        fullWidth
+        maxWidth="xs"
+        PaperProps={{ sx: { borderRadius: 3 } }}
+      >
+        <DialogTitle sx={{ fontWeight: 800, pr: 6 }}>
+          Delete messages
+          <IconButton
+            aria-label="Close"
+            disabled={clearBusy}
+            onClick={() => setClearChatTarget(null)}
+            sx={{ position: "absolute", right: 10, top: 10 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            {truncate(forwardMessage ? plain[forwardMessage.id] || "" : "", 160)}
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            Remove all messages in{" "}
+            <strong>
+              {clearChatTarget?.kind === "dm"
+                ? clearChatTarget.peer_name || "this chat"
+                : clearChatTarget?.title || "this group"}
+            </strong>{" "}
+            on this PC only. Other people keep their copies.
           </Typography>
-          <List dense>
-            {convs.map((c) => (
-              <ListItemButton
-                key={c.id}
-                selected={forwardPick.includes(c.id)}
-                onClick={() =>
-                  setForwardPick((ids) =>
-                    ids.includes(c.id) ? ids.filter((x) => x !== c.id) : [...ids, c.id]
-                  )
-                }
-              >
-                <ListItemText primary={c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group"} />
-              </ListItemButton>
-            ))}
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={clearIncludeFiles}
+                onChange={(_, v) => setClearIncludeFiles(v)}
+                disabled={clearBusy}
+              />
+            }
+            label="Also delete files from this chat"
+          />
+        </DialogContent>
+        <DialogActions sx={{ px: 2.5, pb: 2 }}>
+          <Button
+            disabled={clearBusy}
+            onClick={() => setClearChatTarget(null)}
+            sx={{ textTransform: "none" }}
+          >
+            Cancel
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={clearBusy}
+            onClick={confirmClearChatMessages}
+            sx={{ textTransform: "none", fontWeight: 700 }}
+          >
+            {clearBusy ? "Deleting…" : "Delete messages"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={!!forwardMessage}
+        onClose={() => setForwardMessage(null)}
+        fullWidth
+        maxWidth="xs"
+        PaperProps={{ sx: { borderRadius: 3, overflow: "hidden" } }}
+      >
+        <DialogTitle sx={{ pb: 0.5, pr: 6 }}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <ForwardIcon color="primary" sx={{ transform: "scaleX(-1)" }} />
+            <Box minWidth={0}>
+              <Typography fontWeight={800} fontSize={18} lineHeight={1.2}>
+                Forward message
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                1 message
+              </Typography>
+            </Box>
+          </Stack>
+          <IconButton
+            aria-label="Close"
+            onClick={() => setForwardMessage(null)}
+            sx={{ position: "absolute", right: 10, top: 10 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 1.5 }}>
+          <TextField
+            fullWidth
+            size="small"
+            value={forwardQuery}
+            onChange={(e) => setForwardQuery(e.target.value)}
+            placeholder="Search chats…"
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon fontSize="small" color="action" />
+                </InputAdornment>
+              ),
+            }}
+            sx={{
+              mb: 1.5,
+              "& .MuiOutlinedInput-root": { borderRadius: 999, bgcolor: "action.hover" },
+            }}
+          />
+          <List dense disablePadding sx={{ maxHeight: 360, overflow: "auto", mx: -0.5 }}>
+            {convs
+              .filter((c) => {
+                const label =
+                  c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
+                const q = forwardQuery.trim().toLowerCase();
+                return !q || label.toLowerCase().includes(q);
+              })
+              .map((c) => {
+                const label =
+                  c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
+                const selected = forwardPick.includes(c.id);
+                const peer = c.kind === "dm" ? peers.find((p) => p.user_id === c.peer_id) : null;
+                return (
+                  <ListItemButton
+                    key={c.id}
+                    selected={selected}
+                    onClick={() =>
+                      setForwardPick((ids) =>
+                        ids.includes(c.id) ? ids.filter((x) => x !== c.id) : [...ids, c.id]
+                      )
+                    }
+                    sx={{
+                      borderRadius: 2,
+                      mb: 0.35,
+                      py: 0.85,
+                      "&.Mui-selected": { bgcolor: "action.selected" },
+                    }}
+                  >
+                    <Checkbox
+                      edge="start"
+                      size="small"
+                      checked={selected}
+                      tabIndex={-1}
+                      disableRipple
+                      sx={{ mr: 0.5 }}
+                    />
+                    <ListItemAvatar sx={{ minWidth: 44 }}>
+                      <Avatar
+                        sx={{
+                          width: 36,
+                          height: 36,
+                          bgcolor: avatarColor(label),
+                          fontSize: 14,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {c.kind === "group" ? (
+                          <GroupIcon sx={{ fontSize: 18 }} />
+                        ) : (
+                          label.slice(0, 1).toUpperCase()
+                        )}
+                      </Avatar>
+                    </ListItemAvatar>
+                    <ListItemText
+                      primary={label}
+                      primaryTypographyProps={{ fontWeight: 700, fontSize: 14 }}
+                      secondary={
+                        c.kind === "group"
+                          ? "Group"
+                          : peer?.online
+                            ? "Online"
+                            : "Chat"
+                      }
+                    />
+                  </ListItemButton>
+                );
+              })}
             {!convs.length && (
-              <Typography color="text.secondary" sx={{ p: 1 }}>
+              <Typography color="text.secondary" sx={{ p: 1.5 }}>
                 No chats to forward to yet.
               </Typography>
             )}
           </List>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setForwardMessage(null)}>Cancel</Button>
-          <Button variant="contained" disabled={!forwardPick.length} onClick={confirmForward}>
-            Forward{forwardPick.length > 1 ? ` (${forwardPick.length})` : ""}
+        <DialogActions sx={{ px: 2.5, pb: 2, pt: 0.5 }}>
+          <Button onClick={() => setForwardMessage(null)} sx={{ textTransform: "none" }}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={!forwardPick.length}
+            onClick={confirmForward}
+            sx={{ textTransform: "none", borderRadius: 2, px: 2, fontWeight: 700 }}
+          >
+            Forward{forwardPick.length ? ` (${forwardPick.length})` : ""}
           </Button>
         </DialogActions>
       </Dialog>
@@ -4555,141 +5649,201 @@ function ChatScreen({
         </DialogActions>
       </Dialog>
 
-      <Dialog open={membersOpen && active?.kind === "group"} onClose={() => setMembersOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>{active?.title || "Group"}</DialogTitle>
-        <DialogContent>
-          <Stack spacing={1.5} sx={{ mt: 0.5 }}>
+      <Dialog
+        open={membersOpen && active?.kind === "group"}
+        onClose={() => setMembersOpen(false)}
+        fullWidth
+        maxWidth="sm"
+        PaperProps={{ sx: { borderRadius: 3, overflow: "hidden" } }}
+      >
+        <DialogTitle sx={{ pr: 6, pb: 1 }}>
+          <Stack direction="row" spacing={1.25} alignItems="center">
+            <Avatar sx={{ bgcolor: "primary.main", width: 40, height: 40 }}>
+              <GroupsIcon />
+            </Avatar>
+            <Typography fontWeight={800} fontSize={20} noWrap>
+              {active?.title || "Group"}
+            </Typography>
+          </Stack>
+          <IconButton
+            aria-label="Close"
+            onClick={() => setMembersOpen(false)}
+            sx={{ position: "absolute", right: 10, top: 10 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 0.5 }}>
+          <Stack spacing={2} divider={<Divider flexItem />}>
             {isAdmin && (
-              <>
-                <Paper
-                  variant="outlined"
-                  sx={{ p: 1.5, borderColor: "divider", borderRadius: 2 }}
+              <Box>
+                <Typography fontWeight={800} fontSize={13} sx={{ mb: 1.25 }}>
+                  Group details
+                </Typography>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  fontWeight={700}
+                  letterSpacing={0.6}
+                  display="block"
+                  mb={0.5}
                 >
-                  <Typography variant="overline" color="text.secondary" display="block" mb={1}>
-                    Group name
-                  </Typography>
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <TextField
-                      size="small"
-                      fullWidth
-                      value={renameDraft}
-                      onChange={(e) => setRenameDraft(e.target.value)}
-                      placeholder="Group name"
-                    />
-                    <Button
-                      variant="outlined"
-                      startIcon={<DriveFileRenameOutlineIcon />}
-                      disabled={!renameDraft.trim() || renameDraft.trim() === (active?.title || "")}
-                      onClick={handleRenameGroup}
-                      sx={{ flexShrink: 0 }}
-                    >
-                      Rename
-                    </Button>
-                  </Stack>
-                </Paper>
-
-                <Paper
-                  variant="outlined"
-                  sx={{ px: 1.5, py: 0.75, borderColor: "divider", borderRadius: 2 }}
-                >
-                  <FormControlLabel
-                    sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
-                    labelPlacement="start"
-                    control={
-                      <Switch
-                        checked={active?.members_can_add !== false}
-                        onChange={(_, v) => handleToggleMembersCanAdd(v)}
-                      />
-                    }
-                    label="Members can add others"
+                  GROUP NAME
+                </Typography>
+                <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    value={renameDraft}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    placeholder="Group name"
+                    sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
                   />
-                </Paper>
-
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    startIcon={<DriveFileRenameOutlineIcon />}
+                    disabled={!renameDraft.trim() || renameDraft.trim() === (active?.title || "")}
+                    onClick={handleRenameGroup}
+                    sx={{
+                      flexShrink: 0,
+                      textTransform: "none",
+                      borderRadius: 2,
+                      bgcolor: "action.selected",
+                      color: "primary.main",
+                      boxShadow: "none",
+                      "&:hover": { bgcolor: "action.hover", boxShadow: "none" },
+                    }}
+                  >
+                    Rename
+                  </Button>
+                </Stack>
+                <FormControlLabel
+                  sx={{
+                    m: 0,
+                    mb: 1.5,
+                    width: "100%",
+                    justifyContent: "space-between",
+                    ml: 0,
+                  }}
+                  labelPlacement="start"
+                  control={
+                    <Switch
+                      checked={active?.members_can_add !== false}
+                      onChange={(_, v) => handleToggleMembersCanAdd(v)}
+                    />
+                  }
+                  label={
+                    <Typography fontWeight={600} fontSize={14}>
+                      Members can add others
+                    </Typography>
+                  }
+                />
                 <Button
                   color="error"
                   variant="outlined"
                   fullWidth
-                  size="large"
+                  startIcon={<DeleteForeverIcon />}
                   onClick={handleDeleteGroup}
-                  sx={{ borderRadius: 2, py: 1.1 }}
+                  sx={{ borderRadius: 2, py: 1.1, textTransform: "none", fontWeight: 700 }}
                 >
                   Delete group for everyone
                 </Button>
-              </>
+              </Box>
             )}
 
-            <Paper variant="outlined" sx={{ borderColor: "divider", borderRadius: 2, overflow: "hidden" }}>
-              <Typography variant="overline" color="text.secondary" sx={{ px: 1.5, pt: 1.25, display: "block" }}>
+            <Box>
+              <Typography fontWeight={800} fontSize={13} sx={{ mb: 1 }}>
                 Members
               </Typography>
               <List dense disablePadding>
-                {members.map((m) => (
-                  <ListItemButton key={m.user_id} disableRipple sx={{ cursor: "default", py: 0.85 }}>
-                    <ListItemText
-                      primary={m.user_id === profile.id ? `${m.display_name} (you)` : m.display_name}
-                      secondary={m.role === "admin" ? "Admin" : "Member"}
-                      primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }}
-                    />
-                    {m.role === "admin" && (
-                      <Chip
-                        size="small"
-                        label="Admin"
-                        icon={<AdminPanelSettingsIcon fontSize="small" />}
-                        sx={{ mr: 1 }}
+                {members.map((m) => {
+                  const label =
+                    m.user_id === profile.id ? `${m.display_name} (you)` : m.display_name;
+                  return (
+                    <ListItemButton
+                      key={m.user_id}
+                      disableRipple
+                      sx={{ cursor: "default", py: 0.9, px: 0.5, borderRadius: 2 }}
+                    >
+                      <ListItemAvatar sx={{ minWidth: 44 }}>
+                        <Avatar
+                          sx={{
+                            width: 36,
+                            height: 36,
+                            bgcolor: avatarColor(m.display_name),
+                            fontSize: 14,
+                            fontWeight: 700,
+                          }}
+                        >
+                          {m.display_name.slice(0, 1).toUpperCase()}
+                        </Avatar>
+                      </ListItemAvatar>
+                      <ListItemText
+                        primary={label}
+                        secondary={m.role === "admin" ? "Admin" : "Member"}
+                        primaryTypographyProps={{ fontWeight: 700, fontSize: 14 }}
                       />
-                    )}
-                    {isAdmin && m.user_id !== profile.id && (
-                      <>
-                        <Button
+                      {m.role === "admin" && (
+                        <Chip
                           size="small"
-                          sx={{ mr: 0.5, textTransform: "none" }}
-                          onClick={() =>
-                            handleSetMemberRole(
-                              m.user_id,
-                              m.role === "admin" ? "member" : "admin"
-                            )
-                          }
-                        >
-                          {m.role === "admin" ? "Demote" : "Make admin"}
-                        </Button>
-                        <IconButton
-                          aria-label={`Remove ${m.display_name}`}
-                          size="small"
-                          onClick={() => handleRemoveMember(m.user_id, m.display_name)}
-                        >
-                          <PersonRemoveIcon fontSize="small" />
-                        </IconButton>
-                      </>
-                    )}
-                  </ListItemButton>
-                ))}
+                          label="Admin"
+                          icon={<AdminPanelSettingsIcon sx={{ fontSize: "16px !important" }} />}
+                          sx={{
+                            mr: 0.5,
+                            height: 24,
+                            fontWeight: 700,
+                            bgcolor: "action.selected",
+                            color: "primary.main",
+                          }}
+                        />
+                      )}
+                      {isAdmin && m.user_id !== profile.id && (
+                        <>
+                          <Button
+                            size="small"
+                            sx={{ mr: 0.25, textTransform: "none", fontWeight: 600 }}
+                            onClick={() =>
+                              handleSetMemberRole(
+                                m.user_id,
+                                m.role === "admin" ? "member" : "admin"
+                              )
+                            }
+                          >
+                            {m.role === "admin" ? "Demote" : "Make admin"}
+                          </Button>
+                          <IconButton
+                            aria-label={`Remove ${m.display_name}`}
+                            size="small"
+                            onClick={() => handleRemoveMember(m.user_id, m.display_name)}
+                          >
+                            <PersonRemoveIcon fontSize="small" />
+                          </IconButton>
+                        </>
+                      )}
+                    </ListItemButton>
+                  );
+                })}
               </List>
-            </Paper>
+            </Box>
 
             {canAddMembers && (
-              <Paper variant="outlined" sx={{ borderColor: "divider", borderRadius: 2, overflow: "hidden" }}>
-                <Box
-                  sx={{
-                    px: 1.5,
-                    pt: 1.25,
-                    pb: 0.5,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 1,
-                  }}
-                >
-                  <Typography variant="overline" color="text.secondary" sx={{ flex: 1 }}>
+              <Box>
+                <Stack direction="row" alignItems="center" spacing={1} mb={1}>
+                  <Typography fontWeight={800} fontSize={13} sx={{ flex: 1 }}>
                     Add people
                   </Typography>
                   <Button
                     size="small"
-                    variant="contained"
+                    variant="outlined"
+                    startIcon={<PersonAddAltIcon />}
                     disabled={!addPick.length}
                     onClick={handleAddMembers}
+                    sx={{ textTransform: "none", borderRadius: 2, fontWeight: 700 }}
                   >
                     Add{addPick.length ? ` (${addPick.length})` : ""}
                   </Button>
-                </Box>
+                </Stack>
                 <List dense disablePadding>
                   {others
                     .filter((p) => !members.some((m) => m.user_id === p.user_id))
@@ -4704,32 +5858,73 @@ function ChatScreen({
                               : [...g, p.user_id]
                           )
                         }
+                        sx={{ borderRadius: 2, py: 0.85, px: 0.5 }}
                       >
+                        <ListItemAvatar sx={{ minWidth: 44 }}>
+                          <Avatar
+                            sx={{
+                              width: 36,
+                              height: 36,
+                              bgcolor: avatarColor(p.display_name),
+                              fontSize: 14,
+                              fontWeight: 700,
+                            }}
+                          >
+                            {p.display_name.slice(0, 1).toUpperCase()}
+                          </Avatar>
+                        </ListItemAvatar>
                         <ListItemText
                           primary={p.display_name}
                           secondary={p.online ? "Online" : "Offline"}
-                          primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }}
+                          primaryTypographyProps={{ fontWeight: 700, fontSize: 14 }}
+                        />
+                        <Checkbox
+                          edge="end"
+                          size="small"
+                          checked={addPick.includes(p.user_id)}
+                          tabIndex={-1}
+                          disableRipple
                         />
                       </ListItemButton>
                     ))}
                 </List>
                 {!others.filter((p) => !members.some((m) => m.user_id === p.user_id)).length && (
-                  <Typography color="text.secondary" variant="body2" sx={{ px: 1.5, pb: 1.5 }}>
+                  <Typography color="text.secondary" variant="body2" sx={{ py: 1 }}>
                     No other people on the LAN to add.
                   </Typography>
                 )}
-              </Paper>
+              </Box>
             )}
           </Stack>
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          {inGroup && (
-            <Button color="error" onClick={handleLeaveGroup}>
+        <DialogActions sx={{ px: 2.5, pb: 2, pt: 1 }}>
+          {!isAnnounceBoard && inGroup && (
+            <Button
+              color="error"
+              startIcon={<LogoutIcon />}
+              onClick={handleLeaveGroup}
+              sx={{ textTransform: "none", fontWeight: 700, mr: "auto" }}
+            >
               Leave group
             </Button>
           )}
-          <Box flex={1} />
-          <Button onClick={() => setMembersOpen(false)}>Close</Button>
+          {!isAnnounceBoard && !inGroup && (
+            <Button
+              color="error"
+              startIcon={<DeleteOutlineIcon />}
+              onClick={() => handleRemoveLeftGroup(active)}
+              sx={{ textTransform: "none", fontWeight: 700, mr: "auto" }}
+            >
+              Remove from chat list
+            </Button>
+          )}
+          <Button
+            color="primary"
+            onClick={() => setMembersOpen(false)}
+            sx={{ textTransform: "none", fontWeight: 700 }}
+          >
+            Close
+          </Button>
         </DialogActions>
       </Dialog>
 
@@ -4791,6 +5986,15 @@ function ChatScreen({
             let fileSize: number;
             let fileName: string;
             if (zip) {
+              if (items.length > BUNDLE_MAX_FILES) {
+                throw new Error(
+                  `Too many files (${items.length}; max ${BUNDLE_MAX_FILES}). Large trees like node_modules often exceed this.`
+                );
+              }
+              const sum = items.reduce((n, i) => n + (Number(i.size) || 0), 0);
+              if (sum > BUNDLE_MAX_BYTES) {
+                throw new Error(`Selection is about ${formatBytes(sum)} (max 5 GiB).`);
+              }
               const result = await peerApi.packBundle(items.map((i) => ({ abs_path: i.abs_path, rel_path: i.rel_path })));
               filePath = result.path;
               fileSize = result.size;
@@ -4822,6 +6026,137 @@ function ChatScreen({
         onClose={() => setHelpOpen(false)}
         ctx={commandCtx}
       />
+
+      <Snackbar
+        open={!!status}
+        autoHideDuration={8000}
+        onClose={() => setStatus("")}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        sx={{ bottom: { xs: 88, sm: 24 } }}
+      >
+        <Alert
+          severity="info"
+          variant="filled"
+          onClose={() => setStatus("")}
+          sx={{ maxWidth: 480, boxShadow: 3 }}
+        >
+          {status}
+        </Alert>
+      </Snackbar>
+
+      <Dialog
+        open={chatInfoOpen && !!active}
+        onClose={() => setChatInfoOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>{activeTitle} — Media & links</DialogTitle>
+        <Tabs
+          value={chatInfoTab}
+          onChange={(_, v) => setChatInfoTab(v)}
+          sx={{ px: 2, borderBottom: 1, borderColor: "divider" }}
+        >
+          <Tab label="Media" />
+          <Tab label="Docs" />
+          <Tab label="Links" />
+        </Tabs>
+        <DialogContent dividers sx={{ minHeight: 280, p: 0 }}>
+          {(() => {
+            const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|svg|heic|avif)$/i;
+            const jump = (messageId: string) => {
+              setChatInfoOpen(false);
+              setHighlightMsgId(messageId);
+              stickToBottomRef.current = false;
+              requestAnimationFrame(() => {
+                document.getElementById(`msg-${messageId}`)?.scrollIntoView({
+                  behavior: "smooth",
+                  block: "center",
+                });
+              });
+            };
+            if (chatInfoTab === 0 || chatInfoTab === 1) {
+              const files = messages.filter((m) => m.kind === "file_notice" && m.file_id);
+              const rows = files.filter((m) => {
+                const name = (m.file_id && fileNames[m.file_id]) || "";
+                const isImg = IMAGE_RE.test(name);
+                return chatInfoTab === 0 ? isImg : !isImg;
+              });
+              if (!rows.length) {
+                return (
+                  <Typography color="text.secondary" sx={{ p: 2.5 }}>
+                    {chatInfoTab === 0 ? "No media in this chat yet." : "No documents in this chat yet."}
+                  </Typography>
+                );
+              }
+              return (
+                <List dense>
+                  {rows.map((m) => {
+                    const name = (m.file_id && fileNames[m.file_id]) || "Encrypted file";
+                    return (
+                      <ListItemButton key={m.id} onClick={() => jump(m.id)}>
+                        <ListItemIcon>
+                          {chatInfoTab === 0 ? (
+                            <InsertDriveFileIcon fontSize="small" color="primary" />
+                          ) : (
+                            <InsertDriveFileIcon fontSize="small" />
+                          )}
+                        </ListItemIcon>
+                        <ListItemText
+                          primary={name}
+                          secondary={formatClock(m.created_at)}
+                          primaryTypographyProps={{ noWrap: true }}
+                        />
+                      </ListItemButton>
+                    );
+                  })}
+                </List>
+              );
+            }
+            const linkRows: { id: string; url: string; at: string }[] = [];
+            for (const m of messages) {
+              if (m.kind === "deleted" || m.kind === "file_notice") continue;
+              const body = plain[m.id] || "";
+              const found = body.match(URL_RE);
+              if (!found) continue;
+              for (const url of found) {
+                linkRows.push({ id: m.id, url, at: m.created_at });
+              }
+            }
+            if (!linkRows.length) {
+              return (
+                <Typography color="text.secondary" sx={{ p: 2.5 }}>
+                  No links in this chat yet.
+                </Typography>
+              );
+            }
+            return (
+              <List dense>
+                {linkRows.map((row, i) => (
+                  <ListItemButton
+                    key={`${row.id}-${i}`}
+                    onClick={() => {
+                      void openExternalLink(row.url);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      jump(row.id);
+                    }}
+                  >
+                    <ListItemText
+                      primary={row.url}
+                      secondary={`${formatClock(row.at)} · open in browser · right-click to jump`}
+                      primaryTypographyProps={{ noWrap: true, fontSize: 13, color: "primary.main" }}
+                    />
+                  </ListItemButton>
+                ))}
+              </List>
+            );
+          })()}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setChatInfoOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Virus scan warning — outgoing send confirm, or inbound download notice */}
       <Dialog open={!!scanWarn} maxWidth="xs" fullWidth>
@@ -4881,6 +6216,7 @@ function SettingsScreen(props: {
   const { mode, setMode } = useContext(ThemeMode);
   const [fp, setFp] = useState("");
   const [name, setName] = useState(props.profile.display_name);
+  const [team, setTeam] = useState(props.profile.team || "");
   const [savingName, setSavingName] = useState(false);
   const [status, setStatus] = useState("");
   const [notifOn, setNotifOn] = useState(true);
@@ -4926,12 +6262,16 @@ function SettingsScreen(props: {
 
   async function saveName() {
     const trimmed = name.trim();
-    if (!trimmed || trimmed === props.profile.display_name) return;
+    const teamTrimmed = team.trim();
+    if (!trimmed) return;
+    const nameSame = trimmed === props.profile.display_name;
+    const teamSame = teamTrimmed === (props.profile.team || "").trim();
+    if (nameSame && teamSame) return;
     setSavingName(true);
     try {
-      const p = await peerApi.updateDisplayName(trimmed);
+      const p = await peerApi.updateDisplayName(trimmed, teamTrimmed);
       props.onNameUpdated(p);
-      setStatus("Display name updated");
+      setStatus("Profile updated");
     } catch (err: any) {
       setStatus(err?.message || String(err));
     } finally {
@@ -4990,7 +6330,7 @@ function SettingsScreen(props: {
           <Typography variant="h6" gutterBottom>
             Profile
           </Typography>
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+          <Stack spacing={1.5} sx={{ mb: 1.5 }}>
             <TextField
               label="Display name"
               size="small"
@@ -5004,10 +6344,31 @@ function SettingsScreen(props: {
                 }
               }}
             />
+            <TextField
+              label="Team"
+              size="small"
+              fullWidth
+              value={team}
+              onChange={(e) => setTeam(e.target.value)}
+              placeholder="HMIS"
+              helperText="e.g. HMIS, Shakti"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  saveName();
+                }
+              }}
+            />
             <Button
               variant="contained"
-              disabled={savingName || !name.trim() || name.trim() === props.profile.display_name}
+              disabled={
+                savingName ||
+                !name.trim() ||
+                (name.trim() === props.profile.display_name &&
+                  team.trim() === (props.profile.team || "").trim())
+              }
               onClick={saveName}
+              sx={{ alignSelf: "flex-start" }}
             >
               Save
             </Button>
@@ -5199,10 +6560,7 @@ function SettingsScreen(props: {
         )}
 
         <Alert severity="info">
-          No central server — chats live in local SQLite and deliver when peers come online. For
-          reliable discovery and delivery, allow PeerChat through your firewall: UDP 41234 for
-          discovery and TCP {props.profile.listen_port} for peer delivery (this TCP port is chosen
-          automatically and may change if it's busy).
+          No central server — chats live in local SQLite and deliver when peers come online.
         </Alert>
         {status && (
           <Alert severity="success" onClose={() => setStatus("")}>

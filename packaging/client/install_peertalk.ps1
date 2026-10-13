@@ -51,11 +51,11 @@ Write-Host "Installing $ProductName $version ..."
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 
 # Stop running instance so we can overwrite (update path).
-Get-Process -Name "PeerTalk","lanmsg" -ErrorAction SilentlyContinue | ForEach-Object {
+Get-Process -Name "PeerTalk","peerchat","lanmsg" -ErrorAction SilentlyContinue | ForEach-Object {
   try { $_.CloseMainWindow() | Out-Null } catch {}
 }
 Start-Sleep -Milliseconds 400
-Get-Process -Name "PeerTalk","lanmsg" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -Name "PeerTalk","peerchat","lanmsg" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 $destExe = Join-Path $InstallRoot $ExeName
 Copy-Item -Force $SourceExe $destExe
@@ -67,6 +67,7 @@ $uninstallBat = Join-Path $InstallRoot $UninstallName
 @echo off
 echo Uninstalling PeerTalk...
 taskkill /IM PeerTalk.exe /F >nul 2>&1
+taskkill /IM peerchat.exe /F >nul 2>&1
 taskkill /IM lanmsg.exe /F >nul 2>&1
 set "SM=%APPDATA%\Microsoft\Windows\Start Menu\Programs\PeerTalk"
 if exist "%SM%" rmdir /s /q "%SM%"
