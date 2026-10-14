@@ -40,9 +40,33 @@ pub struct PeerBeacon {
     pub ts: f64,
 }
 
+const PEER_HUB_TTL: Duration = Duration::from_secs(45);
+
 #[derive(Clone, Default)]
 pub struct DiscoveryHub {
-    pub peers: Arc<RwLock<HashMap<String, PeerBeacon>>>,
+    /// peer_id → (beacon, last_heard)
+    peers: Arc<RwLock<HashMap<String, (PeerBeacon, Instant)>>>,
+}
+
+impl DiscoveryHub {
+    pub async fn upsert(&self, peer: PeerBeacon) {
+        let id = peer.user_id.clone();
+        self.peers
+            .write()
+            .await
+            .insert(id, (peer, Instant::now()));
+    }
+
+    /// Drop stale hub entries and return currently fresh peers.
+    pub async fn fresh_peers(&self) -> HashMap<String, PeerBeacon> {
+        let now = Instant::now();
+        let mut guard = self.peers.write().await;
+        guard.retain(|_, (_, at)| now.duration_since(*at) <= PEER_HUB_TTL);
+        guard
+            .iter()
+            .map(|(k, (b, _))| (k.clone(), b.clone()))
+            .collect()
+    }
 }
 
 /// True if this IP is usable for peer delivery on a LAN (not loopback / unspecified).
@@ -195,6 +219,20 @@ async fn broadcast_datagram(payload: &[u8], discovery_port: u16) {
     }
 }
 
+/// Unicast a datagram to one host's discovery port.
+async fn unicast_datagram(payload: &[u8], ip: &str, discovery_port: u16) {
+    if !is_usable_lan_ip(ip) {
+        return;
+    }
+    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await {
+        let _ = sock
+            .send_to(payload, format!("{ip}:{discovery_port}"))
+            .await;
+    }
+}
+
+/// Presence beacons: listen for who/peer, unicast peer status to known non-blocked
+/// peers (so blocked users stop seeing us online). New contacts still use who-scan.
 pub async fn run_beacon(
     hub: DiscoveryHub,
     listen_port: u16,
@@ -203,6 +241,7 @@ pub async fn run_beacon(
     mut beacon: PeerBeacon,
     live_display_name: Arc<parking_lot::Mutex<String>>,
     live_team: Arc<parking_lot::Mutex<String>>,
+    db: Arc<parking_lot::Mutex<rusqlite::Connection>>,
 ) {
     let sock = match UdpSocket::bind(format!("0.0.0.0:{discovery_port}")).await {
         Ok(s) => s,
@@ -229,16 +268,44 @@ pub async fn run_beacon(
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0);
                 if let Ok(raw) = serde_json::to_vec(&beacon) {
-                    broadcast_datagram(&raw, discovery_port).await;
+                    // Unicast only — global peer broadcast would leak presence to blocked peers.
+                    let targets: Vec<String> = {
+                        let conn = db.lock();
+                        crate::db::list_peers(&conn)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|p| p.get("blocked").and_then(|v| v.as_bool()) != Some(true))
+                            .filter_map(|p| {
+                                p.get("last_ip")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .filter(|ip| is_usable_lan_ip(ip))
+                            .collect()
+                    };
+                    for ip in targets {
+                        unicast_datagram(&raw, &ip, discovery_port).await;
+                    }
                 }
             }
             res = sock.recv_from(&mut buf) => {
                 if let Ok((n, addr)) = res {
-                    handle_packet(&hub, &sock, &buf[..n], addr, &beacon).await;
+                    handle_packet(&hub, &sock, &buf[..n], addr, &beacon, &db).await;
                 }
             }
         }
     }
+}
+
+fn ip_is_blocked_peer(db: &parking_lot::Mutex<rusqlite::Connection>, ip: &str) -> bool {
+    let conn = db.lock();
+    crate::db::list_peers(&conn)
+        .unwrap_or_default()
+        .into_iter()
+        .any(|p| {
+            p.get("blocked").and_then(|v| v.as_bool()) == Some(true)
+                && p.get("last_ip").and_then(|v| v.as_str()) == Some(ip)
+        })
 }
 
 async fn handle_packet(
@@ -247,6 +314,7 @@ async fn handle_packet(
     data: &[u8],
     addr: SocketAddr,
     self_beacon: &PeerBeacon,
+    db: &Arc<parking_lot::Mutex<rusqlite::Connection>>,
 ) {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(data) else {
         return;
@@ -257,7 +325,12 @@ async fn handle_packet(
         return;
     }
     let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    let src = addr.ip().to_string();
     if kind == "who" {
+        // Hide from blocked peers: do not answer their discovery probes.
+        if ip_is_blocked_peer(db, &src) {
+            return;
+        }
         if let Ok(raw) = serde_json::to_vec(self_beacon) {
             let _ = sock.send_to(&raw, addr).await;
         }
@@ -274,13 +347,12 @@ async fn handle_packet(
     }
     // Always prefer the UDP source address — self-reported IP is often 127.0.0.1
     // on offline intranet PCs (old lan_ip fallback) and breaks reverse delivery.
-    let src = addr.ip().to_string();
     if is_usable_lan_ip(&src) {
         peer.ip = src;
     } else if !is_usable_lan_ip(&peer.ip) {
         peer.ip = src;
     }
-    hub.peers.write().await.insert(peer.user_id.clone(), peer);
+    hub.upsert(peer).await;
 }
 
 /// A LAN device observed via ARP (no PeerTalk). MAC is never returned or stored.

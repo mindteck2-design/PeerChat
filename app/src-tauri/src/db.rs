@@ -909,27 +909,26 @@ pub fn peer_blocked(conn: &Connection, user_id: &str) -> Result<bool, String> {
     .map(|o| o.unwrap_or(false))
 }
 
-/// Block or unblock a peer for DMs. Blocking also unpins trust and mutes the DM thread.
+/// Block or unblock a peer for DMs. Trust (pinned) is preserved so unblock does not
+/// re-trigger first-contact. Blocking mutes the DM; unblock unmutes it.
 pub fn set_peer_blocked(conn: &Connection, user_id: &str, blocked: bool) -> Result<(), String> {
     let n = conn
         .execute(
-            "UPDATE peers SET blocked=?2, pinned=CASE WHEN ?2=1 THEN 0 ELSE pinned END WHERE user_id=?1",
+            "UPDATE peers SET blocked=?2 WHERE user_id=?1",
             params![user_id, blocked as i64],
         )
         .map_err(|e| e.to_string())?;
     if n == 0 {
         return Err("unknown peer".into());
     }
-    if blocked {
-        if let Some(profile) = get_profile(conn)? {
-            let me = profile.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            if !me.is_empty() {
-                let cid = dm_conversation_id(me, user_id);
-                let _ = set_conversation_muted(conn, &cid, true);
-                if let Ok(Some(legacy)) = dm_id_for_peer(conn, user_id) {
-                    if legacy != cid {
-                        let _ = set_conversation_muted(conn, &legacy, true);
-                    }
+    if let Some(profile) = get_profile(conn)? {
+        let me = profile.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !me.is_empty() {
+            let cid = dm_conversation_id(me, user_id);
+            let _ = set_conversation_muted(conn, &cid, blocked);
+            if let Ok(Some(legacy)) = dm_id_for_peer(conn, user_id) {
+                if legacy != cid {
+                    let _ = set_conversation_muted(conn, &legacy, blocked);
                 }
             }
         }

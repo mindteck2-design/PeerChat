@@ -6,10 +6,16 @@ use rusqlite::{Connection, OptionalExtension};
 use rustls::pki_types::ServerName;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
+
+/// Suppress duplicate OS toasts for the same logical inbox event (outbox retries).
+static RECENT_TOASTS: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const TOAST_DEDUPE_SECS: u64 = 10;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 
@@ -132,11 +138,30 @@ fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
     let kind = info.get("kind").and_then(|v| v.as_str()).unwrap_or("text");
     if matches!(
         kind,
-        "reaction" | "pin" | "unpin" | "deleted" | "game_move"
+        "reaction" | "pin" | "unpin" | "deleted" | "game_move" | "group_event" | "system"
     ) {
         return;
     }
     let from_id = info.get("from_id").and_then(|v| v.as_str()).unwrap_or("");
+    let message_id = info.get("message_id").and_then(|v| v.as_str()).unwrap_or("");
+    let cid_early = info
+        .get("conversation_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let dedupe_key = if !message_id.is_empty() {
+        format!("{cid_early}:{message_id}")
+    } else {
+        format!("{cid_early}:{from_id}:{kind}")
+    };
+    {
+        let mut recent = RECENT_TOASTS.lock();
+        let now = Instant::now();
+        recent.retain(|_, at| now.duration_since(*at) < Duration::from_secs(TOAST_DEDUPE_SECS));
+        if recent.contains_key(&dedupe_key) {
+            return;
+        }
+        recent.insert(dedupe_key, now);
+    }
     let my_id = {
         let conn = db.lock();
         db::get_profile(&conn)
@@ -572,12 +597,19 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                     .and_then(|v| v.as_str())
                     .or_else(|| payload.get("conversation_id").and_then(|v| v.as_str()))
                     .unwrap_or("");
+                let message_id = msg
+                    .and_then(|m| m.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                // Only toast for newly inserted message rows — never force-fresh on
+                // group_event / file-meta redelivery (that caused double OS toasts).
                 Some(json!({
                     "conversation_id": cid,
                     "from_name": from.and_then(|p| p.get("display_name")).and_then(|v| v.as_str()).unwrap_or("Peer"),
                     "from_id": from.and_then(|p| p.get("user_id")).and_then(|v| v.as_str()).unwrap_or(""),
                     "kind": kind,
-                    "fresh": fresh_message || (payload.get("message").is_none() && has_inbox),
+                    "message_id": message_id,
+                    "fresh": fresh_message,
                 }))
             } else {
                 None

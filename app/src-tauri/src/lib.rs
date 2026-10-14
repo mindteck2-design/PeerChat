@@ -73,45 +73,6 @@ fn drain_pending_share(app: &AppHandle) {
     }
 }
 
-fn wipe_dir_contents(dir: &PathBuf) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let _ = std::fs::remove_dir_all(&path);
-        } else {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-}
-
-/// One-time clean break: PeerChat must not inherit LanMsg chats/keys/certs.
-/// Migrating old data left mismatched identities → "[unable to decrypt]" and
-/// false "certificate changed" reviews. After this wipe, setup runs as a new app.
-fn ensure_clean_break(data: &PathBuf) {
-    let marker = data.join(".clean_break_v1");
-    if marker.exists() {
-        return;
-    }
-    let _ = std::fs::create_dir_all(data);
-    wipe_dir_contents(data);
-
-    // Remove leftover LanMsg app data so it cannot be re-imported.
-    for env_key in ["APPDATA", "LOCALAPPDATA"] {
-        let Ok(base) = std::env::var(env_key) else {
-            continue;
-        };
-        let legacy = PathBuf::from(&base).join(LEGACY_APP_ID);
-        if legacy.exists() && legacy != *data {
-            let _ = std::fs::remove_dir_all(&legacy);
-        }
-    }
-
-    let _ = std::fs::write(&marker, b"1");
-}
-
 /// Poll flags left by a second Start Menu / Apps launch (or --share).
 fn drain_second_instance_signals(app: &AppHandle) {
     drain_pending_show(app);
@@ -531,6 +492,7 @@ fn start_runtime_inner(
     let hub = state.discovery.clone();
     let live_name = state.live_display_name.clone();
     let live_team = state.live_team.clone();
+    let disc_db = state.db.clone();
     let beacon = PeerBeacon {
         magic: "PEERCHAT".into(),
         v: "4".into(),
@@ -546,7 +508,17 @@ fn start_runtime_inner(
         ts: 0.0,
     };
     tauri::async_runtime::spawn(async move {
-        discovery::run_beacon(hub, port, 41234, rx, beacon, live_name, live_team).await;
+        discovery::run_beacon(
+            hub,
+            port,
+            41234,
+            rx,
+            beacon,
+            live_name,
+            live_team,
+            disc_db,
+        )
+        .await;
     });
 
     // outbox flusher
@@ -770,10 +742,12 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
         .unwrap_or("")
         .to_string();
     let scanned = discovery::scan(41234, &self_id).await?;
-    // merge hub
-    let hub_peers = state.discovery.peers.read().await.clone();
+    // Merge hub (TTL-pruned) so offline PCs drop within ~45s.
+    let hub_peers = state.discovery.fresh_peers().await;
     let mut map = std::collections::HashMap::new();
     for p in scanned {
+        // Keep scan results warm in the hub too.
+        state.discovery.upsert(p.clone()).await;
         map.insert(p.user_id.clone(), p);
     }
     for (k, v) in hub_peers {
@@ -2649,6 +2623,78 @@ fn windows_defender_scan(path: &str) -> ScanResult {
     }
 }
 
+// ─── Windows autostart (HKCU Run → tray) ───────────────────────────────────────
+
+const AUTOSTART_VALUE: &str = "PeerChat";
+
+#[cfg(windows)]
+fn windows_autostart_command_line() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = exe.to_string_lossy();
+    Ok(format!("\"{exe}\" --tray"))
+}
+
+#[cfg(windows)]
+fn set_windows_autostart(enabled: bool) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    if enabled {
+        let cmd = windows_autostart_command_line()?;
+        let out = std::process::Command::new("reg")
+            .args(["add", key, "/v", AUTOSTART_VALUE, "/t", "REG_SZ", "/d", &cmd, "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+    } else {
+        let _ = std::process::Command::new("reg")
+            .args(["delete", key, "/v", AUTOSTART_VALUE, "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_autostart_enabled() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    let out = std::process::Command::new("reg")
+        .args(["query", key, "/v", AUTOSTART_VALUE])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
+#[tauri::command]
+fn get_autostart_enabled() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        Ok(windows_autostart_enabled())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+fn set_autostart_enabled(enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        set_windows_autostart(enabled)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Err("Autostart is only available on Windows".into())
+    }
+}
+
 // ─── Windows Firewall (LAN discovery) ─────────────────────────────────────────
 
 /// Allow inbound TCP/UDP for this PeerChat.exe so LAN beacons and DMs work.
@@ -2814,7 +2860,6 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&data).ok();
-            ensure_clean_break(&data);
             let db_path = data.join("peerchat.sqlite");
             let conn = db::open(&db_path)?;
             let shared: SharedDb = Arc::new(Mutex::new(conn));
@@ -2928,6 +2973,23 @@ pub fn run() {
             // Keep the handle alive for the process lifetime (managed by Tauri).
             std::mem::forget(tray);
 
+            // Login / autostart launches with --tray: stay in tray until user opens.
+            let start_in_tray = std::env::args().any(|a| a == "--tray");
+            if start_in_tray {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.hide();
+                }
+            }
+            // First-run default: register Start-with-Windows (tray) once.
+            #[cfg(windows)]
+            {
+                let marker = data.join(".autostart_default_v1");
+                if !marker.exists() {
+                    let _ = set_windows_autostart(true);
+                    let _ = std::fs::write(&marker, b"1");
+                }
+            }
+
             // Pick up Start Menu reopen / --share signals from a preempted second instance.
             drain_second_instance_signals(app.handle());
             let share_handle = app.handle().clone();
@@ -3009,6 +3071,8 @@ pub fn run() {
             tls_fingerprint_peer,
             get_app_setting,
             set_app_setting,
+            get_autostart_enabled,
+            set_autostart_enabled,
             accept_pending_identity,
             upsert_transfer,
             list_transfers,

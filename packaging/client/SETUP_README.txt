@@ -45,6 +45,12 @@ If people don't appear under People → refresh:
 - On corporate Domain networks, an admin may need to allow the app.
 - Click the refresh icon in the sidebar (People) after both apps are open.
 
+Start with Windows
+------------------
+PeerChat can launch in the system tray when you sign in to Windows (so it still
+receives messages). Toggle this under Settings → Startup. First launch enables
+it by default; you can turn it off anytime.
+
 Optional NSIS installer
 -----------------------
 If this folder also contains PeerChat_*_x64-setup.exe, you may use that instead —

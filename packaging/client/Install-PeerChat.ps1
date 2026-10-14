@@ -63,7 +63,7 @@ if (-not $SourceExe -or -not (Test-Path $SourceExe)) {
 }
 
 # -- Determine version --------------------------------------------------------
-$version = "0.4.2"
+$version = "0.4.3"
 $verBeside = Join-Path (Split-Path -Parent $SourceExe) $VersionFile
 if (Test-Path $verBeside) {
     $version = (Get-Content $verBeside -Raw).Trim()
@@ -73,7 +73,7 @@ if (Test-Path $verBeside) {
         $version = $fvi.ProductVersion
         if (-not $version) { $version = $fvi.FileVersion }
     } catch {}
-    if (-not $version) { $version = "0.4.2" }
+    if (-not $version) { $version = "0.4.3" }
 }
 
 if (-not $Quiet) {

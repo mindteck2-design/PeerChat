@@ -1177,24 +1177,45 @@ function ChatScreen({
         if (!cid || fromId === profile.id) return;
         if (kind === "reaction" || kind === "pin" || kind === "unpin" || kind === "deleted") return;
 
-        // Decrypt game_move for session persistence + active game UI.
-        // Moves carry boardAfter so a single latest snapshot can resync state.
+        // Decrypt game_move for session + UI. Apply actionable payloads (move/reveal)
+        // before result so the loser's board shows the winning move.
         if (kind === "game_move") {
           try {
             const msgs = await peerApi.listMessages(cid);
-            const latest = msgs.filter((m) => m.kind === "game_move" && m.sender_id === fromId).at(-1);
-            if (!latest) return;
+            const gameRows = msgs.filter((m) => m.kind === "game_move" && m.sender_id === fromId);
+            if (!gameRows.length) return;
             const peerList = await peerApi.listPeers();
             const peer = peerList.find((x) => x.user_id === fromId);
             if (!peer) return;
-            const plaintext = await decryptMessage(
-              { ...latest, wrapped_keys: latest.wrapped_keys || {} },
-              profile.id,
-              identity
-            );
-            const gameMsg = JSON.parse(plaintext) as GameMsg;
-            applyInboundToSession(fromId, gameMsg, peerList, profile.id);
-            gameDispatchRef.current?.(fromId, gameMsg);
+            const parsed: GameMsg[] = [];
+            for (const row of gameRows.slice(-8)) {
+              try {
+                const plaintext = await decryptMessage(
+                  { ...row, wrapped_keys: row.wrapped_keys || {} },
+                  profile.id,
+                  identity
+                );
+                parsed.push(JSON.parse(plaintext) as GameMsg);
+              } catch {
+                /* skip undecryptable */
+              }
+            }
+            if (!parsed.length) return;
+            const actionable = [...parsed]
+              .reverse()
+              .find((g) => {
+                const t = (g.payload as { type?: string })?.type;
+                return t === "move" || t === "reveal" || t === "commit" || t === "accept" || t === "invite";
+              });
+            const resultMsg = [...parsed]
+              .reverse()
+              .find((g) => (g.payload as { type?: string })?.type === "result");
+            const ordered = [actionable, resultMsg].filter(Boolean) as GameMsg[];
+            const toApply = ordered.length ? ordered : [parsed[parsed.length - 1]];
+            for (const gameMsg of toApply) {
+              applyInboundToSession(fromId, gameMsg, peerList, profile.id);
+              gameDispatchRef.current?.(fromId, gameMsg);
+            }
           } catch {
             /* ignore malformed game messages */
           }
@@ -2797,6 +2818,27 @@ function ChatScreen({
     }
   }
 
+  /** Remove a DM thread locally; keeps peer trust/pin so reopening does not ask first-pass again. */
+  async function handleDeleteDmChat(conv: Conversation) {
+    if (conv.kind !== "dm") return;
+    const name = conv.peer_name || "this person";
+    if (
+      !window.confirm(
+        `Delete chat with ${name}? Messages are removed on this computer only. You can message them again later without re-trusting.`
+      )
+    ) {
+      return;
+    }
+    try {
+      await peerApi.deleteConversationLocal(conv.id);
+      if (active?.id === conv.id) setActive(null);
+      await refresh();
+      setStatus("Chat deleted");
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    }
+  }
+
   async function ensureAnnounceBoards() {
     try {
       const boards = await peerApi.ensureAnnouncementBoards();
@@ -3318,11 +3360,9 @@ function ChatScreen({
                     </Avatar>
                     <ListItemText
                       primary={p.display_name}
-                      secondary={
-                        p.online ? "Online" : lastSeenLabel(p.last_seen_at)
-                      }
+                      secondary={p.last_ip?.trim() || "No IP yet"}
                       primaryTypographyProps={{ fontWeight: 600, fontSize: 14, noWrap: true }}
-                      secondaryTypographyProps={{ fontSize: 12 }}
+                      secondaryTypographyProps={{ fontSize: 12, fontFamily: "ui-monospace, monospace" }}
                     />
                     <Box
                       sx={{
@@ -5109,6 +5149,22 @@ function ChatScreen({
             Delete messages…
           </Typography>
         </MenuItem>
+        {convMenu?.conv.kind === "dm" && (
+          <MenuItem
+            onClick={() => {
+              const c = convMenu.conv;
+              setConvMenu(null);
+              void handleDeleteDmChat(c);
+            }}
+          >
+            <ListItemIcon>
+              <DeleteForeverIcon fontSize="small" color="error" />
+            </ListItemIcon>
+            <Typography color="error.main" fontWeight={600}>
+              Delete chat…
+            </Typography>
+          </MenuItem>
+        )}
         {convMenu?.conv.kind === "group" && (
             <MenuItem
               onClick={() => {
@@ -6221,6 +6277,8 @@ function SettingsScreen(props: {
   const [status, setStatus] = useState("");
   const [notifOn, setNotifOn] = useState(true);
   const [notifBusy, setNotifBusy] = useState(false);
+  const [autostartOn, setAutostartOn] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
   const [downloadDir, setDownloadDir] = useState("");
   const [gamesEnabled, setGamesEnabled] = useState(false);
   const [shellExt, setShellExt] = useState(false);
@@ -6233,7 +6291,28 @@ function SettingsScreen(props: {
     peerApi.getAppSetting("download_dir").then((v) => setDownloadDir(v || "")).catch(() => {});
     peerApi.getAppSetting("games_enabled").then((v) => setGamesEnabled(v === "1")).catch(() => setGamesEnabled(false));
     peerApi.shellExtensionInstalled().then(setShellExt).catch(() => setShellExt(false));
+    peerApi
+      .getAutostartEnabled()
+      .then(setAutostartOn)
+      .catch(() => setAutostartOn(false));
   }, []);
+
+  async function toggleAutostart(enabled: boolean) {
+    setAutostartBusy(true);
+    try {
+      await peerApi.setAutostartEnabled(enabled);
+      setAutostartOn(await peerApi.getAutostartEnabled());
+      setStatus(
+        enabled
+          ? "PeerChat will start in the tray when you sign in to Windows"
+          : "Start with Windows turned off"
+      );
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    } finally {
+      setAutostartBusy(false);
+    }
+  }
 
   async function toggleNotifications(enabled: boolean) {
     setNotifBusy(true);
@@ -6323,6 +6402,25 @@ function SettingsScreen(props: {
           />
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             Get desktop alerts for new messages. Muted chats stay silent.
+          </Typography>
+        </Paper>
+
+        <Paper sx={{ p: 2.5 }} variant="outlined">
+          <Typography variant="h6" gutterBottom>
+            Startup
+          </Typography>
+          <FormControlLabel
+            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
+            labelPlacement="start"
+            disabled={autostartBusy}
+            control={
+              <Switch checked={autostartOn} onChange={(_, v) => toggleAutostart(v)} />
+            }
+            label="Start with Windows (system tray)"
+          />
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            After you sign in, PeerChat runs in the tray so it can receive messages and show
+            notifications. Open it from the tray icon.
           </Typography>
         </Paper>
 
@@ -6554,7 +6652,7 @@ function SettingsScreen(props: {
               label="Enable offline games"
             />
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              Shows the Games tab in the sidebar. Currently includes Snake, 2048, Tic-Tac-Toe, Rock Paper Scissors, and Dots & Boxes.
+              Shows the Games tab in the sidebar. Currently includes Snake, 2048, Tetris, Tic-Tac-Toe, Rock Paper Scissors, and Dots & Boxes.
             </Typography>
           </Paper>
         )}

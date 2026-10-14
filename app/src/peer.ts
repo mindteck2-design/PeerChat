@@ -143,6 +143,9 @@ export const peerApi = {
   getNotificationsEnabled: () => inv<boolean>("get_notifications_enabled"),
   setNotificationsEnabled: (enabled: boolean) =>
     inv<void>("set_notifications_enabled", { enabled }),
+  getAutostartEnabled: () => inv<boolean>("get_autostart_enabled"),
+  setAutostartEnabled: (enabled: boolean) =>
+    inv<void>("set_autostart_enabled", { enabled }),
   conversationIsMuted: (conversationId: string) =>
     inv<boolean>("conversation_is_muted", { conversationId }),
   openDm: (peerId: string) => inv<Conversation>("open_dm", { peerId }),
