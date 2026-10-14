@@ -1,6 +1,6 @@
-// Tetris — pure game logic. 10×20 board, classic 7-bag pieces.
+// Tetris — pure game logic. 15×20 board, classic 7-bag pieces.
 
-export const COLS = 10;
+export const COLS = 15;
 export const ROWS = 20;
 
 export type Cell = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7; // 0 empty, 1–7 piece colors
@@ -131,7 +131,8 @@ function lockPiece(state: TetrisState): TetrisState {
   let bag = [...state.bag];
   if (!bag.length) bag = shuffleBag();
   const nextKind = bag.shift()!;
-  const spawn = { kind: state.next, rot: 0, x: 3, y: 0 };
+  const spawnX = Math.floor((COLS - 4) / 2);
+  const spawn = { kind: state.next, rot: 0, x: spawnX, y: 0 };
   if (!fits(kept as Cell[], spawn.kind, spawn.rot, spawn.x, spawn.y)) {
     return {
       ...state,
@@ -165,9 +166,10 @@ export function newTetrisState(best = 0): TetrisState {
   const first = bag.shift()!;
   if (!bag.length) bag = shuffleBag();
   const next = bag.shift()!;
+  const spawnX = Math.floor((COLS - 4) / 2);
   return {
     board: emptyBoard(),
-    piece: { kind: first, rot: 0, x: 3, y: 0 },
+    piece: { kind: first, rot: 0, x: spawnX, y: 0 },
     next,
     bag,
     score: 0,

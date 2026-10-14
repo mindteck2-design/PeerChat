@@ -813,6 +813,7 @@ async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, String
         let _ = db::auto_accept_all_pending_identities(&conn);
         let _ = db::mark_peers_offline_except(&conn, &online_ids);
         let _ = db::mark_stale_peers_offline(&conn, 45);
+        let _ = db::dedupe_peers_by_ip(&conn);
     }
     // Kick delivery for peers that came online or moved to a new address.
     // Done after releasing conn to avoid any potential lock ordering issue.
@@ -1988,21 +1989,119 @@ async fn fetch_file_chunk(
     index: u32,
     uploader_id: String,
 ) -> Result<Value, String> {
+    let batch = fetch_file_chunks(state, file_id, index, 1, uploader_id).await?;
+    batch
+        .into_iter()
+        .next()
+        .ok_or_else(|| "missing chunk".to_string())
+}
+
+/// IPMsg-style binary stream download: decrypt on the wire path, append to receive temp.
+/// Falls back is handled by the frontend when this errors (old peers).
+#[tauri::command]
+async fn download_file_stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_id: String,
+    uploader_id: String,
+    content_key_b64: String,
+    from_index: u32,
+) -> Result<Value, String> {
+    let content_key = base64::engine::general_purpose::STANDARD
+        .decode(content_key_b64.trim())
+        .map_err(|e| e.to_string())?;
+    if content_key.len() != 32 {
+        return Err("invalid content key".into());
+    }
+    let (temp_path, total_chunks, crypto_v, expected) = {
+        let conn = state.db.lock();
+        let prog = db::get_receive_progress(&conn, &file_id)?.ok_or("receive not started")?;
+        let expected = prog.0;
+        let temp = prog.1.ok_or("missing temp path")?;
+        let meta = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
+        let total = meta["chunk_count"].as_i64().unwrap_or(0).max(0) as u32;
+        let crypto_v = meta["file_crypto_v"].as_i64().unwrap_or(1);
+        (PathBuf::from(temp), total, crypto_v, expected)
+    };
+    if from_index as i64 != expected {
+        return Err(format!("expected chunk {expected}, got {from_index}"));
+    }
+    let peer = {
+        let conn = state.db.lock();
+        db::get_peer(&conn, &uploader_id)?.ok_or("uploader offline/unknown")?
+    };
+    let ip = peer["last_ip"]
+        .as_str()
+        .filter(|s| discovery::is_usable_lan_ip(s))
+        .ok_or("no ip")?
+        .to_string();
+    let port = peer["last_port"]
+        .as_u64()
+        .or_else(|| peer["last_port"].as_i64().map(|p| p as u64))
+        .ok_or("no port")? as u16;
+    let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
+    let db = state.db.clone();
+    let fid = file_id.clone();
+    let temp_s = temp_path.display().to_string();
+    let next = peer_http::stream_download_and_append(
+        &ip,
+        port,
+        fp,
+        &file_id,
+        from_index,
+        &content_key,
+        crypto_v,
+        &temp_path,
+        total_chunks,
+        &app,
+        |done| {
+            let conn = db.lock();
+            db::upsert_receive_progress(&conn, &fid, done as i64, Some(&temp_s))
+        },
+    )
+    .await
+    .map_err(|e| format!("stream download failed: {e}"))?;
+    Ok(json!({ "next_index": next, "total": total_chunks }))
+}
+
+/// Pull `count` encrypted chunks (from `from_index`) over one TLS keep-alive session.
+#[tauri::command]
+async fn fetch_file_chunks(
+    state: State<'_, AppState>,
+    file_id: String,
+    from_index: u32,
+    count: u32,
+    uploader_id: String,
+) -> Result<Vec<Value>, String> {
+    let count = count.min(64).max(1);
+    // Prefer local staging when we are the uploader / already have chunks on disk.
     let local = {
         let conn = state.db.lock();
         db::get_file(&conn, &file_id).ok().flatten()
     };
     if let Some(meta) = local {
         if let Some(dir) = meta["staging_dir"].as_str() {
-            let path = PathBuf::from(dir).join(format!("{index}.chunk"));
-            let nonce_path = PathBuf::from(dir).join(format!("{index}.nonce"));
-            if path.is_file() {
+            let dir = PathBuf::from(dir);
+            let mut out = Vec::new();
+            let mut all_local = true;
+            for i in 0..count {
+                let index = from_index + i;
+                let path = dir.join(format!("{index}.chunk"));
+                let nonce_path = dir.join(format!("{index}.nonce"));
+                if !path.is_file() {
+                    all_local = false;
+                    break;
+                }
                 let data = std::fs::read(&path).map_err(|e| e.to_string())?;
                 let nonce = std::fs::read_to_string(&nonce_path).unwrap_or_default();
-                return Ok(json!({
+                out.push(json!({
+                    "index": index,
                     "nonce": nonce,
                     "data_b64": base64::engine::general_purpose::STANDARD.encode(data),
                 }));
+            }
+            if all_local && out.len() == count as usize {
+                return Ok(out);
             }
         }
     }
@@ -2013,24 +2112,16 @@ async fn fetch_file_chunk(
     let ip = peer["last_ip"]
         .as_str()
         .filter(|s| discovery::is_usable_lan_ip(s))
-        .ok_or("no ip")?;
+        .ok_or("no ip")?
+        .to_string();
     let port = peer["last_port"]
         .as_u64()
         .or_else(|| peer["last_port"].as_i64().map(|p| p as u64))
         .ok_or("no port")? as u16;
     let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
-    let body = json!({"file_id": file_id, "index": index});
-    let (resp, _) = peer_http::peer_request(ip, port, "/v1/file/chunk", Some(body), fp)
+    peer_http::fetch_chunks_keep_alive(&ip, port, fp, &file_id, from_index, count)
         .await
-        .map_err(|e| format!("connect to sender failed: {e}"))?;
-    if resp.get("error").is_some() {
-        return Err(resp
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("missing chunk")
-            .to_string());
-    }
-    Ok(resp)
+        .map_err(|e| format!("connect to sender failed: {e}"))
 }
 
 #[tauri::command]
@@ -2438,7 +2529,7 @@ fn list_directory_files(root: String) -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
-fn pack_bundle(app: AppHandle, entries: Vec<bundle::BundleEntry>) -> Result<Value, String> {
+async fn pack_bundle(app: AppHandle, entries: Vec<bundle::BundleEntry>) -> Result<Value, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -2447,12 +2538,33 @@ fn pack_bundle(app: AppHandle, entries: Vec<bundle::BundleEntry>) -> Result<Valu
     std::fs::create_dir_all(&dir).map_err(explain_io)?;
     let id = uuid::Uuid::new_v4().to_string();
     let path = dir.join(format!("{id}.zip"));
-    let (size, count) = bundle::pack(&path, &entries)?;
+    let path_str = path.display().to_string();
+    let name = format!("bundle-{}.zip", &id[..8]);
+    let app_progress = app.clone();
+    // Off the async runtime so Deflate/disk work cannot freeze the WebView.
+    let result = tokio::task::spawn_blocking(move || {
+        bundle::pack_with_progress(&path, &entries, |done, total, bytes| {
+            // Throttle UI events a bit for huge trees.
+            if done == total || done == 1 || done % 5 == 0 {
+                let _ = app_progress.emit(
+                    "bundle-pack-progress",
+                    json!({
+                        "done_files": done,
+                        "total_files": total,
+                        "bytes": bytes,
+                    }),
+                );
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let (size, count) = result;
     Ok(json!({
-        "path": path.display().to_string(),
+        "path": path_str,
         "size": size,
         "count": count,
-        "name": format!("bundle-{}.zip", &id[..8]),
+        "name": name,
     }))
 }
 
@@ -2866,6 +2978,7 @@ pub fn run() {
             {
                 let conn = shared.lock();
                 let _ = db::auto_accept_all_pending_identities(&conn);
+                let _ = db::dedupe_peers_by_ip(&conn);
             }
             app.manage(AppState {
                 db: shared.clone(),
@@ -3059,6 +3172,8 @@ pub fn run() {
             set_file_content_hash,
             send_file_notice,
             fetch_file_chunk,
+            fetch_file_chunks,
+            download_file_stream,
             ack_file_download,
             get_file,
             save_downloaded_file,

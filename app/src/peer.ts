@@ -246,10 +246,36 @@ export const peerApi = {
   sendFileNotice: (conversationId: string, fileId: string, recipientIds: string[]) =>
     inv<Message>("send_file_notice", { conversationId, fileId, recipientIds }),
   fetchFileChunk: (fileId: string, index: number, uploaderId: string) =>
-    inv<{ nonce: string; data_b64: string }>("fetch_file_chunk", {
+    inv<{ nonce: string; data_b64: string; index?: number }>("fetch_file_chunk", {
       fileId,
       index,
       uploaderId,
+    }),
+  /** Many chunks over one TLS keep-alive session (much faster for large files). */
+  fetchFileChunks: (
+    fileId: string,
+    fromIndex: number,
+    count: number,
+    uploaderId: string
+  ) =>
+    inv<Array<{ index: number; nonce: string; data_b64: string }>>("fetch_file_chunks", {
+      fileId,
+      fromIndex,
+      count,
+      uploaderId,
+    }),
+  /** Single TLS binary stream (IPMsg-style). Prefer this; fall back to fetchFileChunks. */
+  downloadFileStream: (
+    fileId: string,
+    uploaderId: string,
+    contentKeyB64: string,
+    fromIndex: number
+  ) =>
+    inv<{ next_index: number; total: number }>("download_file_stream", {
+      fileId,
+      uploaderId,
+      contentKeyB64,
+      fromIndex,
     }),
   ackFileDownload: (fileId: string, uploaderId: string) =>
     inv<void>("ack_file_download", { fileId, uploaderId }),

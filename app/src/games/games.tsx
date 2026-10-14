@@ -700,13 +700,13 @@ function peerFromSession(peers: Peer[], id: string, name: string): Peer {
 
 const TETRIS_COLORS: Record<number, string> = {
   0: "action.hover",
-  1: "#00f0f0", // I
-  2: "#f0f000", // O
-  3: "#a000f0", // T
-  4: "#00f000", // S
-  5: "#f00000", // Z
-  6: "#0000f0", // J
-  7: "#f0a000", // L
+  1: "#a8e8ef", // I — soft cyan
+  2: "#f5e9a8", // O — soft yellow
+  3: "#d4b8ef", // T — soft violet
+  4: "#b8e8b8", // S — soft green
+  5: "#f5b8b8", // Z — soft rose
+  6: "#b8c8f5", // J — soft blue
+  7: "#f5d0a8", // L — soft peach
 };
 
 function GameTetris({ onBack }: { onBack: () => void }) {
@@ -760,7 +760,7 @@ function GameTetris({ onBack }: { onBack: () => void }) {
   };
 
   const cells = renderBoard(state);
-  const cellPx = 22;
+  const cellPx = 18;
   const preview = previewCells(state.next);
 
   return (

@@ -4,8 +4,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 
-/** Larger chunks = fewer encrypt + IPC round-trips on big LAN files. */
-export const CHUNK_SIZE = 4 * 1024 * 1024;
+/** Larger chunks = fewer encrypt + TLS round-trips on big LAN files (max 8 MiB). */
+export const CHUNK_SIZE = 8 * 1024 * 1024;
 
 export type Identity = {
   x25519Private: Uint8Array;

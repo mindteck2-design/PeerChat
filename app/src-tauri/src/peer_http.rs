@@ -75,52 +75,43 @@ pub fn spawn_listener(
                 let Ok(mut tls) = acceptor.accept(tcp).await else {
                     return;
                 };
-                let mut buf = Vec::new();
+                // Keep-alive: many file-chunk fetches share one TLS session (huge speedup).
+                let mut pending = Vec::new();
                 let mut tmp = [0u8; 64 * 1024];
                 const MAX_REQ: usize = 16 * 1024 * 1024;
                 loop {
-                    match tls.read(&mut tmp).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if buf.len() + n > MAX_REQ {
-                                buf.clear();
+                    let req_bytes = match read_one_http_request(&mut tls, &mut pending, &mut tmp, MAX_REQ).await
+                    {
+                        Ok(Some(r)) => r,
+                        Ok(None) => break,
+                        Err(_) => break,
+                    };
+                    let req = String::from_utf8_lossy(&req_bytes);
+                    match handle_http(&req, &db, &my_id, &app) {
+                        HttpAction::Json { response, notify } => {
+                            if tls.write_all(response.as_bytes()).await.is_err() {
                                 break;
                             }
-                            buf.extend_from_slice(&tmp[..n]);
-                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                                // If Content-Length is present, keep reading until full body.
-                                let head = String::from_utf8_lossy(&buf);
-                                if let Some(cl) = head
-                                    .lines()
-                                    .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
-                                    .and_then(|l| l.split(':').nth(1))
-                                    .and_then(|v| v.trim().parse::<usize>().ok())
-                                {
-                                    if let Some(pos) = head.find("\r\n\r\n") {
-                                        let body_len = buf.len().saturating_sub(pos + 4);
-                                        if body_len >= cl {
-                                            break;
-                                        }
-                                        continue;
-                                    }
-                                } else {
-                                    break;
-                                }
+                            if let Some(info) = notify {
+                                desktop_notify_if_needed(&app, &db, &info);
+                                let _ = app.emit("inbox-updated", info);
                             }
                         }
-                        Err(_) => break,
+                        HttpAction::FileStream {
+                            staging,
+                            from_index,
+                            chunk_count,
+                        } => {
+                            // One-shot binary stream — closes after (IPMsg-style bulk transfer).
+                            if stream_file_chunks(&mut tls, &staging, from_index, chunk_count)
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            break;
+                        }
                     }
-                }
-                if buf.is_empty() {
-                    return;
-                }
-                let req = String::from_utf8_lossy(&buf);
-                let (resp, notify) = handle_http(&req, &db, &my_id, &app);
-                let _ = tls.write_all(resp.as_bytes()).await;
-                let _ = tls.shutdown().await;
-                if let Some(info) = notify {
-                    desktop_notify_if_needed(&app, &db, &info);
-                    let _ = app.emit("inbox-updated", info);
                 }
             });
         }
@@ -241,14 +232,29 @@ fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
     let _ = builder.show();
 }
 
-/// Returns `(http_response, Some(notify_payload))` when the UI should refresh.
-/// Notify payload may include conversation_id / from_name for desktop toasts.
-fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (String, Option<Value>) {
+enum HttpAction {
+    Json {
+        response: String,
+        notify: Option<Value>,
+    },
+    FileStream {
+        staging: std::path::PathBuf,
+        from_index: u32,
+        chunk_count: u32,
+    },
+}
+
+fn http_ok(response: String, notify: Option<Value>) -> HttpAction {
+    HttpAction::Json { response, notify }
+}
+
+/// Returns JSON response or a binary file-stream handoff.
+fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAction {
     let mut lines = req.split("\r\n");
     let first = lines.next().unwrap_or("");
     let parts: Vec<&str> = first.split_whitespace().collect();
     if parts.len() < 2 {
-        return (http_json(400, json!({"error":"bad request"})), None);
+        return http_ok(http_json(400, json!({"error":"bad request"})), None);
     }
     let method = parts[0];
     let path = parts[1];
@@ -258,7 +264,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
         ("GET", "/v1/hello") => {
             let conn = db.lock();
             let profile = db::get_profile(&conn).ok().flatten();
-            (
+            http_ok(
                 http_json(
                     200,
                     json!({
@@ -273,17 +279,17 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
         ("POST", "/v1/deliver") => {
             const MAX_DELIVER_BODY: usize = 2 * 1024 * 1024;
             if body.len() > MAX_DELIVER_BODY {
-                return (http_json(400, json!({"error":"frame too large"})), None);
+                return http_ok(http_json(400, json!({"error":"frame too large"})), None);
             }
             let Ok(payload) = serde_json::from_str::<Value>(body) else {
-                return (http_json(400, json!({"error":"bad json"})), None);
+                return http_ok(http_json(400, json!({"error":"bad json"})), None);
             };
             if let Some(ct) = payload
                 .pointer("/message/ciphertext")
                 .and_then(|v| v.as_str())
             {
                 if ct.len() > MAX_DELIVER_BODY {
-                    return (http_json(400, json!({"error":"ciphertext too large"})), None);
+                    return http_ok(http_json(400, json!({"error":"ciphertext too large"})), None);
                 }
             }
             let has_inbox = payload.get("message").is_some()
@@ -292,7 +298,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
             let mut fresh_message = false;
             let conn = db.lock();
             if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
-                return (http_json(500, json!({"error":"db busy"})), None);
+                return http_ok(http_json(500, json!({"error":"db busy"})), None);
             }
             if let Some(msg) = payload.get("message") {
                 let msg_conv = msg
@@ -320,14 +326,14 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                     && db::peer_blocked(&conn, sender_id).unwrap_or(false)
                 {
                     let _ = conn.execute_batch("ROLLBACK");
-                    return (http_json(200, json!({"ok": true, "blocked": true})), None);
+                    return http_ok(http_json(200, json!({"ok": true, "blocked": true})), None);
                 }
                 if !is_group && !msg_conv.is_empty() && !sender_id.is_empty() {
                     if let Err(e) =
                         db::reconcile_dm_on_deliver(&conn, &my_id, sender_id, msg_conv)
                     {
                         let _ = conn.execute_batch("ROLLBACK");
-                        return (http_json(500, json!({"error": e})), None);
+                        return http_ok(http_json(500, json!({"error": e})), None);
                     }
                 }
                 // Local receive time for ordering — ignore sender wall-clock skew.
@@ -372,7 +378,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                     Ok(is_new) => fresh_message = is_new,
                     Err(e) => {
                         let _ = conn.execute_batch("ROLLBACK");
-                        return (http_json(500, json!({"error": e})), None);
+                        return http_ok(http_json(500, json!({"error": e})), None);
                     }
                 }
             }
@@ -402,7 +408,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                     && db::peer_blocked(&conn, uploader).unwrap_or(false)
                 {
                     let _ = conn.execute_batch("ROLLBACK");
-                    return (http_json(200, json!({"ok": true, "blocked": true})), None);
+                    return http_ok(http_json(200, json!({"ok": true, "blocked": true})), None);
                 }
                 let _ = db::insert_file(&conn, file);
                 // Ensure downloader is a member so later chunk auth succeeds on the uploader.
@@ -575,7 +581,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
             }
             if conn.execute_batch("COMMIT").is_err() {
                 let _ = conn.execute_batch("ROLLBACK");
-                return (http_json(500, json!({"error":"commit failed"})), None);
+                return http_ok(http_json(500, json!({"error":"commit failed"})), None);
             }
             // Toast only for newly inserted messages (redelivery must not double-notify).
             // Still emit inbox-updated for UI refresh whenever anything arrived.
@@ -614,11 +620,11 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
             } else {
                 None
             };
-            (http_json(200, json!({"ok": true})), notify)
+            http_ok(http_json(200, json!({"ok": true})), notify)
         }
         ("POST", "/v1/typing") => {
             let Ok(payload) = serde_json::from_str::<Value>(body) else {
-                return (http_json(400, json!({"error":"bad json"})), None);
+                return http_ok(http_json(400, json!({"error":"bad json"})), None);
             };
             let from = payload
                 .get("user_id")
@@ -649,17 +655,51 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
             if !blocked {
                 let _ = app.emit("peer-typing", payload);
             }
-            (http_json(200, json!({"ok": true})), None)
+            http_ok(http_json(200, json!({"ok": true})), None)
+        }
+        ("POST", "/v1/file/stream") => {
+            let Ok(payload) = serde_json::from_str::<Value>(body) else {
+                return http_ok(http_json(400, json!({"error":"bad json"})), None);
+            };
+            let file_id = payload["file_id"].as_str().unwrap_or("");
+            let from_index = payload["from_index"].as_u64().unwrap_or(0) as u32;
+            let conn = db.lock();
+            let Some(meta) = db::get_file(&conn, file_id).ok().flatten() else {
+                return http_ok(http_json(404, json!({"error":"missing file"})), None);
+            };
+            let cid = meta["conversation_id"].as_str().unwrap_or("");
+            let uploader = meta["uploader_id"].as_str().unwrap_or("");
+            let key_for_me = meta
+                .get("wrapped_keys")
+                .and_then(|v| v.as_object())
+                .map(|o| o.contains_key(my_id))
+                .unwrap_or(false);
+            let allowed = uploader == my_id
+                || key_for_me
+                || db::is_conversation_member(&conn, cid, my_id).unwrap_or(false);
+            if !allowed {
+                return http_ok(http_json(403, json!({"error":"forbidden"})), None);
+            }
+            let staging = meta["staging_dir"].as_str().unwrap_or("");
+            if staging.is_empty() || staging.contains("..") {
+                return http_ok(http_json(404, json!({"error":"missing staging"})), None);
+            }
+            let chunk_count = meta["chunk_count"].as_i64().unwrap_or(0).max(0) as u32;
+            HttpAction::FileStream {
+                staging: std::path::PathBuf::from(staging),
+                from_index,
+                chunk_count,
+            }
         }
         ("POST", "/v1/file/chunk") => {
             let Ok(payload) = serde_json::from_str::<Value>(body) else {
-                return (http_json(400, json!({"error":"bad json"})), None);
+                return http_ok(http_json(400, json!({"error":"bad json"})), None);
             };
             let file_id = payload["file_id"].as_str().unwrap_or("");
             let index = payload["index"].as_u64().unwrap_or(0) as usize;
             let conn = db.lock();
             let Some(meta) = db::get_file(&conn, file_id).ok().flatten() else {
-                return (http_json(404, json!({"error":"missing file"})), None);
+                return http_ok(http_json(404, json!({"error":"missing file"})), None);
             };
             let cid = meta["conversation_id"].as_str().unwrap_or("");
             let uploader = meta["uploader_id"].as_str().unwrap_or("");
@@ -673,19 +713,19 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                 || key_for_me
                 || db::is_conversation_member(&conn, cid, my_id).unwrap_or(false);
             if !allowed {
-                return (http_json(403, json!({"error":"forbidden"})), None);
+                return http_ok(http_json(403, json!({"error":"forbidden"})), None);
             }
             let staging = meta["staging_dir"].as_str().unwrap_or("");
             if staging.is_empty() || staging.contains("..") {
-                return (http_json(404, json!({"error":"missing staging"})), None);
+                return http_ok(http_json(404, json!({"error":"missing staging"})), None);
             }
             let path = std::path::Path::new(staging).join(format!("{index}.chunk"));
             let nonce_path = std::path::Path::new(staging).join(format!("{index}.nonce"));
             let Ok(data) = std::fs::read(&path) else {
-                return (http_json(404, json!({"error":"missing chunk"})), None);
+                return http_ok(http_json(404, json!({"error":"missing chunk"})), None);
             };
             let nonce = std::fs::read_to_string(&nonce_path).unwrap_or_default();
-            (
+            http_ok(
                 http_json(
                     200,
                     json!({
@@ -699,7 +739,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
         }
         ("POST", "/v1/file/ack") => {
             let Ok(payload) = serde_json::from_str::<Value>(body) else {
-                return (http_json(400, json!({"error":"bad json"})), None);
+                return http_ok(http_json(400, json!({"error":"bad json"})), None);
             };
             let file_id = payload["file_id"].as_str().unwrap_or("");
             // Ignore spoofed user_id; bind ack to this peer's authenticated profile id.
@@ -717,10 +757,46 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> (Strin
                     let _ = (members, acks);
                 }
             }
-            (http_json(200, json!({"ok": true})), None)
+            http_ok(http_json(200, json!({"ok": true})), None)
         }
-        _ => (http_json(404, json!({"error":"not found"})), None),
+        _ => http_ok(http_json(404, json!({"error":"not found"})), None),
     }
+}
+
+/// Binary framed stream of encrypted staging chunks (E2E preserved).
+async fn stream_file_chunks(
+    tls: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    staging: &std::path::Path,
+    from_index: u32,
+    chunk_count: u32,
+) -> Result<(), ()> {
+    // No Content-Length — client reads until EOF / sentinel after headers.
+    let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nX-PeerChat-Stream: v1\r\nConnection: close\r\n\r\n";
+    tls.write_all(headers.as_bytes()).await.map_err(|_| ())?;
+    for index in from_index..chunk_count {
+        let path = staging.join(format!("{index}.chunk"));
+        let nonce_path = staging.join(format!("{index}.nonce"));
+        let data = tokio::fs::read(&path).await.map_err(|_| ())?;
+        let nonce = tokio::fs::read_to_string(&nonce_path)
+            .await
+            .unwrap_or_default();
+        let nonce_b = nonce.as_bytes();
+        if nonce_b.len() > u16::MAX as usize {
+            return Err(());
+        }
+        let mut frame = Vec::with_capacity(4 + 2 + nonce_b.len() + 4 + data.len());
+        frame.extend_from_slice(&index.to_le_bytes());
+        frame.extend_from_slice(&(nonce_b.len() as u16).to_le_bytes());
+        frame.extend_from_slice(nonce_b);
+        frame.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&data);
+        tls.write_all(&frame).await.map_err(|_| ())?;
+    }
+    tls.write_all(&0xFFFFFFFFu32.to_le_bytes())
+        .await
+        .map_err(|_| ())?;
+    let _ = tls.flush().await;
+    Ok(())
 }
 
 fn http_json(code: u16, body: Value) -> String {
@@ -732,10 +808,60 @@ fn http_json(code: u16, body: Value) -> String {
         404 => "404 Not Found",
         _ => "500 Error",
     };
+    // HTTP/1.1 keep-alive so a single TLS session can pull many file chunks.
     format!(
-        "HTTP/1.0 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{raw}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{raw}",
         raw.len()
     )
+}
+
+/// Read exactly one HTTP request from a keep-alive TLS stream.
+async fn read_one_http_request(
+    tls: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    pending: &mut Vec<u8>,
+    tmp: &mut [u8],
+    max_req: usize,
+) -> Result<Option<Vec<u8>>, ()> {
+    loop {
+        if let Some(end) = complete_http_request_len(pending) {
+            let req = pending.drain(..end).collect::<Vec<u8>>();
+            return Ok(Some(req));
+        }
+        match tls.read(tmp).await {
+            Ok(0) => {
+                return if pending.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(())
+                };
+            }
+            Ok(n) => {
+                if pending.len() + n > max_req {
+                    return Err(());
+                }
+                pending.extend_from_slice(&tmp[..n]);
+            }
+            Err(_) => return Err(()),
+        }
+    }
+}
+
+fn complete_http_request_len(buf: &[u8]) -> Option<usize> {
+    let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let header_bytes = head_end + 4;
+    let head = std::str::from_utf8(&buf[..header_bytes]).ok()?;
+    let cl = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let total = header_bytes + cl;
+    if buf.len() >= total {
+        Some(total)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -794,58 +920,310 @@ pub async fn peer_request(
     body: Option<Value>,
     expected_fp: Option<String>,
 ) -> Result<(Value, String), String> {
-    let addr = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| e.to_string())?
-        .next()
-        .ok_or("resolve failed")?;
-    let tcp = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
-        .await
-        .map_err(|_| "connect timeout".to_string())?
-        .map_err(|e| e.to_string())?;
-    let observed = Arc::new(std::sync::Mutex::new(String::new()));
-    let verifier = Arc::new(FingerprintVerifier {
-        expected: expected_fp,
-        observed: observed.clone(),
-    });
-    let config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(config));
-    let name = ServerName::try_from(host.to_string()).map_err(|_| "bad host")?;
-    let mut tls = connector
-        .connect(name, tcp)
-        .await
-        .map_err(|e| e.to_string())?;
-    let payload = body.map(|b| b.to_string()).unwrap_or_default();
-    let method = if payload.is_empty() { "GET" } else { "POST" };
-    let req = format!(
-        "{method} {path} HTTP/1.0\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-        payload.len()
-    );
-    tls.write_all(req.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut resp = Vec::new();
-    let mut tmp = [0u8; 64 * 1024];
-    const MAX_RESP: usize = 16 * 1024 * 1024;
-    loop {
-        match tls.read(&mut tmp).await {
-            Ok(0) => break,
-            Ok(n) => {
-                if resp.len() + n > MAX_RESP {
-                    return Err("peer response too large".into());
+    let mut session = PeerSession::connect(host, port, expected_fp).await?;
+    let json = session.request(path, body).await?;
+    let fp = session.fingerprint();
+    Ok((json, fp))
+}
+
+/// Persistent TLS HTTP/1.1 client — reuse for many file-chunk pulls.
+pub struct PeerSession {
+    host: String,
+    tls: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    pending: Vec<u8>,
+    observed_fp: Arc<std::sync::Mutex<String>>,
+}
+
+impl PeerSession {
+    pub async fn connect(
+        host: &str,
+        port: u16,
+        expected_fp: Option<String>,
+    ) -> Result<Self, String> {
+        let addr = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| e.to_string())?
+            .next()
+            .ok_or("resolve failed")?;
+        let tcp =
+            tokio::time::timeout(Duration::from_secs(8), tokio::net::TcpStream::connect(addr))
+                .await
+                .map_err(|_| "connect timeout".to_string())?
+                .map_err(|e| e.to_string())?;
+        let _ = tcp.set_nodelay(true);
+        let observed = Arc::new(std::sync::Mutex::new(String::new()));
+        let verifier = Arc::new(FingerprintVerifier {
+            expected: expected_fp,
+            observed: observed.clone(),
+        });
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(config));
+        let name = ServerName::try_from(host.to_string()).map_err(|_| "bad host")?;
+        let tls = connector
+            .connect(name, tcp)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            host: host.to_string(),
+            tls,
+            pending: Vec::new(),
+            observed_fp: observed,
+        })
+    }
+
+    pub fn fingerprint(&self) -> String {
+        self.observed_fp
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub async fn request(&mut self, path: &str, body: Option<Value>) -> Result<Value, String> {
+        let payload = body.map(|b| b.to_string()).unwrap_or_default();
+        let method = if payload.is_empty() { "GET" } else { "POST" };
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{payload}",
+            self.host,
+            payload.len()
+        );
+        self.tls
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        let resp = self.read_one_response().await?;
+        let text = String::from_utf8_lossy(&resp);
+        let body = text.split("\r\n\r\n").nth(1).unwrap_or("{}");
+        Ok(serde_json::from_str(body).unwrap_or(json!({"raw": body})))
+    }
+
+    /// Start `/v1/file/stream` — headers parsed, body frames left in `pending`.
+    pub async fn begin_file_stream(
+        &mut self,
+        file_id: &str,
+        from_index: u32,
+    ) -> Result<(), String> {
+        let payload = json!({"file_id": file_id, "from_index": from_index}).to_string();
+        let req = format!(
+            "POST /v1/file/stream HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            self.host,
+            payload.len()
+        );
+        self.tls
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut tmp = [0u8; 64 * 1024];
+        loop {
+            if let Some(pos) = self
+                .pending
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+            {
+                let header_end = pos + 4;
+                let head = String::from_utf8_lossy(&self.pending[..header_end]);
+                if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
+                    let body = head.split("\r\n\r\n").nth(1).unwrap_or("");
+                    if let Ok(v) = serde_json::from_str::<Value>(body) {
+                        if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                            return Err(err.to_string());
+                        }
+                    }
+                    return Err("stream not supported by peer".into());
                 }
-                resp.extend_from_slice(&tmp[..n]);
+                if !head.to_ascii_lowercase().contains("x-peerchat-stream:") {
+                    return Err("stream not supported by peer".into());
+                }
+                let _ = self.pending.drain(..header_end);
+                return Ok(());
             }
-            Err(_) => break,
+            match self.tls.read(&mut tmp).await {
+                Ok(0) => return Err("peer closed before stream headers".into()),
+                Ok(n) => self.pending.extend_from_slice(&tmp[..n]),
+                Err(e) => return Err(e.to_string()),
+            }
         }
     }
-    let text = String::from_utf8_lossy(&resp);
-    let body = text.split("\r\n\r\n").nth(1).unwrap_or("{}");
-    let json: Value = serde_json::from_str(body).unwrap_or(json!({"raw": body}));
-    let fp = observed.lock().map(|g| g.clone()).unwrap_or_default();
-    Ok((json, fp))
+
+    pub async fn read_exact(&mut self, n: usize) -> Result<Vec<u8>, String> {
+        let mut tmp = [0u8; 256 * 1024];
+        while self.pending.len() < n {
+            match self.tls.read(&mut tmp).await {
+                Ok(0) => return Err("peer closed mid-stream".into()),
+                Ok(k) => self.pending.extend_from_slice(&tmp[..k]),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(self.pending.drain(..n).collect())
+    }
+
+    async fn read_one_response(&mut self) -> Result<Vec<u8>, String> {
+        let mut tmp = [0u8; 256 * 1024];
+        const MAX_RESP: usize = 24 * 1024 * 1024;
+        loop {
+            if let Some(end) = complete_http_response_len(&self.pending) {
+                return Ok(self.pending.drain(..end).collect());
+            }
+            match self.tls.read(&mut tmp).await {
+                Ok(0) => return Err("peer closed connection".into()),
+                Ok(n) => {
+                    if self.pending.len() + n > MAX_RESP {
+                        return Err("peer response too large".into());
+                    }
+                    self.pending.extend_from_slice(&tmp[..n]);
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+}
+
+/// Decrypt one file chunk (matches JS `@noble/ciphers` AES-256-GCM + optional AAD).
+pub fn decrypt_file_chunk(
+    content_key: &[u8],
+    nonce_b64: &str,
+    ciphertext: &[u8],
+    chunk_index: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use aes_gcm::{Aes256Gcm, Key, Nonce};
+    if content_key.len() != 32 {
+        return Err("content key must be 32 bytes".into());
+    }
+    let nonce_raw = base64::engine::general_purpose::STANDARD
+        .decode(nonce_b64.trim())
+        .map_err(|e| e.to_string())?;
+    if nonce_raw.len() != 12 {
+        return Err("nonce must be 12 bytes".into());
+    }
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(content_key));
+    let nonce = Nonce::from_slice(&nonce_raw);
+    let aad_owned: Option<Vec<u8>> =
+        chunk_index.map(|i| format!("chunk:{i}").into_bytes());
+    let plain = if let Some(ref aad) = aad_owned {
+        cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad: aad.as_slice(),
+                },
+            )
+            .map_err(|_| "decrypt failed".to_string())?
+    } else {
+        cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| "decrypt failed".to_string())?
+    };
+    Ok(plain)
+}
+
+/// Pull encrypted stream, decrypt, append to receive temp; emit progress.
+/// `on_chunk` is called after each successful append so the DB can track resume points.
+pub async fn stream_download_and_append<F>(
+    host: &str,
+    port: u16,
+    expected_fp: Option<String>,
+    file_id: &str,
+    from_index: u32,
+    content_key: &[u8],
+    file_crypto_v: i64,
+    temp_path: &std::path::Path,
+    total_chunks: u32,
+    app: &AppHandle,
+    mut on_chunk: F,
+) -> Result<u32, String>
+where
+    F: FnMut(u32) -> Result<(), String>,
+{
+    use std::io::Write;
+    let mut session = PeerSession::connect(host, port, expected_fp).await?;
+    session.begin_file_stream(file_id, from_index).await?;
+    let mut next = from_index;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(temp_path)
+        .map_err(|e| e.to_string())?;
+    loop {
+        let idx_bytes = session.read_exact(4).await?;
+        let index = u32::from_le_bytes(idx_bytes.as_slice().try_into().unwrap());
+        if index == 0xFFFFFFFF {
+            break;
+        }
+        let nlen_bytes = session.read_exact(2).await?;
+        let nlen = u16::from_le_bytes(nlen_bytes.as_slice().try_into().unwrap()) as usize;
+        let nonce_raw = session.read_exact(nlen).await?;
+        let nonce_b64 = String::from_utf8(nonce_raw).map_err(|e| e.to_string())?;
+        let clen_bytes = session.read_exact(4).await?;
+        let clen = u32::from_le_bytes(clen_bytes.as_slice().try_into().unwrap()) as usize;
+        if clen > 16 * 1024 * 1024 {
+            return Err("stream chunk too large".into());
+        }
+        let cipher = session.read_exact(clen).await?;
+        if index != next {
+            return Err(format!("stream out of order: expected {next}, got {index}"));
+        }
+        let chunk_idx = if file_crypto_v >= 2 {
+            Some(index)
+        } else {
+            None
+        };
+        let plain = decrypt_file_chunk(content_key, &nonce_b64, &cipher, chunk_idx)?;
+        file.write_all(&plain).map_err(|e| e.to_string())?;
+        next = index + 1;
+        on_chunk(next)?;
+        if next == total_chunks || next == 1 || next % 2 == 0 {
+            let _ = app.emit(
+                "file-stream-progress",
+                json!({
+                    "file_id": file_id,
+                    "done": next,
+                    "total": total_chunks,
+                }),
+            );
+        }
+    }
+    Ok(next)
+}
+
+fn complete_http_response_len(buf: &[u8]) -> Option<usize> {
+    complete_http_request_len(buf) // same Content-Length framing
+}
+
+/// Fetch many encrypted chunks over a single TLS session.
+pub async fn fetch_chunks_keep_alive(
+    host: &str,
+    port: u16,
+    expected_fp: Option<String>,
+    file_id: &str,
+    from_index: u32,
+    count: u32,
+) -> Result<Vec<Value>, String> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut session = PeerSession::connect(host, port, expected_fp).await?;
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let index = from_index + i;
+        let body = json!({"file_id": file_id, "index": index});
+        let resp = session.request("/v1/file/chunk", Some(body)).await?;
+        if resp.get("error").is_some() {
+            return Err(resp
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("missing chunk")
+                .to_string());
+        }
+        out.push(json!({
+            "index": index,
+            "nonce": resp.get("nonce").and_then(|v| v.as_str()).unwrap_or(""),
+            "data_b64": resp.get("data_b64").and_then(|v| v.as_str()).unwrap_or(""),
+        }));
+    }
+    Ok(out)
 }
 

@@ -30,6 +30,7 @@ rustls-pemfile = "2"
 parking_lot = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+aes-gcm = "0.10"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"

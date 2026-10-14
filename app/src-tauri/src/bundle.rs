@@ -4,9 +4,10 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
+use zip::CompressionMethod;
 use zip::ZipWriter;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct BundleEntry {
     pub abs_path: String,
     pub rel_path: String,
@@ -67,7 +68,16 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Value>, depth: usize) -> Result<(
     Ok(())
 }
 
-pub fn pack(dest: &Path, entries: &[BundleEntry]) -> Result<(u64, u32), String> {
+/// Pack with Stored (no Deflate) so large media folders stay near disk-copy speed.
+/// `on_progress(done_files, total_files, bytes_so_far)` is called after each file.
+pub fn pack_with_progress<F>(
+    dest: &Path,
+    entries: &[BundleEntry],
+    mut on_progress: F,
+) -> Result<(u64, u32), String>
+where
+    F: FnMut(u32, u32, u64),
+{
     if entries.is_empty() {
         return Err("nothing to bundle".into());
     }
@@ -77,9 +87,11 @@ pub fn pack(dest: &Path, entries: &[BundleEntry]) -> Result<(u64, u32), String> 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let total_files = entries.len() as u32;
     let file = File::create(dest).map_err(|e| e.to_string())?;
     let mut zip = ZipWriter::new(file);
-    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    // Stored: music/videos are already compressed; Deflate froze the UI on multi-GB folders.
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     let mut count = 0u32;
     let mut total = 0u64;
     for ent in entries {
@@ -101,6 +113,7 @@ pub fn pack(dest: &Path, entries: &[BundleEntry]) -> Result<(u64, u32), String> 
         zip.start_file(rel, opts).map_err(|e| e.to_string())?;
         std::io::copy(&mut src, &mut zip).map_err(|e| e.to_string())?;
         count += 1;
+        on_progress(count, total_files, total);
     }
     zip.finish().map_err(|e| e.to_string())?;
     let size = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);

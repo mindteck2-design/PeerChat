@@ -397,12 +397,16 @@ type OutgoingFileState = {
 
 type IncomingFileState = {
   fileId: string;
+  conversationId?: string;
   name: string;
   done: number;
   total: number;
   /** Progress chip label — "Downloading…" for saves, "Opening…" only for in-app preview. */
   label?: string;
 };
+
+/** Chunks per keep-alive TLS session — one handshake, many pulls. */
+const FILE_FETCH_BATCH = 24;
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("setup");
@@ -1707,11 +1711,35 @@ function ChatScreen({
       );
       return;
     }
-    const packed = await peerApi.packBundle(
-      entries.map((e) => ({ abs_path: e.abs_path, rel_path: e.rel_path }))
-    );
-    await sendFile({ path: packed.path, name: packed.name, size: packed.size });
-    await peerApi.deleteBundleFile(packed.path).catch(() => {});
+    if (totalBytes > 500 * 1024 * 1024) {
+      if (
+        !window.confirm(
+          `This will pack ~${formatBytes(totalBytes)} locally before sending (${entries.length} files). Continue?`
+        )
+      ) {
+        return;
+      }
+    }
+    setStatus(`Packing folder… 0/${entries.length}`);
+    let unlistenPack: (() => void) | undefined;
+    try {
+      unlistenPack = await listen<{
+        done_files: number;
+        total_files: number;
+        bytes: number;
+      }>("bundle-pack-progress", (ev) => {
+        const { done_files, total_files, bytes } = ev.payload;
+        setStatus(`Packing folder… ${done_files}/${total_files} (${formatBytes(bytes)})`);
+      });
+      const packed = await peerApi.packBundle(
+        entries.map((e) => ({ abs_path: e.abs_path, rel_path: e.rel_path }))
+      );
+      setStatus(`Packed ${packed.name} — sending…`);
+      await sendFile({ path: packed.path, name: packed.name, size: packed.size });
+      await peerApi.deleteBundleFile(packed.path).catch(() => {});
+    } finally {
+      unlistenPack?.();
+    }
   }
 
   function removeStagedFile(id: string) {
@@ -2431,29 +2459,43 @@ function ChatScreen({
     }
     const totalChunks = Math.max(1, Number(file.chunk_count) || 1);
     const cryptoV = Number(file.file_crypto_v) || 1;
-    setIncomingFile({ fileId, name, done: 0, total: totalChunks, label: "Opening…" });
+    setIncomingFile({
+      fileId,
+      conversationId: active?.id,
+      name,
+      done: 0,
+      total: totalChunks,
+      label: "Opening…",
+    });
     const parts: Uint8Array[] = [];
-    for (let i = 0; i < totalChunks; i++) {
+    for (let i = 0; i < totalChunks; ) {
       if (abortOpenRef.current) throw new Error("aborted");
-      const chunk = await peerApi.fetchFileChunk(fileId, i, uploaderId);
-      parts.push(
-        decryptChunk(
-          key,
-          chunk.nonce,
-          fromB64(chunk.data_b64),
-          cryptoV >= 2 ? i : undefined
-        )
-      );
-      if (i === 0 || i + 1 === totalChunks || (i + 1) % 2 === 0) {
-        setIncomingFile({
-          fileId,
-          name,
-          done: i + 1,
-          total: totalChunks,
-          label: "Opening…",
-        });
-        await new Promise((r) => setTimeout(r, 0));
+      const n = Math.min(FILE_FETCH_BATCH, totalChunks - i);
+      const batch = await peerApi.fetchFileChunks(fileId, i, n, uploaderId);
+      for (const chunk of batch) {
+        const idx = Number(chunk.index ?? i);
+        parts.push(
+          decryptChunk(
+            key,
+            chunk.nonce,
+            fromB64(chunk.data_b64),
+            cryptoV >= 2 ? idx : undefined
+          )
+        );
+        i = idx + 1;
+        if (i === 1 || i === totalChunks || i % 4 === 0) {
+          setIncomingFile({
+            fileId,
+            conversationId: active?.id,
+            name,
+            done: i,
+            total: totalChunks,
+            label: "Opening…",
+          });
+          await new Promise((r) => setTimeout(r, 0));
+        }
       }
+      if (!batch.length) break;
     }
     const total = parts.reduce((n, p) => n + p.length, 0);
     const merged = new Uint8Array(total);
@@ -2586,8 +2628,10 @@ function ChatScreen({
       const cryptoV = Number(file.file_crypto_v) || 1;
       const progress = await peerApi.beginFileReceive(fileId);
       let next = Number(progress.next_index) || 0;
+      const convId = active?.id;
       setIncomingFile({
         fileId,
+        conversationId: convId,
         name,
         done: next,
         total: totalChunks,
@@ -2601,37 +2645,101 @@ function ChatScreen({
         size_bytes: Number(file.size_bytes) || 0,
         bytes_done: next * CHUNK_SIZE,
         file_id: fileId,
-        conversation_id: active?.id,
+        conversation_id: convId,
         peer_label: senderLabel(uploaderId),
         started_at: started,
       });
-      for (let i = next; i < totalChunks; i++) {
-        if (abortOpenRef.current) throw new Error("aborted");
-        let chunk;
+      // Prefer one TLS binary stream (IPMsg-style); fall back to chunk HTTP for old peers.
+      let usedStream = false;
+      if (next < totalChunks && !abortOpenRef.current) {
+        let unlistenStream: (() => void) | undefined;
         try {
-          chunk = await peerApi.fetchFileChunk(fileId, i, uploaderId);
-        } catch (err) {
-          await recordTransfer({
-            id: transferId,
-            filename: name,
-            direction: "recv",
-            status: "interrupted",
-            file_id: fileId,
-            error: explainTransferError(String((err as any)?.message || err)),
-            peer_label: senderLabel(uploaderId),
-            started_at: started,
+          unlistenStream = await listen<{
+            file_id: string;
+            done: number;
+            total: number;
+          }>("file-stream-progress", (ev) => {
+            if (ev.payload.file_id !== fileId) return;
+            setIncomingFile({
+              fileId,
+              conversationId: convId,
+              name,
+              done: ev.payload.done,
+              total: ev.payload.total || totalChunks,
+              label: "Downloading…",
+            });
           });
-          throw err;
+          const streamed = await peerApi.downloadFileStream(
+            fileId,
+            uploaderId,
+            b64(key),
+            next
+          );
+          next = Number(streamed.next_index) || totalChunks;
+          usedStream = next >= totalChunks;
+          setIncomingFile({
+            fileId,
+            conversationId: convId,
+            name,
+            done: next,
+            total: totalChunks,
+            label: "Downloading…",
+          });
+        } catch {
+          usedStream = false;
+          // Resume chunk path from whatever stream already wrote.
+          try {
+            const prog = await peerApi.getReceiveProgress(fileId);
+            next = Number(prog.next_index) || next;
+          } catch {
+            /* keep next */
+          }
+        } finally {
+          unlistenStream?.();
         }
-        const plain = decryptChunk(key, chunk.nonce, fromB64(chunk.data_b64), cryptoV >= 2 ? i : undefined);
-        await peerApi.appendFileReceive(fileId, i, b64(plain));
-        setIncomingFile({
-          fileId,
-          name,
-          done: i + 1,
-          total: totalChunks,
-          label: "Downloading…",
-        });
+      }
+      if (!usedStream && next < totalChunks) {
+        for (let i = next; i < totalChunks; ) {
+          if (abortOpenRef.current) throw new Error("aborted");
+          const n = Math.min(FILE_FETCH_BATCH, totalChunks - i);
+          let batch;
+          try {
+            batch = await peerApi.fetchFileChunks(fileId, i, n, uploaderId);
+          } catch (err) {
+            await recordTransfer({
+              id: transferId,
+              filename: name,
+              direction: "recv",
+              status: "interrupted",
+              file_id: fileId,
+              error: explainTransferError(String((err as any)?.message || err)),
+              peer_label: senderLabel(uploaderId),
+              started_at: started,
+            });
+            throw err;
+          }
+          for (const chunk of batch) {
+            const idx = Number(chunk.index ?? i);
+            if (abortOpenRef.current) throw new Error("aborted");
+            const plain = decryptChunk(
+              key,
+              chunk.nonce,
+              fromB64(chunk.data_b64),
+              cryptoV >= 2 ? idx : undefined
+            );
+            await peerApi.appendFileReceive(fileId, idx, b64(plain));
+            i = idx + 1;
+            setIncomingFile({
+              fileId,
+              conversationId: convId,
+              name,
+              done: i,
+              total: totalChunks,
+              label: "Downloading…",
+            });
+          }
+          if (!batch.length) break;
+        }
       }
       await recordTransfer({
         id: transferId,
@@ -4325,12 +4433,7 @@ function ChatScreen({
                               </Typography>
                             </Stack>
                           ) : m.kind === "file_notice" ? (
-                            <Stack
-                              direction="row"
-                              spacing={0.75}
-                              alignItems="center"
-                              sx={{ pr: 3.25 }}
-                            >
+                            <Stack spacing={0.75} sx={{ pr: 3.25, minWidth: 180 }}>
                               {(() => {
                                 const fname =
                                   (m.file_id && fileNames[m.file_id]) || "Encrypted file";
@@ -4339,57 +4442,102 @@ function ChatScreen({
                                   !!m.file_id &&
                                   !!fileNames[m.file_id] &&
                                   canPreviewFileName(fileNames[m.file_id]);
+                                const xferHere =
+                                  !!m.file_id &&
+                                  incomingFile?.fileId === m.file_id &&
+                                  (!incomingFile.conversationId ||
+                                    incomingFile.conversationId === active?.id);
+                                const pct = xferHere && incomingFile.total
+                                  ? Math.min(
+                                      100,
+                                      Math.round((100 * incomingFile.done) / incomingFile.total)
+                                    )
+                                  : 0;
                                 return (
                                   <>
-                                    <Button
-                                      size="small"
-                                      startIcon={
-                                        mine ? (
-                                          <InsertDriveFileIcon sx={{ fontSize: 16 }} />
-                                        ) : (
-                                          <DownloadIcon sx={{ fontSize: 16 }} />
-                                        )
-                                      }
-                                      disabled={previewBusy || !!incomingFile || !m.file_id}
-                                      onClick={() => {
-                                        if (!m.file_id) return;
-                                        if (mine) {
-                                          peerApi.openLocalFile(m.file_id).catch(() =>
-                                            downloadFileToDownloads(m.file_id!, m.sender_id)
-                                          );
-                                        } else {
-                                          downloadFileToDownloads(m.file_id, m.sender_id);
+                                    <Stack direction="row" spacing={0.75} alignItems="center">
+                                      <Button
+                                        size="small"
+                                        startIcon={
+                                          xferHere ? (
+                                            <CircularProgress size={14} thickness={5} />
+                                          ) : mine ? (
+                                            <InsertDriveFileIcon sx={{ fontSize: 16 }} />
+                                          ) : (
+                                            <DownloadIcon sx={{ fontSize: 16 }} />
+                                          )
                                         }
-                                      }}
-                                      sx={{
-                                        textTransform: "none",
-                                        fontWeight: 700,
-                                        fontSize: 13,
-                                        py: 0.25,
-                                        minHeight: 0,
-                                      }}
-                                    >
-                                      {fname}
-                                    </Button>
-                                    {previewable && (
-                                      <Tooltip title="Preview">
-                                        <span>
-                                          <IconButton
-                                            size="small"
-                                            disabled={
-                                              previewBusy || !!incomingFile || !m.file_id
-                                            }
-                                            onClick={() =>
-                                              m.file_id &&
-                                              previewFile(m.file_id, m.sender_id)
-                                            }
-                                            aria-label="Preview file"
-                                            sx={{ p: 0.5 }}
-                                          >
-                                            <VisibilityIcon sx={{ fontSize: 16 }} />
-                                          </IconButton>
-                                        </span>
-                                      </Tooltip>
+                                        disabled={
+                                          previewBusy ||
+                                          (!!incomingFile && !xferHere) ||
+                                          !m.file_id
+                                        }
+                                        onClick={() => {
+                                          if (!m.file_id) return;
+                                          if (xferHere) {
+                                            abortIncomingTransfer();
+                                            return;
+                                          }
+                                          if (mine) {
+                                            peerApi.openLocalFile(m.file_id).catch(() =>
+                                              downloadFileToDownloads(m.file_id!, m.sender_id)
+                                            );
+                                          } else {
+                                            downloadFileToDownloads(m.file_id, m.sender_id);
+                                          }
+                                        }}
+                                        sx={{
+                                          textTransform: "none",
+                                          fontWeight: 700,
+                                          fontSize: 13,
+                                          py: 0.25,
+                                          minHeight: 0,
+                                        }}
+                                      >
+                                        {xferHere
+                                          ? `${incomingFile.label || "Downloading…"} ${pct}%`
+                                          : fname}
+                                      </Button>
+                                      {previewable && !xferHere && (
+                                        <Tooltip title="Preview">
+                                          <span>
+                                            <IconButton
+                                              size="small"
+                                              disabled={
+                                                previewBusy ||
+                                                !!incomingFile ||
+                                                !m.file_id
+                                              }
+                                              onClick={() =>
+                                                m.file_id &&
+                                                previewFile(m.file_id, m.sender_id)
+                                              }
+                                              aria-label="Preview file"
+                                              sx={{ p: 0.5 }}
+                                            >
+                                              <VisibilityIcon sx={{ fontSize: 16 }} />
+                                            </IconButton>
+                                          </span>
+                                        </Tooltip>
+                                      )}
+                                      {xferHere && (
+                                        <IconButton
+                                          size="small"
+                                          color="error"
+                                          aria-label="Abort download"
+                                          onClick={abortIncomingTransfer}
+                                          sx={{ p: 0.5 }}
+                                        >
+                                          <StopCircleIcon sx={{ fontSize: 18 }} />
+                                        </IconButton>
+                                      )}
+                                    </Stack>
+                                    {xferHere && (
+                                      <LinearProgress
+                                        variant="determinate"
+                                        value={pct}
+                                        sx={{ height: 4, borderRadius: 999 }}
+                                      />
                                     )}
                                   </>
                                 );
@@ -4586,55 +4734,6 @@ function ChatScreen({
               <Typography variant="caption" color="text.secondary" display="block" mt={0.75} textAlign="right">
                 Sending · tap stop to abort
               </Typography>
-            </Paper>
-          )}
-          {incomingFile && (
-            <Paper
-              elevation={0}
-              sx={{
-                alignSelf: "flex-start",
-                maxWidth: "70%",
-                p: 1.5,
-                bgcolor: "action.hover",
-                border: "1px dashed",
-                borderColor: "divider",
-                opacity: 0.85,
-              }}
-            >
-              <Stack direction="row" spacing={1.25} alignItems="center">
-                <CircularProgress size={18} thickness={5} />
-                <Box minWidth={0} flex={1}>
-                  <Typography noWrap fontWeight={700} color="text.secondary">
-                    {incomingFile.name}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {incomingFile.label || "Downloading…"}
-                    {incomingFile.total
-                      ? ` ${Math.min(
-                          100,
-                          Math.round((100 * incomingFile.done) / incomingFile.total)
-                        )}%`
-                      : ""}
-                  </Typography>
-                  <LinearProgress
-                    variant="determinate"
-                    value={
-                      incomingFile.total
-                        ? Math.min(100, (100 * incomingFile.done) / incomingFile.total)
-                        : 0
-                    }
-                    sx={{ mt: 0.75, height: 4, borderRadius: 999 }}
-                  />
-                </Box>
-                <IconButton
-                  size="small"
-                  color="error"
-                  aria-label="Abort file open"
-                  onClick={abortIncomingTransfer}
-                >
-                  <StopCircleIcon />
-                </IconButton>
-              </Stack>
             </Paper>
           )}
           <Box ref={bottomSentinelRef} aria-hidden sx={{ height: 1, width: "100%", flexShrink: 0 }} />
@@ -6051,7 +6150,32 @@ function ChatScreen({
               if (sum > BUNDLE_MAX_BYTES) {
                 throw new Error(`Selection is about ${formatBytes(sum)} (max 5 GiB).`);
               }
-              const result = await peerApi.packBundle(items.map((i) => ({ abs_path: i.abs_path, rel_path: i.rel_path })));
+              if (sum > 500 * 1024 * 1024) {
+                if (
+                  !window.confirm(
+                    `This will pack ~${formatBytes(sum)} locally before sending (${items.length} files). Continue?`
+                  )
+                ) {
+                  return;
+                }
+              }
+              setStatus(`Packing… 0/${items.length}`);
+              const unlistenPack = await listen<{
+                done_files: number;
+                total_files: number;
+                bytes: number;
+              }>("bundle-pack-progress", (ev) => {
+                const { done_files, total_files, bytes } = ev.payload;
+                setStatus(`Packing… ${done_files}/${total_files} (${formatBytes(bytes)})`);
+              });
+              let result;
+              try {
+                result = await peerApi.packBundle(
+                  items.map((i) => ({ abs_path: i.abs_path, rel_path: i.rel_path }))
+                );
+              } finally {
+                unlistenPack();
+              }
               filePath = result.path;
               fileSize = result.size;
               fileName = result.name;

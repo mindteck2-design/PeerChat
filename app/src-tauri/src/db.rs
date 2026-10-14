@@ -895,7 +895,148 @@ pub fn upsert_peer_with_team(
         ],
     )
     .map_err(|e| e.to_string())?;
+    // One peer per LAN IP: when this identity is live at `ip`, fold any other row
+    // still holding that address (typical after a PeerChat reinstall / new user_id).
+    if online {
+        if let Some(ip) = ip {
+            let _ = claim_unique_peer_ip(conn, user_id, ip);
+        }
+    }
     Ok(())
+}
+
+/// Ensure `keep_user_id` is the only peer with `last_ip = ip`. Transfers pin/block
+/// from displaced rows, then deletes them.
+pub fn claim_unique_peer_ip(
+    conn: &Connection,
+    keep_user_id: &str,
+    ip: &str,
+) -> Result<(), String> {
+    if keep_user_id.is_empty() || !crate::discovery::is_usable_lan_ip(ip) {
+        return Ok(());
+    }
+    let mut stmt = conn
+        .prepare(
+            r#"SELECT user_id, COALESCE(pinned,0), tls_fingerprint, COALESCE(blocked,0)
+               FROM peers
+               WHERE user_id != ?1 AND last_ip = ?2"#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, i64, Option<String>, i64)> = stmt
+        .query_map(params![keep_user_id, ip], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let keep = get_peer(conn, keep_user_id)?;
+    let mut keep_pinned = keep
+        .as_ref()
+        .and_then(|p| p.get("pinned").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    let mut keep_blocked = keep
+        .as_ref()
+        .and_then(|p| p.get("blocked").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+
+    for (dup_id, pinned, fp, blocked) in rows {
+        if pinned == 1 && !keep_pinned {
+            let use_fp = fp.unwrap_or_default();
+            if !use_fp.is_empty() {
+                let _ = pin_peer(conn, keep_user_id, &use_fp);
+            } else {
+                let _ = conn.execute(
+                    "UPDATE peers SET pinned=1 WHERE user_id=?1",
+                    params![keep_user_id],
+                );
+            }
+            keep_pinned = true;
+        }
+        if blocked == 1 && !keep_blocked {
+            let _ = set_peer_blocked(conn, keep_user_id, true);
+            keep_blocked = true;
+        }
+        let _ = conn.execute("DELETE FROM peers WHERE user_id=?1", params![dup_id]);
+    }
+    Ok(())
+}
+
+/// Collapse any existing IP collisions (online / most-recently-seen wins).
+pub fn dedupe_peers_by_ip(conn: &Connection) -> Result<(), String> {
+    let peers = list_peers_raw(conn)?;
+    use std::collections::HashMap;
+    let mut best: HashMap<String, (String, bool, String)> = HashMap::new();
+    for p in &peers {
+        let id = p["user_id"].as_str().unwrap_or("").to_string();
+        let ip = p["last_ip"].as_str().unwrap_or("").to_string();
+        if id.is_empty() || !crate::discovery::is_usable_lan_ip(&ip) {
+            continue;
+        }
+        let online = p["online"].as_bool().unwrap_or(false);
+        let seen = p["last_seen_at"].as_str().unwrap_or("").to_string();
+        match best.get(&ip) {
+            None => {
+                best.insert(ip, (id, online, seen));
+            }
+            Some((_, was_online, was_seen)) => {
+                let better = (online && !*was_online)
+                    || (online == *was_online && seen.as_str() > was_seen.as_str());
+                if better {
+                    best.insert(ip, (id, online, seen));
+                }
+            }
+        }
+    }
+    for (ip, (keep_id, _, _)) in best {
+        let _ = claim_unique_peer_ip(conn, &keep_id, &ip);
+    }
+    Ok(())
+}
+
+fn list_peers_raw(conn: &Connection) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, last_seen_at, online, COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(team,''), COALESCE(blocked,0) FROM peers ORDER BY display_name",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            let identity_changed = r.get::<_, i64>(10)? == 1;
+            let pending_fp: Option<String> = r.get(11)?;
+            let pinned_fp: Option<String> = r.get(6)?;
+            Ok(serde_json::json!({
+                "user_id": r.get::<_, String>(0)?,
+                "display_name": r.get::<_, String>(1)?,
+                "x25519_public": r.get::<_, String>(2)?,
+                "ed25519_public": r.get::<_, String>(3)?,
+                "last_ip": r.get::<_, Option<String>>(4)?,
+                "last_port": r.get::<_, Option<i64>>(5)?,
+                "tls_fingerprint": if identity_changed {
+                    pending_fp.clone().or(pinned_fp)
+                } else {
+                    pinned_fp
+                },
+                "pinned": r.get::<_, i64>(7)? == 1,
+                "last_seen_at": r.get::<_, Option<String>>(8)?,
+                "online": r.get::<_, i64>(9)? == 1,
+                "identity_changed": identity_changed,
+                "pending_tls_fingerprint": pending_fp,
+                "team": r.get::<_, String>(12)?,
+                "blocked": r.get::<_, i64>(13)? == 1,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
 
 pub fn peer_blocked(conn: &Connection, user_id: &str) -> Result<bool, String> {
@@ -974,43 +1115,9 @@ pub fn pin_peer(conn: &Connection, user_id: &str, fingerprint: &str) -> Result<(
 }
 
 pub fn list_peers(conn: &Connection) -> Result<Vec<Value>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, last_seen_at, online, COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(team,''), COALESCE(blocked,0) FROM peers ORDER BY display_name",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |r| {
-            let identity_changed = r.get::<_, i64>(10)? == 1;
-            let pending_fp: Option<String> = r.get(11)?;
-            let pinned_fp: Option<String> = r.get(6)?;
-            Ok(serde_json::json!({
-                "user_id": r.get::<_, String>(0)?,
-                "display_name": r.get::<_, String>(1)?,
-                "x25519_public": r.get::<_, String>(2)?,
-                "ed25519_public": r.get::<_, String>(3)?,
-                "last_ip": r.get::<_, Option<String>>(4)?,
-                "last_port": r.get::<_, Option<i64>>(5)?,
-                "tls_fingerprint": if identity_changed {
-                    pending_fp.clone().or(pinned_fp)
-                } else {
-                    pinned_fp
-                },
-                "pinned": r.get::<_, i64>(7)? == 1,
-                "last_seen_at": r.get::<_, Option<String>>(8)?,
-                "online": r.get::<_, i64>(9)? == 1,
-                "identity_changed": identity_changed,
-                "pending_tls_fingerprint": pending_fp,
-                "team": r.get::<_, String>(12)?,
-                "blocked": r.get::<_, i64>(13)? == 1,
-            }))
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+    // Enforce unique last_ip before returning (clears reinstall ghosts).
+    let _ = dedupe_peers_by_ip(conn);
+    list_peers_raw(conn)
 }
 
 pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, String> {
