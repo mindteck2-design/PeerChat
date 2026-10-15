@@ -1,4 +1,4 @@
-﻿# PeerChat per-user installer - no admin rights required.
+# PeerChat per-user installer - no admin rights required.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File Install-PeerChat.ps1
@@ -63,7 +63,7 @@ if (-not $SourceExe -or -not (Test-Path $SourceExe)) {
 }
 
 # -- Determine version --------------------------------------------------------
-$version = "0.4.3"
+$version = "0.5.0"
 $verBeside = Join-Path (Split-Path -Parent $SourceExe) $VersionFile
 if (Test-Path $verBeside) {
     $version = (Get-Content $verBeside -Raw).Trim()
@@ -73,7 +73,7 @@ if (Test-Path $verBeside) {
         $version = $fvi.ProductVersion
         if (-not $version) { $version = $fvi.FileVersion }
     } catch {}
-    if (-not $version) { $version = "0.4.3" }
+    if (-not $version) { $version = "0.5.0" }
 }
 
 if (-not $Quiet) {

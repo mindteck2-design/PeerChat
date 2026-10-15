@@ -1,6 +1,6 @@
 [package]
 name = "peerchat"
-version = "0.4.3"
+version = "0.5.0"
 description = "PeerChat secure P2P LAN messenger"
 authors = ["PeerChat"]
 edition = "2021"
@@ -31,6 +31,7 @@ parking_lot = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 aes-gcm = "0.10"
+getrandom = "0.2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"

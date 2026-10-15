@@ -30,6 +30,7 @@ import {
   TextField,
   Tooltip,
   Typography,
+  useTheme,
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBackRounded";
 import UndoIcon from "@mui/icons-material/UndoRounded";
@@ -40,19 +41,6 @@ import { newTttState, tttMove, tttStateFromBoard, type TttState, type TttMsg } f
 import { newRpsState, rpsResolveRound, type RpsState, type RpsMsg, type RpsChoice, type MatchFormat } from "./rps";
 import { newDabState, dabMove, type DabState, type DabMsg, type EdgeId } from "./dab";
 import { new2048State, move2048, undo2048, type Direction } from "./g2048";
-import {
-  COLS as TETRIS_COLS,
-  gravityMs,
-  hardDrop,
-  moveLeft,
-  moveRight,
-  newTetrisState,
-  previewCells,
-  renderBoard,
-  rotateCW,
-  softDrop,
-  tickGravity,
-} from "./tetris";
 import { SnakeGame } from "../panels";
 import type { Peer } from "../peer";
 import {
@@ -109,12 +97,6 @@ const GAME_CARDS = [
     id: "2048",
     name: "2048",
     desc: "Slide tiles and merge them to reach 2048.",
-    tags: ["Single-player"],
-  },
-  {
-    id: "tetris",
-    name: "Tetris",
-    desc: "Clear lines with falling blocks. Arrow keys to play.",
     tags: ["Single-player"],
   },
   {
@@ -192,7 +174,6 @@ export function GamesHub({
 
   if (active === "snake") return <Box sx={{ p: 3 }}><BackBar onBack={back} title="Snake" /><SnakeGame /></Box>;
   if (active === "2048") return <Game2048 onBack={back} />;
-  if (active === "tetris") return <GameTetris onBack={back} />;
   if (active === "ttt") return (
     <TicTacToe
       onBack={back}
@@ -693,169 +674,6 @@ function peerFromSession(peers: Peer[], id: string, name: string): Peer {
       x25519_public: "",
       ed25519_public: "",
     }
-  );
-}
-
-// ─── Tetris ──────────────────────────────────────────────────────────────────
-
-const TETRIS_COLORS: Record<number, string> = {
-  0: "action.hover",
-  1: "#a8e8ef", // I — soft cyan
-  2: "#f5e9a8", // O — soft yellow
-  3: "#d4b8ef", // T — soft violet
-  4: "#b8e8b8", // S — soft green
-  5: "#f5b8b8", // Z — soft rose
-  6: "#b8c8f5", // J — soft blue
-  7: "#f5d0a8", // L — soft peach
-};
-
-function GameTetris({ onBack }: { onBack: () => void }) {
-  const savedBest = () => Number(localStorage.getItem("peerchat.tetris.best") || "0");
-  const [state, setState] = useState(() => newTetrisState(savedBest()));
-  const [paused, setPaused] = useState(false);
-
-  useEffect(() => {
-    if (state.best > savedBest()) {
-      localStorage.setItem("peerchat.tetris.best", String(state.best));
-    }
-  }, [state.best]);
-
-  useEffect(() => {
-    if (state.over || paused) return;
-    const id = window.setInterval(() => {
-      setState((prev) => tickGravity(prev));
-    }, gravityMs(state.level));
-    return () => window.clearInterval(id);
-  }, [state.over, state.level, paused]);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "p" || e.key === "P") {
-        e.preventDefault();
-        setPaused((p) => !p);
-        return;
-      }
-      if (paused || state.over) return;
-      const actions: Record<string, () => void> = {
-        ArrowLeft: () => setState((s) => moveLeft(s)),
-        ArrowRight: () => setState((s) => moveRight(s)),
-        ArrowDown: () => setState((s) => softDrop(s)),
-        ArrowUp: () => setState((s) => rotateCW(s)),
-        " ": () => setState((s) => hardDrop(s)),
-        x: () => setState((s) => rotateCW(s)),
-        X: () => setState((s) => rotateCW(s)),
-      };
-      const fn = actions[e.key];
-      if (!fn) return;
-      e.preventDefault();
-      fn();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [paused, state.over]);
-
-  const restart = () => {
-    setPaused(false);
-    setState(newTetrisState(savedBest()));
-  };
-
-  const cells = renderBoard(state);
-  const cellPx = 18;
-  const preview = previewCells(state.next);
-
-  return (
-    <Box sx={{ p: 3 }}>
-      <BackBar onBack={onBack} title="Tetris" />
-      <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }} flexWrap="wrap">
-        <Chip label={`Score: ${state.score}`} />
-        <Chip label={`Best: ${state.best}`} color="primary" />
-        <Chip label={`Lines: ${state.lines}`} />
-        <Chip label={`Level: ${state.level}`} />
-        <Box flex={1} />
-        <Button size="small" variant="outlined" onClick={() => setPaused((p) => !p)} disabled={state.over}>
-          {paused ? "Resume" : "Pause"}
-        </Button>
-        <Tooltip title="Restart">
-          <IconButton size="small" onClick={restart}>
-            <RestartAltIcon />
-          </IconButton>
-        </Tooltip>
-      </Stack>
-
-      {state.over && (
-        <Alert severity="error" sx={{ mb: 1 }}>
-          Game over! Score: {state.score}
-          <Button size="small" sx={{ ml: 1 }} onClick={restart}>
-            Restart
-          </Button>
-        </Alert>
-      )}
-      {paused && !state.over && (
-        <Alert severity="info" sx={{ mb: 1 }}>
-          Paused — press P to resume
-        </Alert>
-      )}
-
-      <Stack direction="row" spacing={3} alignItems="flex-start">
-        <Box
-          sx={{
-            display: "grid",
-            gridTemplateColumns: `repeat(${TETRIS_COLS}, ${cellPx}px)`,
-            gap: "1px",
-            bgcolor: "divider",
-            p: "2px",
-            borderRadius: 1,
-            width: "fit-content",
-          }}
-        >
-          {cells.map((val, i) => (
-            <Box
-              key={i}
-              sx={{
-                width: cellPx,
-                height: cellPx,
-                bgcolor: TETRIS_COLORS[val] ?? "action.hover",
-                borderRadius: 0.4,
-              }}
-            />
-          ))}
-        </Box>
-        <Stack spacing={1.5}>
-          <Typography variant="subtitle2" fontWeight={700}>
-            Next
-          </Typography>
-          <Box
-            sx={{
-              display: "grid",
-              gridTemplateColumns: "repeat(4, 18px)",
-              gap: "1px",
-              width: "fit-content",
-              minHeight: 76,
-            }}
-          >
-            {Array.from({ length: 16 }, (_, i) => {
-              const x = i % 4;
-              const y = Math.floor(i / 4);
-              const on = preview.some((p) => p.x === x && p.y === y);
-              return (
-                <Box
-                  key={i}
-                  sx={{
-                    width: 18,
-                    height: 18,
-                    borderRadius: 0.3,
-                    bgcolor: on ? TETRIS_COLORS[state.next + 1] : "transparent",
-                  }}
-                />
-              );
-            })}
-          </Box>
-          <Typography variant="caption" color="text.secondary">
-            ← → move · ↑ / X rotate · ↓ soft drop · Space hard drop · P pause
-          </Typography>
-        </Stack>
-      </Stack>
-    </Box>
   );
 }
 

@@ -40,6 +40,8 @@ export type Conversation = {
   pinned_at?: string | null;
   muted?: boolean;
   members_can_add?: boolean;
+  /** False when you left or were removed from a group (chat may still be listed). */
+  i_am_member?: boolean;
   unread_count?: number;
   last_message_kind?: string | null;
   last_message_at?: string | null;
@@ -78,6 +80,8 @@ export type Message = {
   wrapped_keys: any;
   signature: string;
   file_id?: string | null;
+  /** All file ids on this message (album). Prefer over single file_id when present. */
+  attachments?: string[] | null;
   created_at: string;
   reply_to?: string | null;
   delivered?: boolean;
@@ -241,6 +245,15 @@ export const peerApi = {
     }),
   writeFileChunk: (fileId: string, index: number, dataB64: string, nonce: string) =>
     inv<void>("write_file_chunk", { fileId, index, dataB64, nonce }),
+  /** Native disk→AES-GCM→staging (path-based sends). Avoids JS Base64 IPC. */
+  stageOutgoingFromPath: (fileId: string, path: string, contentKeyB64: string) =>
+    inv<{ content_sha256: string; bytes_written: number; chunk_count: number }>(
+      "stage_outgoing_from_path",
+      { fileId, path, contentKeyB64 }
+    ),
+  requestStageCancel: (fileId: string) => inv<void>("request_stage_cancel", { fileId }),
+  requestStagePause: (fileId: string) => inv<void>("request_stage_pause", { fileId }),
+  clearStagePause: (fileId: string) => inv<void>("clear_stage_pause", { fileId }),
   setFileContentHash: (fileId: string, contentSha256: string) =>
     inv<void>("set_file_content_hash", { fileId, contentSha256 }),
   sendFileNotice: (conversationId: string, fileId: string, recipientIds: string[]) =>
@@ -277,6 +290,8 @@ export const peerApi = {
       contentKeyB64,
       fromIndex,
     }),
+  /** Abort an in-flight binary stream download (pause/stop). */
+  cancelFileStream: (fileId: string) => inv<void>("cancel_file_stream", { fileId }),
   ackFileDownload: (fileId: string, uploaderId: string) =>
     inv<void>("ack_file_download", { fileId, uploaderId }),
   getFile: (fileId: string) => inv<any>("get_file", { fileId }),
@@ -294,6 +309,9 @@ export const peerApi = {
     inv<string>("finalize_file_receive", { fileId, filename }),
   getReceiveProgress: (fileId: string) =>
     inv<{ next_index: number; temp_path: string | null }>("get_receive_progress", { fileId }),
+  /** Cache plaintext for an outgoing file when the picker gave no disk path. */
+  cacheOutgoingPlain: (fileId: string, filename: string, dataB64: string) =>
+    inv<string>("cache_outgoing_plain", { fileId, filename, dataB64 }),
   openLocalFile: (fileId: string) => inv<void>("open_local_file", { fileId }),
   readLocalFile: (fileId: string) => inv<string>("read_local_file", { fileId }),
   getAppSetting: (key: string) => inv<string | null>("get_app_setting", { key }),

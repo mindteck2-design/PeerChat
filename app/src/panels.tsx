@@ -157,6 +157,8 @@ function statusMeta(row: TransferLog): {
   if (row.status === "completed" && row.verified) return { label: "Verified", color: "success" };
   if (row.status === "completed") return { label: "Received", color: "info" };
   if (row.status === "failed") return { label: "Failed", color: "default" };
+  if (row.status === "cancelled" || row.error === "Cancelled")
+    return { label: "Cancelled", color: "warning" };
   if (row.status === "interrupted") return { label: "Interrupted", color: "warning" };
   if (row.status === "verifying") return { label: "Verifying", color: "primary" };
   if (row.status === "transferring") return { label: "Transferring", color: "primary" };
@@ -191,7 +193,13 @@ export function TransfersPanel({
     return rows.filter((row) => {
       if (tab === 1 && row.direction !== "recv") return false;
       if (filter === "completed" && row.status !== "completed") return false;
-      if (filter === "failed" && row.status !== "failed" && row.status !== "interrupted") return false;
+      if (
+        filter === "failed" &&
+        row.status !== "failed" &&
+        row.status !== "interrupted" &&
+        row.status !== "cancelled"
+      )
+        return false;
       if (
         filter === "active" &&
         !["queued", "transferring", "verifying"].includes(row.status)
@@ -429,7 +437,10 @@ export function TransfersPanel({
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
       >
-        {(menu?.row.status === "failed" || menu?.row.status === "interrupted") && menu.row.file_id && (
+        {(menu?.row.status === "failed" ||
+          menu?.row.status === "interrupted" ||
+          menu?.row.status === "cancelled") &&
+          menu.row.file_id && (
           <MenuItem
             onClick={() => {
               if (menu) onRetry(menu.row);
@@ -457,7 +468,10 @@ export function TransfersPanel({
         )}
         {menu &&
           !(
-            ((menu.row.status === "failed" || menu.row.status === "interrupted") && menu.row.file_id) ||
+            ((menu.row.status === "failed" ||
+              menu.row.status === "interrupted" ||
+              menu.row.status === "cancelled") &&
+              menu.row.file_id) ||
             (onRemove && !["queued", "transferring", "verifying"].includes(menu.row.status))
           ) && (
             <MenuItem disabled>

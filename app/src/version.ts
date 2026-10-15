@@ -1,7 +1,7 @@
 import { getVersion } from "@tauri-apps/api/app";
 
 /** Fallback when not running inside Tauri (vite preview). Keep in sync with package.json. */
-export const APP_VERSION_FALLBACK = "0.4.3";
+export const APP_VERSION_FALLBACK = "0.5.0";
 
 let cached: string | null = null;
 

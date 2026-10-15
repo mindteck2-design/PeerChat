@@ -7,6 +7,7 @@ use rustls::pki_types::ServerName;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -16,6 +17,69 @@ use tauri_plugin_notification::NotificationExt;
 static RECENT_TOASTS: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const TOAST_DEDUPE_SECS: u64 = 10;
+
+/// Soft-cancel flags for in-flight `/v1/file/stream` downloads (pause/stop).
+static STREAM_CANCEL: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Outgoing native staging: stop / pause between chunks.
+static STAGE_CANCEL: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static STAGE_PAUSE: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn register_stream_cancel(file_id: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    STREAM_CANCEL.lock().insert(file_id.to_string(), flag.clone());
+    flag
+}
+
+pub fn request_stream_cancel(file_id: &str) {
+    if let Some(flag) = STREAM_CANCEL.lock().get(file_id) {
+        flag.store(true, Ordering::SeqCst);
+    }
+}
+
+pub fn clear_stream_cancel(file_id: &str) {
+    STREAM_CANCEL.lock().remove(file_id);
+}
+
+pub fn register_stage_controls(file_id: &str) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let pause = Arc::new(AtomicBool::new(false));
+    STAGE_CANCEL
+        .lock()
+        .insert(file_id.to_string(), cancel.clone());
+    STAGE_PAUSE.lock().insert(file_id.to_string(), pause.clone());
+    (cancel, pause)
+}
+
+pub fn request_stage_cancel(file_id: &str) {
+    if let Some(flag) = STAGE_CANCEL.lock().get(file_id) {
+        flag.store(true, Ordering::SeqCst);
+    }
+    // Wake a paused stage so it can observe cancel.
+    if let Some(flag) = STAGE_PAUSE.lock().get(file_id) {
+        flag.store(false, Ordering::SeqCst);
+    }
+}
+
+pub fn request_stage_pause(file_id: &str) {
+    if let Some(flag) = STAGE_PAUSE.lock().get(file_id) {
+        flag.store(true, Ordering::SeqCst);
+    }
+}
+
+pub fn clear_stage_pause(file_id: &str) {
+    if let Some(flag) = STAGE_PAUSE.lock().get(file_id) {
+        flag.store(false, Ordering::SeqCst);
+    }
+}
+
+pub fn clear_stage_controls(file_id: &str) {
+    STAGE_CANCEL.lock().remove(file_id);
+    STAGE_PAUSE.lock().remove(file_id);
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 
@@ -77,7 +141,8 @@ pub fn spawn_listener(
                 };
                 // Keep-alive: many file-chunk fetches share one TLS session (huge speedup).
                 let mut pending = Vec::new();
-                let mut tmp = [0u8; 64 * 1024];
+                // Heap buffer — large stack arrays in async tasks blow the Windows thread stack (0xc00000fd).
+                let mut tmp = vec![0u8; 64 * 1024];
                 const MAX_REQ: usize = 16 * 1024 * 1024;
                 loop {
                     let req_bytes = match read_one_http_request(&mut tls, &mut pending, &mut tmp, MAX_REQ).await
@@ -294,6 +359,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
             }
             let has_inbox = payload.get("message").is_some()
                 || payload.get("file").is_some()
+                || payload.get("files").is_some()
                 || payload.get("group_event").is_some();
             let mut fresh_message = false;
             let conn = db.lock();
@@ -382,7 +448,18 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     }
                 }
             }
-            if let Some(file) = payload.get("file") {
+            // Prefer multi-file album payload; fall back to legacy single `file`.
+            let inbound_files: Vec<&Value> = payload
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().collect())
+                .unwrap_or_else(|| {
+                    payload
+                        .get("file")
+                        .map(|f| vec![f])
+                        .unwrap_or_default()
+                });
+            for file in inbound_files {
                 let file_cid = file
                     .get("conversation_id")
                     .and_then(|v| v.as_str())
@@ -773,6 +850,8 @@ async fn stream_file_chunks(
     // No Content-Length — client reads until EOF / sentinel after headers.
     let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nX-PeerChat-Stream: v1\r\nConnection: close\r\n\r\n";
     tls.write_all(headers.as_bytes()).await.map_err(|_| ())?;
+    // Batch a few frames before flush — cuts TLS/syscall overhead on LAN.
+    let mut out = Vec::with_capacity(16 * 1024 * 1024);
     for index in from_index..chunk_count {
         let path = staging.join(format!("{index}.chunk"));
         let nonce_path = staging.join(format!("{index}.nonce"));
@@ -784,13 +863,16 @@ async fn stream_file_chunks(
         if nonce_b.len() > u16::MAX as usize {
             return Err(());
         }
-        let mut frame = Vec::with_capacity(4 + 2 + nonce_b.len() + 4 + data.len());
-        frame.extend_from_slice(&index.to_le_bytes());
-        frame.extend_from_slice(&(nonce_b.len() as u16).to_le_bytes());
-        frame.extend_from_slice(nonce_b);
-        frame.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        frame.extend_from_slice(&data);
-        tls.write_all(&frame).await.map_err(|_| ())?;
+        out.extend_from_slice(&index.to_le_bytes());
+        out.extend_from_slice(&(nonce_b.len() as u16).to_le_bytes());
+        out.extend_from_slice(nonce_b);
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        // Flush every ~2 frames (≈16 MiB ciphertext) or at end.
+        if out.len() >= 14 * 1024 * 1024 || index + 1 == chunk_count {
+            tls.write_all(&out).await.map_err(|_| ())?;
+            out.clear();
+        }
     }
     tls.write_all(&0xFFFFFFFFu32.to_le_bytes())
         .await
@@ -1015,7 +1097,7 @@ impl PeerSession {
             .write_all(req.as_bytes())
             .await
             .map_err(|e| e.to_string())?;
-        let mut tmp = [0u8; 64 * 1024];
+        let mut tmp = vec![0u8; 64 * 1024];
         loop {
             if let Some(pos) = self
                 .pending
@@ -1048,7 +1130,8 @@ impl PeerSession {
     }
 
     pub async fn read_exact(&mut self, n: usize) -> Result<Vec<u8>, String> {
-        let mut tmp = [0u8; 256 * 1024];
+        // Heap — large enough for LAN throughput without blowing the Windows task stack.
+        let mut tmp = vec![0u8; 256 * 1024];
         while self.pending.len() < n {
             match self.tls.read(&mut tmp).await {
                 Ok(0) => return Err("peer closed mid-stream".into()),
@@ -1060,7 +1143,7 @@ impl PeerSession {
     }
 
     async fn read_one_response(&mut self) -> Result<Vec<u8>, String> {
-        let mut tmp = [0u8; 256 * 1024];
+        let mut tmp = vec![0u8; 256 * 1024];
         const MAX_RESP: usize = 24 * 1024 * 1024;
         loop {
             if let Some(end) = complete_http_response_len(&self.pending) {
@@ -1078,6 +1161,43 @@ impl PeerSession {
             }
         }
     }
+}
+
+/// Encrypt one file chunk (matches JS `encryptChunk` AES-256-GCM + optional AAD).
+/// Returns (nonce_b64, ciphertext).
+pub fn encrypt_file_chunk(
+    content_key: &[u8],
+    plaintext: &[u8],
+    chunk_index: Option<u32>,
+) -> Result<(String, Vec<u8>), String> {
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use aes_gcm::{Aes256Gcm, Key, Nonce};
+    if content_key.len() != 32 {
+        return Err("content key must be 32 bytes".into());
+    }
+    let mut nonce_raw = [0u8; 12];
+    getrandom::getrandom(&mut nonce_raw).map_err(|e| e.to_string())?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(content_key));
+    let nonce = Nonce::from_slice(&nonce_raw);
+    let aad_owned: Option<Vec<u8>> =
+        chunk_index.map(|i| format!("chunk:{i}").into_bytes());
+    let ciphertext = if let Some(ref aad) = aad_owned {
+        cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext,
+                    aad: aad.as_slice(),
+                },
+            )
+            .map_err(|_| "encrypt failed".to_string())?
+    } else {
+        cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|_| "encrypt failed".to_string())?
+    };
+    let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(nonce_raw);
+    Ok((nonce_b64, ciphertext))
 }
 
 /// Decrypt one file chunk (matches JS `@noble/ciphers` AES-256-GCM + optional AAD).
@@ -1133,21 +1253,31 @@ pub async fn stream_download_and_append<F>(
     temp_path: &std::path::Path,
     total_chunks: u32,
     app: &AppHandle,
+    cancel: Arc<AtomicBool>,
     mut on_chunk: F,
 ) -> Result<u32, String>
 where
     F: FnMut(u32) -> Result<(), String>,
 {
-    use std::io::Write;
+    use std::io::{BufWriter, Write};
     let mut session = PeerSession::connect(host, port, expected_fp).await?;
     session.begin_file_stream(file_id, from_index).await?;
     let mut next = from_index;
-    let mut file = std::fs::OpenOptions::new()
+    let raw = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(temp_path)
         .map_err(|e| e.to_string())?;
+    // 4 MiB write buffer — fewer syscalls on large LAN transfers.
+    let mut file = BufWriter::with_capacity(4 * 1024 * 1024, raw);
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            file.flush().map_err(|e| e.to_string())?;
+            if next > from_index {
+                on_chunk(next)?;
+            }
+            return Err("cancelled".into());
+        }
         let idx_bytes = session.read_exact(4).await?;
         let index = u32::from_le_bytes(idx_bytes.as_slice().try_into().unwrap());
         if index == 0xFFFFFFFF {
@@ -1174,8 +1304,10 @@ where
         let plain = decrypt_file_chunk(content_key, &nonce_b64, &cipher, chunk_idx)?;
         file.write_all(&plain).map_err(|e| e.to_string())?;
         next = index + 1;
-        on_chunk(next)?;
-        if next == total_chunks || next == 1 || next % 2 == 0 {
+        // Persist resume cursor less often — DB lock every chunk was a LAN bottleneck.
+        if next == total_chunks || next == 1 || next % 8 == 0 {
+            file.flush().map_err(|e| e.to_string())?;
+            on_chunk(next)?;
             let _ = app.emit(
                 "file-stream-progress",
                 json!({
@@ -1185,6 +1317,10 @@ where
                 }),
             );
         }
+    }
+    file.flush().map_err(|e| e.to_string())?;
+    if next > from_index && (next % 8 != 0) {
+        on_chunk(next)?;
     }
     Ok(next)
 }
