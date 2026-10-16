@@ -546,6 +546,25 @@ pub fn get_file(state: State<AppState>, file_id: String) -> Result<Option<Value>
 }
 
 #[tauri::command]
+pub fn get_files(state: State<AppState>, file_ids: Vec<String>) -> Result<Vec<Value>, String> {
+    let conn = state.db.lock();
+    let mut out = Vec::with_capacity(file_ids.len());
+    for fid in file_ids {
+        if let Some(mut f) = db::get_file(&conn, &fid)? {
+            let path = f["local_path"].as_str().unwrap_or("").trim();
+            let present = !path.is_empty() && std::path::Path::new(path).is_file();
+            if !path.is_empty() && !present {
+                let _ = db::set_file_local_path(&conn, &fid, "");
+                f["local_path"] = Value::Null;
+            }
+            f["local_path_present"] = json!(present);
+            out.push(f);
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
 pub async fn save_downloaded_file(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -706,6 +725,83 @@ pub fn get_receive_progress(state: State<AppState>, file_id: String) -> Result<V
     }
 }
 
+/// Copy an existing plaintext file into the durable outgoing cache and pin
+/// `local_path` there. Used for annotated screenshots (temp `captures/`) so
+/// thumbs survive chat switches after the staging capture is discarded.
+#[tauri::command]
+pub fn persist_outgoing_from_path(
+    app: AppHandle,
+    state: State<AppState>,
+    file_id: String,
+    source_path: String,
+    filename: Option<String>,
+) -> Result<String, String> {
+    if file_id.is_empty()
+        || file_id.contains("..")
+        || file_id.contains('/')
+        || file_id.contains('\\')
+    {
+        return Err("invalid file id".into());
+    }
+    let src = PathBuf::from(source_path.trim());
+    if !src.is_file() {
+        return Err("source file missing".into());
+    }
+    let filename = {
+        let conn = state.db.lock();
+        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let me = profile["id"].as_str().unwrap_or("");
+        let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
+        if file["uploader_id"].as_str() != Some(me) {
+            return Err("only uploader may persist outgoing plaintext".into());
+        }
+        // Already durable and present — keep it (do not re-copy from a temp path).
+        if let Some(p) = file["local_path"].as_str().filter(|p| !p.is_empty()) {
+            let existing = PathBuf::from(p);
+            if existing.is_file() {
+                let under_outgoing = existing
+                    .components()
+                    .any(|c| c.as_os_str() == std::ffi::OsStr::new("outgoing"));
+                if under_outgoing && existing != src {
+                    return Ok(p.to_string());
+                }
+            }
+        }
+        filename
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                src.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "file.bin".into())
+    };
+    let name = safe_download_name(&filename);
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("outgoing")
+        .join(&file_id);
+    std::fs::create_dir_all(&dir).map_err(explain_io)?;
+    let dest = dir.join(&name);
+    if !dest.starts_with(&dir) {
+        return Err("invalid destination".into());
+    }
+    if src != dest {
+        std::fs::copy(&src, &dest).map_err(explain_io)?;
+    }
+    let path_str = dest.display().to_string();
+    {
+        let conn = state.db.lock();
+        db::set_file_local_path(&conn, &file_id, &path_str)?;
+    }
+    Ok(path_str)
+}
+
 /// Persist a plaintext copy of an outgoing file when the WebView picker did not
 /// expose a real disk path (common on Windows). Enables reopen + thumbs later.
 #[tauri::command]
@@ -777,6 +873,8 @@ pub fn open_local_file(state: State<AppState>, file_id: String) -> Result<(), St
             .ok_or("No local copy is available yet")?
     };
     if !path.is_file() {
+        let conn = state.db.lock();
+        let _ = db::set_file_local_path(&conn, &file_id, "");
         return Err("The local file has been moved or deleted".into());
     }
     #[cfg(target_os = "windows")]
@@ -814,8 +912,91 @@ pub fn read_local_file(state: State<AppState>, file_id: String) -> Result<String
             .map(PathBuf::from)
             .ok_or("No local copy is available")?
     };
-    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            let conn = state.db.lock();
+            let _ = db::set_file_local_path(&conn, &file_id, "");
+            return Err(e.to_string());
+        }
+    };
     Ok(base64::engine::general_purpose::STANDARD.encode(data))
+}
+
+/// Generate or reuse a ~256px JPEG thumb under app_data/thumbs/{file_id}.jpg.
+#[tauri::command]
+pub fn ensure_file_thumbnail(
+    app: AppHandle,
+    state: State<AppState>,
+    file_id: String,
+) -> Result<Value, String> {
+    let path = {
+        let conn = state.db.lock();
+        let file = db::get_file(&conn, &file_id)?.ok_or("file metadata missing")?;
+        let p = file["local_path"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .ok_or("No local copy is available")?;
+        if !p.is_file() {
+            let _ = db::set_file_local_path(&conn, &file_id, "");
+            return Err("The local file has been moved or deleted".into());
+        }
+        p
+    };
+    let thumbs = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("thumbs");
+    std::fs::create_dir_all(&thumbs).map_err(|e| e.to_string())?;
+    let thumb_path = thumbs.join(format!("{file_id}.jpg"));
+
+    let src_meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    let src_len = src_meta.len();
+    // Skip absurd sources for chat thumbs.
+    if src_len > 40 * 1024 * 1024 {
+        return Err("source too large for thumbnail".into());
+    }
+    let need_regen = match std::fs::metadata(&thumb_path) {
+        Ok(tm) => {
+            let src_mtime = src_meta.modified().ok();
+            let tm_mtime = tm.modified().ok();
+            match (src_mtime, tm_mtime) {
+                (Some(s), Some(t)) => s > t || tm.len() < 32,
+                _ => tm.len() < 32,
+            }
+        }
+        Err(_) => true,
+    };
+    if need_regen {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(ext.as_str(), "mp4" | "webm" | "mov" | "mkv" | "avi") {
+            return Err("video thumbnail not available".into());
+        }
+        let img = image::open(&path).map_err(|e| format!("thumb decode: {e}"))?;
+        let thumb = img.thumbnail(256, 256);
+        let rgb = thumb.to_rgb8();
+        let mut out = std::fs::File::create(&thumb_path).map_err(|e| e.to_string())?;
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 72);
+        enc.encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| format!("thumb encode: {e}"))?;
+    }
+    let bytes = std::fs::read(&thumb_path).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "file_id": file_id,
+        "mime": "image/jpeg",
+        "data_b64": base64::engine::general_purpose::STANDARD.encode(bytes),
+    }))
 }
 
 #[tauri::command]
@@ -996,6 +1177,66 @@ pub fn local_path_meta(path: String) -> Result<LocalPathMeta, String> {
     })
 }
 
+/// Common media / document types that rarely carry executable payloads.
+/// Skipping Defender preflight avoids false alarms on screenshots & photos.
+fn is_low_risk_attachment(path: &str) -> bool {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "ico"
+            | "svg"
+            | "heic"
+            | "heif"
+            | "mp4"
+            | "webm"
+            | "mov"
+            | "mkv"
+            | "avi"
+            | "mp3"
+            | "wav"
+            | "ogg"
+            | "flac"
+            | "m4a"
+            | "txt"
+            | "md"
+            | "csv"
+            | "json"
+    )
+}
+
+fn defender_output_looks_like_threat(stdout: &str, stderr: &str) -> bool {
+    let blob = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    if blob.trim().is_empty() {
+        return false;
+    }
+    // Require concrete threat language — MpCmdRun exit 2 is also used for generic failures.
+    let has_threat_word = [
+        "threat detected",
+        "threat found",
+        "malware",
+        "trojan",
+        "virus",
+        "worm",
+        "spyware",
+        "ransomware",
+        "found a threat",
+        "detection name",
+    ]
+    .iter()
+    .any(|k| blob.contains(k));
+    has_threat_word
+}
+
 /// Scan a file path with the system AV (Windows Defender on Windows).
 /// Returns {clean, engine, detail, skipped}. Never returns Err — on failure
 /// the result is skipped=true so the caller can decide how to proceed.
@@ -1005,6 +1246,14 @@ pub fn scan_file(path: String) -> ScanResult {
 }
 
 pub fn scan_file_inner(path: &str) -> ScanResult {
+    if is_low_risk_attachment(path) {
+        return ScanResult {
+            clean: true,
+            engine: "none".to_string(),
+            detail: "Skipped — common media/document type".to_string(),
+            skipped: true,
+        };
+    }
     #[cfg(target_os = "windows")]
     {
         windows_defender_scan(path)
@@ -1048,26 +1297,55 @@ pub fn windows_defender_scan(path: &str) -> ScanResult {
         .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
-        Ok(out) => match out.status.code().unwrap_or(-1) {
-            0 => ScanResult {
-                clean: true,
-                engine: "Windows Defender".to_string(),
-                detail: "No threats detected".to_string(),
-                skipped: false,
-            },
-            2 => ScanResult {
-                clean: false,
-                engine: "Windows Defender".to_string(),
-                detail: "Threat detected — Windows Defender flagged this file as malicious".to_string(),
-                skipped: false,
-            },
-            c => ScanResult {
-                clean: true,
-                engine: "Windows Defender".to_string(),
-                detail: format!("Scan inconclusive (exit {c}) — treating file as safe"),
-                skipped: true,
-            },
-        },
+        Ok(out) => {
+            let code = out.status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let snippet = {
+                let s = format!("{stdout}{stderr}").trim().to_string();
+                if s.is_empty() {
+                    String::new()
+                } else {
+                    s.chars().take(280).collect()
+                }
+            };
+            match code {
+                0 => ScanResult {
+                    clean: true,
+                    engine: "Windows Defender".to_string(),
+                    detail: "No threats detected".to_string(),
+                    skipped: false,
+                },
+                2 if defender_output_looks_like_threat(&stdout, &stderr) => ScanResult {
+                    clean: false,
+                    engine: "Windows Defender".to_string(),
+                    detail: if snippet.is_empty() {
+                        "Windows Defender reported a threat in this file".to_string()
+                    } else {
+                        format!("Windows Defender: {snippet}")
+                    },
+                    skipped: false,
+                },
+                2 => ScanResult {
+                    // Exit 2 without threat text is usually a scan/tool failure, not malware.
+                    clean: true,
+                    engine: "Windows Defender".to_string(),
+                    detail: if snippet.is_empty() {
+                        "Scan inconclusive (exit 2, no threat details) — treating file as safe"
+                            .to_string()
+                    } else {
+                        format!("Scan inconclusive (exit 2): {snippet} — treating file as safe")
+                    },
+                    skipped: true,
+                },
+                c => ScanResult {
+                    clean: true,
+                    engine: "Windows Defender".to_string(),
+                    detail: format!("Scan inconclusive (exit {c}) — treating file as safe"),
+                    skipped: true,
+                },
+            }
+        }
         Err(e) => ScanResult {
             clean: true,
             engine: "Windows Defender".to_string(),

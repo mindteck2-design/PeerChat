@@ -70,6 +70,7 @@ pub fn run() {
                 let _ = db::auto_accept_all_pending_identities(&conn);
                 let _ = db::dedupe_peers_by_ip(&conn);
             }
+            commands::screenshot::cleanup_stale_captures_dir(&data);
             app.manage(AppState {
                 db: shared.clone(),
                 data_dir: data.clone(),
@@ -288,12 +289,15 @@ pub fn run() {
             cancel_file_stream,
             ack_file_download,
             get_file,
+            get_files,
+            ensure_file_thumbnail,
             save_downloaded_file,
             begin_file_receive,
             append_file_receive,
             finalize_file_receive,
             get_receive_progress,
             cache_outgoing_plain,
+            persist_outgoing_from_path,
             open_local_file,
             read_local_file,
             tls_fingerprint_peer,
@@ -324,6 +328,16 @@ pub fn run() {
             shell_extension_installed,
             app_log_path,
             append_app_log,
+            begin_screenshot_session,
+            complete_region_capture,
+            complete_fullscreen_capture,
+            cancel_screenshot_session,
+            read_capture_preview,
+            finalize_capture,
+            discard_capture,
+            list_capture_session_monitors,
+            read_session_monitor_preview,
+            cleanup_stale_captures,
         ])
         .build(tauri::generate_context!())
         .expect("error while building PeerChat")

@@ -9,6 +9,7 @@ export function useFileTransfer(opts: {
   setOutgoingFile: Dispatch<SetStateAction<OutgoingFileState | null>>;
   setIncomingFile: Dispatch<SetStateAction<IncomingFileState | null>>;
   setFilePreview: Dispatch<SetStateAction<FilePreview | null>>;
+  setFileThumbs?: Dispatch<SetStateAction<Record<string, string>>>;
   setPreviewBusy: Dispatch<SetStateAction<boolean>>;
   setStatus: Dispatch<SetStateAction<string>>;
   abortSendRef: MutableRefObject<boolean>;
@@ -24,6 +25,7 @@ export function useFileTransfer(opts: {
     setOutgoingFile,
     setIncomingFile,
     setFilePreview,
+    setFileThumbs,
     setPreviewBusy,
     setStatus,
     abortSendRef,
@@ -145,10 +147,18 @@ export function useFileTransfer(opts: {
 
   const closeFilePreview = useCallback(() => {
     setFilePreview((prev) => {
-      if (prev?.url) URL.revokeObjectURL(prev.url);
+      if (prev?.url) {
+        // Do not revoke if the album still uses this blob as a thumb.
+        let shared = false;
+        setFileThumbs?.((prevThumbs) => {
+          shared = prevThumbs[prev.fileId] === prev.url;
+          return prevThumbs;
+        });
+        if (!shared) URL.revokeObjectURL(prev.url);
+      }
       return null;
     });
-  }, [setFilePreview]);
+  }, [setFilePreview, setFileThumbs]);
 
   return {
     abortOutgoingTransfer,

@@ -410,6 +410,22 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
+    if version < 12 {
+        conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_messages_conv_sort
+              ON messages(conversation_id, sort_at, created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_outbox_recipient_pending
+              ON outbox(recipient_id, next_retry_at, created_at) WHERE delivered_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_messages_conv_sender_kind
+              ON messages(conversation_id, sender_id, kind);
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "user_version", 12)
+            .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 

@@ -155,8 +155,16 @@ export const peerApi = {
   openDm: (peerId: string) => inv<Conversation>("open_dm", { peerId }),
   createGroup: (title: string, memberIds: string[], wrappedGroupKeys: Record<string, string>) =>
     inv<Conversation>("create_group", { title, memberIds, wrappedGroupKeys }),
-  listMessages: (conversationId: string) =>
-    inv<Message[]>("list_messages", { conversationId }),
+  listMessages: (
+    conversationId: string,
+    opts?: { limit?: number; beforeSortKey?: string | null; beforeId?: string | null }
+  ) =>
+    inv<{ messages: Message[]; has_more_older: boolean }>("list_messages", {
+      conversationId,
+      limit: opts?.limit ?? 80,
+      beforeSortKey: opts?.beforeSortKey ?? null,
+      beforeId: opts?.beforeId ?? null,
+    }),
   retryMessage: (messageId: string) => inv<void>("retry_message", { messageId }),
   deleteMessageForMe: (messageId: string) =>
     inv<void>("delete_message_for_me", { messageId }),
@@ -295,6 +303,25 @@ export const peerApi = {
   ackFileDownload: (fileId: string, uploaderId: string) =>
     inv<void>("ack_file_download", { fileId, uploaderId }),
   getFile: (fileId: string) => inv<any>("get_file", { fileId }),
+  getFiles: (fileIds: string[]) =>
+    inv<
+      Array<{
+        id: string;
+        size_bytes?: number;
+        enc_filename?: string;
+        filename_nonce?: string;
+        local_path?: string | null;
+        local_path_present?: boolean;
+        wrapped_keys?: any;
+        chunk_count?: number;
+        file_crypto_v?: number;
+        uploader_id?: string;
+      }>
+    >("get_files", { fileIds }),
+  ensureFileThumbnail: (fileId: string) =>
+    inv<{ file_id: string; mime: string; data_b64: string }>("ensure_file_thumbnail", {
+      fileId,
+    }),
   saveDownloadedFile: (filename: string, dataB64: string, fileId?: string) =>
     inv<string>("save_downloaded_file", {
       filename,
@@ -312,6 +339,13 @@ export const peerApi = {
   /** Cache plaintext for an outgoing file when the picker gave no disk path. */
   cacheOutgoingPlain: (fileId: string, filename: string, dataB64: string) =>
     inv<string>("cache_outgoing_plain", { fileId, filename, dataB64 }),
+  /** Copy a disk file (e.g. annotated screenshot under captures/) into durable outgoing cache. */
+  persistOutgoingFromPath: (fileId: string, sourcePath: string, filename?: string) =>
+    inv<string>("persist_outgoing_from_path", {
+      fileId,
+      sourcePath,
+      filename: filename ?? null,
+    }),
   openLocalFile: (fileId: string) => inv<void>("open_local_file", { fileId }),
   readLocalFile: (fileId: string) => inv<string>("read_local_file", { fileId }),
   getAppSetting: (key: string) => inv<string | null>("get_app_setting", { key }),
@@ -350,6 +384,38 @@ export const peerApi = {
   installShellExtension: (exePath: string) => inv<void>("install_shell_extension", { exePath }),
   uninstallShellExtension: () => inv<void>("uninstall_shell_extension"),
   shellExtensionInstalled: () => inv<boolean>("shell_extension_installed"),
+  beginScreenshotSession: () => inv<{ sessionId: string }>("begin_screenshot_session"),
+  completeRegionCapture: (
+    sessionId: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    viewWidth: number,
+    viewHeight: number
+  ) =>
+    inv<{ captureId: string }>("complete_region_capture", {
+      sessionId,
+      x,
+      y,
+      width,
+      height,
+      viewWidth,
+      viewHeight,
+    }),
+  completeFullscreenCapture: (sessionId: string) =>
+    inv<{ captureId: string }>("complete_fullscreen_capture", { sessionId }),
+  cancelScreenshotSession: (sessionId?: string | null) =>
+    inv<void>("cancel_screenshot_session", { sessionId: sessionId ?? null }),
+  readCapturePreview: (captureId: string) =>
+    inv<{ mime: string; data_b64: string; bytes: number }>("read_capture_preview", { captureId }),
+  finalizeCapture: (captureId: string, pngB64: string) =>
+    inv<{ captureId: string; path: string; bytes: number; name: string }>("finalize_capture", {
+      captureId,
+      pngB64,
+    }),
+  discardCapture: (captureId: string) => inv<void>("discard_capture", { captureId }),
+  cleanupStaleCaptures: () => inv<void>("cleanup_stale_captures"),
 };
 
 export type TransferLog = {

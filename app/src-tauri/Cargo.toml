@@ -1,6 +1,6 @@
 [package]
 name = "peerchat"
-version = "0.5.0"
+version = "0.6.0"
 description = "PeerChat secure P2P LAN messenger"
 authors = ["PeerChat"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-store = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,6 +32,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 aes-gcm = "0.10"
 getrandom = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+xcap = "0.0.14"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"

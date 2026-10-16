@@ -95,7 +95,11 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
             inputRef={chatSearchRef}
             size="small"
             fullWidth
-            placeholder={tab === 1 ? "Search chats… (Ctrl/Cmd+K)" : "Search people…"}
+            placeholder={
+              tab === 1
+                ? "Search chats & messages… (Ctrl/Cmd+K)"
+                : "Search people…"
+            }
             value={chatSearch}
             onChange={(e) => setChatSearch(e.target.value)}
             InputProps={{

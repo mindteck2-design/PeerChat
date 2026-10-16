@@ -1,24 +1,20 @@
 // @ts-nocheck
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useIncomingTransfer } from "../files/transferProgressStore";
 import {
-  Avatar, Box, Button, Chip, CircularProgress, Grow, IconButton, LinearProgress,
+  Avatar, Box, Chip, Fade, Grow, IconButton,
   Paper, Stack, Tooltip, Typography,
 } from "@mui/material";
-import CloseIcon from "@mui/icons-material/CloseRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import DoneIcon from "@mui/icons-material/DoneRounded";
 import DoneAllIcon from "@mui/icons-material/DoneAllRounded";
-import DownloadIcon from "@mui/icons-material/DownloadRounded";
 import ForwardIcon from "@mui/icons-material/ForwardRounded";
-import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFileRounded";
 import MoreVertIcon from "@mui/icons-material/MoreVertRounded";
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
-import PauseIcon from "@mui/icons-material/PauseRounded";
-import PlayArrowIcon from "@mui/icons-material/PlayArrowRounded";
 import PushPinIcon from "@mui/icons-material/PushPinRounded";
 import ReplyIcon from "@mui/icons-material/ReplyRounded";
-import StopCircleIcon from "@mui/icons-material/StopCircleRounded";
-import { MediaAlbum, isGridMediaName, type AlbumItem } from "../../MediaAlbum";
+import { MediaAlbum, isGridMediaName, isImageFileName, type AlbumItem } from "../../MediaAlbum";
+import { CircularTransferControl } from "../files/CircularTransferControl";
 import { LinkifiedText } from "../../panels";
 import { RichCard } from "./RichCard";
 import { GameInviteCard, matchIdOf, parseGameMsg, resolveGameCardStatus } from "../../games/GameInviteCard";
@@ -131,10 +127,11 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
     fileNames,
     fileSizes,
     fileThumbs,
+    fileLocalPaths,
+    fileMetaReady,
     gameInviteBusy,
     gamesOn,
     highlightMsgId,
-    incomingFile,
     messages,
     openAttachment,
     outgoingFile,
@@ -155,53 +152,51 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
     setGameInviteBusy,
     setGamesOn,
     setMessages,
+    setHighlightMsgId,
     setMsgMenu,
     setNav,
     setPendingGameInvite,
     setStatus,
     status,
     text,
-    thumbInflightRef
   } = vm;
 
-  const jumpToReferencedMessage = (messageId: string) => {
-    const target = document.getElementById(`msg-${messageId}`);
-    if (!target) return;
+  // Narrow subscription — progress ticks need not rebuild ChatScreen's god vm.
+  const incomingFile = useIncomingTransfer() ?? vm.incomingFile;
 
-    target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-    // Briefly outline the destination so the user can spot it in a busy conversation.
-    target.style.outline = "2px solid var(--mui-palette-primary-main, #2563eb)";
-    target.style.outlineOffset = "3px";
-    target.style.transition = "outline-color 180ms ease";
-    window.setTimeout(() => {
-      target.style.outline = "";
-      target.style.outlineOffset = "";
-    }, 1600);
+  const jumpToReferencedMessage = (messageId: string) => {
+    if (typeof setHighlightMsgId === "function") {
+      setHighlightMsgId(messageId);
+    }
+    if (vm.stickToBottomRef) vm.stickToBottomRef.current = false;
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById(`msg-${messageId}`);
+      if (!target) return;
+      target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    });
   };
 
-  return (
-    <>
-          {dayGroups.map((group) => (
-            <Box key={group.day} display="flex" flexDirection="column" gap={0.65}>
-              <Box display="flex" justifyContent="center" my={0.75}>
-                <Chip
-                  label={group.label}
-                  size="small"
-                  sx={{
-                    height: 22,
-                    px: 0.75,
-                    bgcolor: "background.paper",
-                    color: "text.secondary",
-                    fontWeight: 600,
-                    fontSize: 11,
-                    border: "1px solid",
-                    borderColor: "divider",
-                  }}
-                />
-              </Box>
-              {group.items.map((m) => {
+  // Highlight / in-chat search jump (scroll when highlightMsgId is set externally too).
+  useEffect(() => {
+    if (!highlightMsgId) return;
+    if (vm.stickToBottomRef) vm.stickToBottomRef.current = false;
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById(`msg-${highlightMsgId}`);
+      if (!target) return;
+      target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightMsgId, dayGroups.length, messages.length]);
+
+  const msgById = useMemo(() => {
+    const map = new Map();
+    for (const m of messages) map.set(m.id, m);
+    return map;
+  }, [messages]);
+
+  const renderMessage = (m) => {
                 const mine = m.sender_id === profile.id;
-                const quoted = m.reply_to ? messages.find((x) => x.id === m.reply_to) : undefined;
+                const quoted = m.reply_to ? msgById.get(m.reply_to) : undefined;
                 const label = senderLabel(m.sender_id);
                 const isGroup = active?.kind === "group";
                 // WhatsApp-style: 1–3 emoji-only → large, no bubble (skip if reply/attachments).
@@ -334,7 +329,12 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                                   payload: { type: "decline", matchId: mid },
                                 });
                                 if (active) {
-                                  setMessages(await peerApi.listMessages(active.id));
+                                  const page = await peerApi.listMessages(active.id, { limit: 80 });
+                                  setMessages((prev) => {
+                                    const byId = new Map(prev.map((x) => [x.id, x]));
+                                    for (const m of page.messages) byId.set(m.id, m);
+                                    return prev.map((m) => byId.get(m.id) || m);
+                                  });
                                 }
                               } catch (err: any) {
                                 setStatus(err?.message || String(err));
@@ -378,8 +378,11 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                   );
                 }
                 const highlighted = highlightMsgId === m.id;
+                const hasAttachments = messageAttachmentIds(m).length > 0;
+                // Soft fade for albums — Grow scales large grids and feels jumpy.
+                const MsgEnter = hasAttachments ? Fade : Grow;
                 return (
-                  <Grow in key={m.id} timeout={180}>
+                  <MsgEnter in key={m.id} timeout={hasAttachments ? 160 : 180}>
                     <Box
                       id={`msg-${m.id}`}
                       sx={{
@@ -401,6 +404,8 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                           sx={{
                             px: bigEmoji ? 0.5 : 1,
                             py: bigEmoji ? 0.25 : 0.4,
+                            // Keep media clear of the ⋮ control.
+                            pt: !bigEmoji && m.kind !== "deleted" ? 2.25 : undefined,
                             bgcolor: bigEmoji
                               ? highlighted
                                 ? dark
@@ -434,6 +439,7 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                                     : "divider",
                             borderRadius: mine ? "10px 10px 3px 10px" : "10px 10px 10px 3px",
                             position: "relative",
+                            overflow: "visible",
                             boxShadow: bigEmoji
                               ? "none"
                               : dark
@@ -443,19 +449,27 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                           }}
                         >
                           {m.pinned && (
-                            <PushPinIcon
-                              sx={{
-                                position: "absolute",
-                                top: -7,
-                                left: mine ? undefined : -7,
-                                right: mine ? -7 : undefined,
-                                fontSize: 14,
-                                color: "secondary.main",
-                                bgcolor: "background.paper",
-                                borderRadius: "50%",
-                                p: 0.15,
-                              }}
-                            />
+                            <Tooltip title="Pinned">
+                              <PushPinIcon
+                                sx={{
+                                  position: "absolute",
+                                  top: -10,
+                                  left: mine ? undefined : -10,
+                                  right: mine ? -10 : undefined,
+                                  fontSize: 18,
+                                  color: "warning.main",
+                                  bgcolor: dark ? "rgba(30,36,48,0.95)" : "background.paper",
+                                  borderRadius: "50%",
+                                  p: 0.35,
+                                  border: "1px solid",
+                                  borderColor: "warning.main",
+                                  boxShadow: dark
+                                    ? "0 1px 4px rgba(0,0,0,0.45)"
+                                    : "0 1px 3px rgba(20,32,28,0.18)",
+                                  zIndex: 2,
+                                }}
+                              />
+                            </Tooltip>
                           )}
                           {m.kind !== "deleted" && (
                             <IconButton
@@ -464,11 +478,21 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                               onClick={(e) => setMsgMenu({ anchor: e.currentTarget, message: m })}
                               sx={{
                                 position: "absolute",
-                                top: 2,
-                                right: 2,
-                                opacity: 0.45,
-                                p: 0.45,
-                                zIndex: 1,
+                                top: 4,
+                                right: 4,
+                                opacity: 0.55,
+                                p: 0.35,
+                                zIndex: 2,
+                                bgcolor: dark ? "rgba(20,28,40,0.72)" : "rgba(255,255,255,0.88)",
+                                border: "1px solid",
+                                borderColor: dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.08)",
+                                boxShadow: dark
+                                  ? "0 1px 2px rgba(0,0,0,0.35)"
+                                  : "0 1px 2px rgba(20,32,28,0.08)",
+                                "&:hover": {
+                                  opacity: 1,
+                                  bgcolor: dark ? "rgba(30,40,56,0.92)" : "rgba(255,255,255,1)",
+                                },
                               }}
                             >
                               <MoreVertIcon sx={{ fontSize: 15 }} />
@@ -625,17 +649,29 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                               )}
                               {messageAttachmentIds(m).length > 0 && (() => {
                                 const ids = messageAttachmentIds(m);
-                                const albumItems: AlbumItem[] = ids.map((fid) => ({
-                                  fileId: fid,
-                                  name: fileNames[fid] || "Encrypted file",
-                                  size: fileSizes[fid],
-                                  thumbUrl: fileThumbs[fid] || null,
-                                  loading:
-                                    !!fileNames[fid] &&
-                                    isGridMediaName(fileNames[fid]) &&
-                                    !fileThumbs[fid] &&
-                                    thumbInflightRef.current.has(fid),
-                                }));
+                                const albumItems: AlbumItem[] = ids.map((fid) => {
+                                  const knownName = fileNames[fid];
+                                  const name = knownName || "Encrypted file";
+                                  const hasThumb = !!fileThumbs[fid];
+                                  const hasLocal = !!(fileThumbs[fid] || fileLocalPaths?.[fid]);
+                                  const metaReady = !!fileMetaReady?.[fid];
+                                  const isMedia = !!knownName && isGridMediaName(name);
+                                  // Own messages are almost always local — keep spinner until meta resolves.
+                                  const loading =
+                                    !metaReady ||
+                                    !knownName ||
+                                    (mine && !hasLocal && !metaReady) ||
+                                    (hasLocal && isMedia && isImageFileName(name) && !hasThumb);
+                                  return {
+                                    fileId: fid,
+                                    name,
+                                    size: fileSizes[fid],
+                                    thumbUrl: fileThumbs[fid] || null,
+                                    downloaded: hasLocal,
+                                    metaReady,
+                                    loading,
+                                  };
+                                });
                                 const mediaIds = ids.filter((fid) =>
                                   isGridMediaName(fileNames[fid] || "")
                                 );
@@ -654,111 +690,35 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                                       )
                                     : 0;
                                 return (
-                                  <>
-                                    <MediaAlbum
-                                      items={albumItems}
-                                      mine={mine}
-                                      busyFileId={xferActive ? incomingFile.fileId : null}
-                                      onOpenMedia={(fid) => {
-                                        void openAttachment(fid, m.sender_id);
-                                      }}
-                                      onOpenFile={(fid) => {
-                                        void openAttachment(fid, m.sender_id);
-                                      }}
-                                    />
-                                    {xferHere && (
-                                      <Stack spacing={0.5} sx={{ px: 0.25 }}>
-                                        <Stack direction="row" alignItems="center" spacing={0.75}>
-                                          <Typography
-                                            variant="caption"
-                                            color="text.secondary"
-                                            sx={{ flex: 1 }}
-                                          >
-                                            {incomingFile.cancelled
-                                              ? "Cancelled"
-                                              : incomingFile.paused
-                                                ? `Paused ${pct}%`
-                                                : `${incomingFile.label || "Downloading…"} ${pct}%`}
-                                          </Typography>
-                                          {incomingFile.cancelled ? (
-                                            <>
-                                              <Button
-                                                size="small"
-                                                sx={{ textTransform: "none", fontWeight: 700, minWidth: 0 }}
-                                                onClick={() => void retryIncomingTransfer()}
-                                              >
-                                                Retry
-                                              </Button>
-                                              <Tooltip title="Dismiss">
-                                                <IconButton
-                                                  size="small"
-                                                  aria-label="Dismiss cancelled download"
-                                                  onClick={dismissIncomingTransfer}
-                                                  sx={{ p: 0.35 }}
-                                                >
-                                                  <CloseIcon sx={{ fontSize: 18 }} />
-                                                </IconButton>
-                                              </Tooltip>
-                                            </>
-                                          ) : (
-                                            <>
-                                              <Tooltip
-                                                title={
-                                                  incomingFile.paused ? "Resume" : "Pause"
-                                                }
-                                              >
-                                                <IconButton
-                                                  size="small"
-                                                  aria-label={
-                                                    incomingFile.paused
-                                                      ? "Resume download"
-                                                      : "Pause download"
-                                                  }
-                                                  onClick={() =>
-                                                    incomingFile.paused
-                                                      ? void openAttachment(
-                                                          incomingFile.fileId,
-                                                          m.sender_id
-                                                        )
-                                                      : pauseIncomingTransfer()
-                                                  }
-                                                  sx={{ p: 0.35 }}
-                                                >
-                                                  {incomingFile.paused ? (
-                                                    <PlayArrowIcon sx={{ fontSize: 18 }} />
-                                                  ) : (
-                                                    <PauseIcon sx={{ fontSize: 18 }} />
-                                                  )}
-                                                </IconButton>
-                                              </Tooltip>
-                                              <Tooltip title="Stop">
-                                                <IconButton
-                                                  size="small"
-                                                  color="error"
-                                                  aria-label="Stop download"
-                                                  onClick={abortIncomingTransfer}
-                                                  sx={{ p: 0.35 }}
-                                                >
-                                                  <StopCircleIcon sx={{ fontSize: 18 }} />
-                                                </IconButton>
-                                              </Tooltip>
-                                            </>
-                                          )}
-                                        </Stack>
-                                        {!incomingFile.cancelled && (
-                                          <LinearProgress
-                                            variant="determinate"
-                                            value={pct}
-                                            sx={{
-                                              height: 4,
-                                              borderRadius: 999,
-                                              opacity: incomingFile.paused ? 0.55 : 1,
-                                            }}
-                                          />
-                                        )}
-                                      </Stack>
-                                    )}
-                                  </>
+                                  <MediaAlbum
+                                    items={albumItems}
+                                    mine={mine}
+                                    busyFileId={xferActive ? incomingFile.fileId : null}
+                                    transfer={
+                                      xferHere
+                                        ? {
+                                            fileId: incomingFile.fileId,
+                                            pct,
+                                            paused: incomingFile.paused,
+                                            cancelled: incomingFile.cancelled,
+                                            label: incomingFile.label,
+                                          }
+                                        : null
+                                    }
+                                    onPauseTransfer={pauseIncomingTransfer}
+                                    onResumeTransfer={() =>
+                                      void openAttachment(incomingFile.fileId, m.sender_id)
+                                    }
+                                    onAbortTransfer={abortIncomingTransfer}
+                                    onRetryTransfer={() => void retryIncomingTransfer()}
+                                    onDismissTransfer={dismissIncomingTransfer}
+                                    onOpenMedia={(fid) => {
+                                      void openAttachment(fid, m.sender_id);
+                                    }}
+                                    onOpenFile={(fid) => {
+                                      void openAttachment(fid, m.sender_id);
+                                    }}
+                                  />
                                 );
                               })()}
                               {m.kind === "file_notice" &&
@@ -849,9 +809,9 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                         {!!m.reactions?.length && (
                           <Stack
                             direction="row"
-                            spacing={0.4}
+                            spacing={0.5}
                             sx={{
-                              mt: 0.35,
+                              mt: 0.5,
                               flexWrap: "wrap",
                               justifyContent: mine ? "flex-end" : "flex-start",
                             }}
@@ -864,129 +824,114 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                                 onClick={() => reactToMessage(m, r.emoji)}
                                 variant={r.users.includes(profile.id) ? "filled" : "outlined"}
                                 color={r.users.includes(profile.id) ? "primary" : "default"}
-                                sx={{ height: 20, fontSize: 11 }}
+                                sx={{
+                                  height: 28,
+                                  fontSize: 14,
+                                  fontWeight: 700,
+                                  px: 0.35,
+                                  bgcolor: r.users.includes(profile.id)
+                                    ? undefined
+                                    : dark
+                                      ? "rgba(255,255,255,0.08)"
+                                      : "background.paper",
+                                  borderWidth: 1.5,
+                                  boxShadow: dark
+                                    ? "0 1px 3px rgba(0,0,0,0.35)"
+                                    : "0 1px 2px rgba(20,32,28,0.1)",
+                                  "& .MuiChip-label": { px: 0.85 },
+                                }}
                               />
                             ))}
                           </Stack>
                         )}
                     </Box>
-                  </Grow>
+                  </MsgEnter>
                 );
-              })}
-            </Box>
-          ))}
-          {outgoingFile && active?.id === outgoingFile.conversationId && (
-            <Paper
-              elevation={0}
+  };
+
+  return (
+    <>
+      {dayGroups.map((group) => (
+        <Box key={group.day} display="flex" flexDirection="column" gap={0.65}>
+          <Box display="flex" justifyContent="center" my={0.75}>
+            <Chip
+              label={group.label}
+              size="small"
               sx={{
-                alignSelf: "flex-end",
-                maxWidth: "70%",
-                p: 1.5,
-                bgcolor: "action.hover",
-                border: "1px dashed",
+                height: 22,
+                px: 0.75,
+                bgcolor: "background.paper",
+                color: "text.secondary",
+                fontWeight: 600,
+                fontSize: 11,
+                border: "1px solid",
                 borderColor: "divider",
-                opacity: outgoingFile.cancelled ? 0.95 : 0.85,
               }}
-            >
-              <Stack direction="row" spacing={1.25} alignItems="center">
-                {!outgoingFile.paused && !outgoingFile.cancelled ? (
-                  <CircularProgress size={18} thickness={5} />
-                ) : (
-                  <InsertDriveFileIcon sx={{ fontSize: 20, color: "text.secondary" }} />
-                )}
-                <Box minWidth={0} flex={1}>
-                  <Typography noWrap fontWeight={700} color="text.secondary">
-                    {outgoingFile.name}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {outgoingFile.cancelled
-                      ? "Cancelled"
-                      : outgoingFile.paused
-                        ? "Paused"
-                        : "Encrypting & sending…"}
-                    {!outgoingFile.cancelled && outgoingFile.total
-                      ? ` ${Math.min(
-                          100,
-                          Math.round((100 * outgoingFile.done) / outgoingFile.total)
-                        )}%`
-                      : ""}
-                  </Typography>
-                  {!outgoingFile.cancelled && (
-                    <LinearProgress
-                      variant="determinate"
-                      value={
-                        outgoingFile.total
-                          ? Math.min(100, (100 * outgoingFile.done) / outgoingFile.total)
-                          : 0
-                      }
-                      sx={{
-                        mt: 0.75,
-                        height: 4,
-                        borderRadius: 999,
-                        opacity: outgoingFile.paused ? 0.55 : 1,
-                      }}
-                    />
-                  )}
-                </Box>
-                {outgoingFile.cancelled ? (
-                  <>
-                    {outgoingFile.sourcePath && (
-                      <Button
-                        size="small"
-                        sx={{ textTransform: "none", fontWeight: 700 }}
-                        onClick={() => void retryOutgoingTransfer()}
-                      >
-                        Retry
-                      </Button>
-                    )}
-                    <Tooltip title="Dismiss">
-                      <IconButton
-                        size="small"
-                        aria-label="Dismiss cancelled send"
-                        onClick={dismissOutgoingTransfer}
-                      >
-                        <CloseIcon />
-                      </IconButton>
-                    </Tooltip>
-                  </>
-                ) : (
-                  <>
-                    <Tooltip title={outgoingFile.paused ? "Resume" : "Pause"}>
-                      <IconButton
-                        size="small"
-                        aria-label={outgoingFile.paused ? "Resume upload" : "Pause upload"}
-                        onClick={() =>
-                          outgoingFile.paused
-                            ? resumeOutgoingTransfer()
-                            : pauseOutgoingTransfer()
-                        }
-                      >
-                        {outgoingFile.paused ? <PlayArrowIcon /> : <PauseIcon />}
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title="Stop">
-                      <IconButton
-                        size="small"
-                        color="error"
-                        aria-label="Abort file send"
-                        onClick={abortOutgoingTransfer}
-                      >
-                        <StopCircleIcon />
-                      </IconButton>
-                    </Tooltip>
-                  </>
-                )}
-              </Stack>
-              <Typography variant="caption" color="text.secondary" display="block" mt={0.75} textAlign="right">
-                {outgoingFile.cancelled
-                  ? outgoingFile.sourcePath
-                    ? "Cancelled · retry or dismiss"
-                    : "Cancelled · re-attach to send again"
-                  : outgoingFile.paused
-                    ? "Paused · resume or stop"
-                    : "Sending · pause or stop"}
-              </Typography>
-            </Paper>
+            />
+          </Box>
+          {group.items.map((m) => renderMessage(m))}
+        </Box>
+      ))}
+      {outgoingFile && active?.id === outgoingFile.conversationId && (
+            <Fade in timeout={160}>
+              <Paper
+                elevation={0}
+                sx={{
+                  alignSelf: "flex-end",
+                  maxWidth: "70%",
+                  p: 1.25,
+                  bgcolor: "action.hover",
+                  border: "1px solid",
+                  borderColor: "divider",
+                  borderRadius: 2,
+                  opacity: outgoingFile.cancelled ? 0.95 : 1,
+                }}
+              >
+                <Stack direction="row" spacing={1.25} alignItems="center">
+                  <CircularTransferControl
+                    value={
+                      outgoingFile.total
+                        ? Math.min(100, Math.round((100 * outgoingFile.done) / outgoingFile.total))
+                        : 0
+                    }
+                    paused={outgoingFile.paused}
+                    cancelled={outgoingFile.cancelled}
+                    tone="onLight"
+                    size={48}
+                    onPause={pauseOutgoingTransfer}
+                    onResume={resumeOutgoingTransfer}
+                    onStop={abortOutgoingTransfer}
+                    onRetry={
+                      outgoingFile.sourcePath
+                        ? () => void retryOutgoingTransfer()
+                        : undefined
+                    }
+                    onDismiss={dismissOutgoingTransfer}
+                  />
+                  <Box minWidth={0} flex={1}>
+                    <Typography noWrap fontWeight={700} sx={{ fontSize: 13 }}>
+                      {outgoingFile.name}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {outgoingFile.batchTotal && outgoingFile.batchTotal > 1
+                        ? `File ${outgoingFile.batchIndex || 1} of ${outgoingFile.batchTotal} · `
+                        : ""}
+                      {outgoingFile.cancelled
+                        ? "Cancelled"
+                        : outgoingFile.paused
+                          ? "Paused"
+                          : "Sending…"}
+                      {!outgoingFile.cancelled && outgoingFile.total
+                        ? ` ${Math.min(
+                            100,
+                            Math.round((100 * outgoingFile.done) / outgoingFile.total)
+                          )}%`
+                        : ""}
+                    </Typography>
+                  </Box>
+                </Stack>
+              </Paper>
+            </Fade>
           )}
           <Box ref={bottomSentinelRef} aria-hidden sx={{ height: 1, width: "100%", flexShrink: 0 }} />
     </>

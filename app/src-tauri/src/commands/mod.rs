@@ -6,6 +6,7 @@ pub mod groups;
 pub mod files;
 pub mod transfers;
 pub mod settings;
+pub mod screenshot;
 
 pub use profile::*;
 pub use peers::*;
@@ -15,3 +16,4 @@ pub use groups::*;
 pub use files::*;
 pub use transfers::*;
 pub use settings::*;
+pub use screenshot::*;

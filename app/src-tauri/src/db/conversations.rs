@@ -611,7 +611,29 @@ pub fn unread_count(
     conversation_id: &str,
     my_user_id: &str,
 ) -> Result<i64, String> {
-    Ok(unread_incoming(conn, conversation_id, my_user_id)?.len() as i64)
+    let related = dm_related_conversation_ids(conn, conversation_id, my_user_id)?;
+    let mut total: i64 = 0;
+    for cid in related {
+        let n: i64 = conn
+            .query_row(
+                &format!(
+                    r#"SELECT COUNT(*)
+                       FROM messages m
+                       LEFT JOIN message_reads r
+                         ON r.message_id=m.id AND r.user_id=?2
+                       WHERE m.conversation_id=?1
+                         AND m.sender_id<>?2
+                         AND r.message_id IS NULL
+                         AND {}"#,
+                    unread_message_filter_sql()
+                ),
+                params![cid.as_str(), my_user_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        total += n;
+    }
+    Ok(total)
 }
 
 pub fn unread_incoming(
@@ -647,12 +669,39 @@ pub fn unread_incoming(
     Ok(out)
 }
 
+/// Soft cap for pinned chats in the sidebar.
+pub const MAX_PINNED_CONVERSATIONS: i64 = 5;
+
+pub fn count_pinned_conversations(conn: &Connection) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM conversations WHERE pinned_at IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
 pub fn set_conversation_pinned(
     conn: &Connection,
     conversation_id: &str,
     pinned: bool,
 ) -> Result<(), String> {
     if pinned {
+        let already: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversations WHERE id=?1 AND pinned_at IS NOT NULL",
+                params![conversation_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if already == 0 {
+            let n = count_pinned_conversations(conn)?;
+            if n >= MAX_PINNED_CONVERSATIONS {
+                return Err(format!(
+                    "Pin limit reached ({MAX_PINNED_CONVERSATIONS}). Unpin a chat first."
+                ));
+            }
+        }
         conn.execute(
             "UPDATE conversations SET pinned_at=?2 WHERE id=?1",
             params![conversation_id, chrono::Utc::now().to_rfc3339()],

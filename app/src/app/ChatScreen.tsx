@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -185,6 +186,11 @@ import {
 } from "../shared/format";
 import { messageAttachmentIds } from "../shared/messageMeta";
 import {
+  MESSAGE_PAGE_SIZE,
+  mergeNewestPage,
+  prependOlderPage,
+} from "../shared/messagePage";
+import {
   BUNDLE_MAX_BYTES,
   BUNDLE_MAX_FILES,
   FILE_FETCH_BATCH,
@@ -198,6 +204,7 @@ import { ListPane } from "../features/shell/ListPane";
 import { MessageList } from "../features/chat/MessageList";
 import { Composer } from "../features/chat/Composer";
 import type { ChatScreenVm } from "../features/chat/chatVm";
+import { ScreenshotAnnotator } from "../features/screenshot/ScreenshotAnnotator";
 import { PeerTrustDialogs } from "../features/peers/PeerTrustDialogs";
 import { GroupCreateDialog } from "../features/groups/GroupCreateDialog";
 import { GroupMembersDialog } from "../features/groups/GroupMembersDialog";
@@ -208,6 +215,7 @@ import { useAnnouncementBoards } from "../features/announcements/useAnnouncement
 import { useGroupAdmin } from "../features/groups/useGroupAdmin";
 import { useFileTransfer } from "../features/files/useFileTransfer";
 import { FilePreviewDialog } from "../features/files/FilePreviewDialog";
+import { publishTransferProgress } from "../features/files/transferProgressStore";
 import { appLog } from "../shared/appLog";
 
 export function ChatScreen({
@@ -232,6 +240,9 @@ export function ChatScreen({
   const [convs, setConvs] = useState<Conversation[]>([]);
   const [active, setActive] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [hasMoreOlder, setHasMoreOlder] = useState(false);
+  const loadingOlderRef = useRef(false);
+  const thumbGenRef = useRef(0);
   const [plain, setPlain] = useState<Record<string, string>>({});
   const [groupKeys, setGroupKeys] = useState<Record<string, Uint8Array>>({});
   // tab 1 = chats list (must match default nav "chats")
@@ -248,7 +259,11 @@ export function ChatScreen({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchBusy, setSearchBusy] = useState(false);
-  const [searchHits, setSearchHits] = useState<{ id: string; title: string; detail: string; conversationId?: string }[]>([]);
+  const [searchHits, setSearchHits] = useState<
+    { id: string; title: string; detail: string; conversationId?: string; messageId?: string }[]
+  >([]);
+  /** Conversation ids whose history matched the chats-sidebar query (message body). */
+  const [sidebarMsgMatchIds, setSidebarMsgMatchIds] = useState<string[]>([]);
   const [announceOpen, setAnnounceOpen] = useState(false);
   const [pollOpen, setPollOpen] = useState(false);
   const [snippetOpen, setSnippetOpen] = useState(false);
@@ -276,7 +291,7 @@ export function ChatScreen({
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPick, setGroupPick] = useState<string[]>([]);
   const [renameDraft, setRenameDraft] = useState("");
-
+  const MAX_PINNED_MESSAGES_PER_CHAT = 3;
   const [status, setStatus] = useState("");
   const statusClearRef = useRef<number | null>(null);
   useEffect(() => {
@@ -303,6 +318,14 @@ export function ChatScreen({
   const [previewBusy, setPreviewBusy] = useState(false);
   const [outgoingFile, setOutgoingFile] = useState<OutgoingFileState | null>(null);
   const [incomingFile, setIncomingFile] = useState<IncomingFileState | null>(null);
+
+  // Mirror transfer progress into a throttled store so list rows can subscribe narrowly.
+  useEffect(() => {
+    publishTransferProgress({ incoming: incomingFile }, true);
+  }, [incomingFile]);
+  useEffect(() => {
+    publishTransferProgress({ outgoing: outgoingFile }, true);
+  }, [outgoingFile]);
 
   const [msgMenu, setMsgMenu] = useState<{ anchor: HTMLElement; message: Message } | null>(null);
   const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
@@ -349,7 +372,14 @@ export function ChatScreen({
   const [fileNames, setFileNames] = useState<Record<string, string>>({});
   const [fileSizes, setFileSizes] = useState<Record<string, number>>({});
   const [fileThumbs, setFileThumbs] = useState<Record<string, string>>({});
+  /** Tracks which file IDs have a saved local_path (non-empty string = downloaded). */
+  const [fileLocalPaths, setFileLocalPaths] = useState<Record<string, string>>({});
+  /** Attachment ids whose on-disk presence has been resolved via getFiles. */
+  const [fileMetaReady, setFileMetaReady] = useState<Record<string, true>>({});
   const thumbInflightRef = useRef<Set<string>>(new Set());
+  const [screenshotCaptureId, setScreenshotCaptureId] = useState<string | null>(null);
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
+  const screenshotSessionRef = useRef<string | null>(null);
   const [pendingShareFiles, setPendingShareFiles] = useState<string[]>([]);
   const [scanWarn, setScanWarn] = useState<{
     detail: string;
@@ -379,6 +409,7 @@ export function ChatScreen({
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLInputElement | null>(null);
+  const olderScrollAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const chatSearchRef = useRef<HTMLInputElement | null>(null);
   const groupKeysRef = useRef(groupKeys);
   groupKeysRef.current = groupKeys;
@@ -410,12 +441,16 @@ export function ChatScreen({
 
   const filteredConvs = useMemo(() => {
     const q = chatSearch.trim().toLowerCase();
+    if (!q) return convs;
+    const msgHits = new Set(sidebarMsgMatchIds);
     return convs.filter((c) => {
-      if (!q) return true;
       const title = (c.kind === "dm" ? c.peer_name : c.title) || "";
-      return title.toLowerCase().includes(q);
+      if (title.toLowerCase().includes(q)) return true;
+      const preview = (lastPreviews[c.id] || "").toLowerCase();
+      if (preview.includes(q)) return true;
+      return msgHits.has(c.id);
     });
-  }, [convs, chatSearch]);
+  }, [convs, chatSearch, lastPreviews, sidebarMsgMatchIds]);
 
   const isAdmin = useMemo(
     () =>
@@ -574,6 +609,85 @@ export function ChatScreen({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Chats sidebar: also match decrypted message bodies (title/preview already covered).
+  useEffect(() => {
+    const q = chatSearch.trim().toLowerCase();
+    if (tab !== 1 || q.length < 2) {
+      setSidebarMsgMatchIds([]);
+      return;
+    }
+    let cancel = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const matched: string[] = [];
+        for (const c of convs) {
+          if (cancel || matched.length >= 30) break;
+          const title = ((c.kind === "dm" ? c.peer_name : c.title) || "").toLowerCase();
+          if (title.includes(q)) continue; // already visible via title filter
+          if ((lastPreviews[c.id] || "").toLowerCase().includes(q)) {
+            matched.push(c.id);
+            continue;
+          }
+          try {
+            if (c.kind === "group") {
+              try {
+                await ensureGroupKey(c.id);
+              } catch {
+                continue;
+              }
+            }
+            let beforeSortKey: string | null = null;
+            let beforeId: string | null = null;
+            let scanned = 0;
+            let found = false;
+            while (!found && scanned < 160) {
+              const page = await peerApi.listMessages(c.id, {
+                limit: MESSAGE_PAGE_SIZE,
+                beforeSortKey,
+                beforeId,
+              });
+              if (cancel || !page.messages.length) break;
+              scanned += page.messages.length;
+              for (const m of page.messages) {
+                if (m.kind === "file_notice" || m.kind === "deleted" || m.kind === "poll_vote") continue;
+                let textBody = "";
+                try {
+                  textBody =
+                    c.kind === "group"
+                      ? await decryptGroupMessageText(m)
+                      : await decryptMessage(
+                          { ...m, wrapped_keys: m.wrapped_keys || {} },
+                          profile.id,
+                          identity
+                        );
+                } catch {
+                  continue;
+                }
+                if (textBody.toLowerCase().includes(q)) {
+                  found = true;
+                  matched.push(c.id);
+                  break;
+                }
+              }
+              if (!page.has_more_older) break;
+              const oldest = page.messages[0]!;
+              beforeSortKey = oldest.sort_at || oldest.created_at;
+              beforeId = oldest.id;
+            }
+          } catch {
+            /* skip */
+          }
+        }
+        if (!cancel) setSidebarMsgMatchIds(matched);
+      })();
+    }, 280);
+    return () => {
+      cancel = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatSearch, tab, convs, lastPreviews, identity, profile.id]);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen<{
@@ -595,7 +709,8 @@ export function ChatScreen({
         // before result so the loser's board shows the winning move.
         if (kind === "game_move") {
           try {
-            const msgs = await peerApi.listMessages(cid);
+            const page = await peerApi.listMessages(cid, { limit: MESSAGE_PAGE_SIZE });
+            const msgs = page.messages;
             const gameRows = msgs.filter((m) => m.kind === "game_move" && m.sender_id === fromId);
             if (!gameRows.length) return;
             const peerList = await peerApi.listPeers();
@@ -733,6 +848,7 @@ export function ChatScreen({
     stickToBottomRef.current = true;
     setChatPaintReady(false);
     setMessages([]);
+    setHasMoreOlder(false);
     setPlain({});
     setMembers([]);
     setMembersLoaded(conv.kind !== "group");
@@ -744,6 +860,7 @@ export function ChatScreen({
     setRenameDraft(conv.title || "");
     setText(draftsRef.current[conv.id] ?? "");
     clearStagedFiles();
+    thumbGenRef.current += 1;
 
     async function pull(isInitial = false) {
       if (conv.kind === "group") {
@@ -773,27 +890,35 @@ export function ChatScreen({
           console.error(err);
         }
       }
-      const msgs = await peerApi.listMessages(conv.id);
+      const page = await peerApi.listMessages(conv.id, { limit: MESSAGE_PAGE_SIZE });
       if (cancel) return;
-      // Avoid churning React state (and scroll) when the poll returns the same list.
-      setMessages((prev) => {
-        if (
-          prev.length === msgs.length &&
-          prev.every(
-            (m, i) =>
-              m.id === msgs[i].id &&
-              m.kind === msgs[i].kind &&
-              m.delivered === msgs[i].delivered &&
-              m.pinned === msgs[i].pinned &&
-              (m.edited_at || "") === (msgs[i].edited_at || "")
-          )
-        ) {
-          return prev;
-        }
-        return msgs;
-      });
+      const msgs = Array.isArray(page?.messages) ? page.messages : [];
       if (isInitial) {
-        // After messages commit, pin once then reveal — no top→bottom flash.
+        setMessages(msgs);
+        setHasMoreOlder(!!page?.has_more_older);
+      } else {
+        // Merge newest page into existing history (keep older pages loaded in memory).
+        setMessages((prev) => {
+          const merged = mergeNewestPage(prev, msgs);
+          if (
+            merged.length === prev.length &&
+            merged.every(
+              (m, i) =>
+                m.id === prev[i].id &&
+                m.kind === prev[i].kind &&
+                m.delivered === prev[i].delivered &&
+                m.pinned === prev[i].pinned &&
+                (m.edited_at || "") === (prev[i].edited_at || "") &&
+                m.queued === prev[i].queued &&
+                m.failed === prev[i].failed
+            )
+          ) {
+            return prev;
+          }
+          return merged;
+        });
+      }
+      if (isInitial) {
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
             if (cancel) return;
@@ -827,7 +952,6 @@ export function ChatScreen({
   function scrollChatToBottom(_behavior: ScrollBehavior = "auto") {
     const el = scroller.current;
     if (!el) return;
-    // Prevent onScroll from treating a programmatic snap as "user scrolled up".
     ignoreScrollRef.current = true;
     el.scrollTop = el.scrollHeight;
     stickToBottomRef.current = true;
@@ -837,18 +961,54 @@ export function ChatScreen({
   }
 
   // Keep pinned before paint when content changes (no visible jump while already revealed).
+  // Do NOT depend on transfer progress ticks — those must not re-pin scroll.
   useLayoutEffect(() => {
+    const el = scroller.current;
+    const anchor = olderScrollAnchorRef.current;
+    if (anchor && el) {
+      el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+      olderScrollAnchorRef.current = null;
+      return;
+    }
     if (!active?.id || highlightMsgId) return;
     if (!stickToBottomRef.current) return;
     scrollChatToBottom("auto");
-  }, [
-    messages,
-    active?.id,
-    outgoingFile?.done,
-    incomingFile?.done,
-    Object.keys(plain).length,
-    highlightMsgId,
-  ]);
+  }, [messages, active?.id, Object.keys(plain).length, highlightMsgId]);
+
+  async function refreshNewestMessages(conversationId: string) {
+    const page = await peerApi.listMessages(conversationId, { limit: MESSAGE_PAGE_SIZE });
+    setMessages((prev) => mergeNewestPage(prev, page?.messages ?? []));
+  }
+
+  async function loadOlderMessages() {
+    if (!active || loadingOlderRef.current || !hasMoreOlder || !messages.length) return;
+    loadingOlderRef.current = true;
+    try {
+      const el = scroller.current;
+      if (el) {
+        olderScrollAnchorRef.current = { height: el.scrollHeight, top: el.scrollTop };
+      }
+      const oldest = messages[0]!;
+      const page = await peerApi.listMessages(active.id, {
+        limit: MESSAGE_PAGE_SIZE,
+        beforeSortKey: oldest.sort_at || oldest.created_at,
+        beforeId: oldest.id,
+      });
+      setHasMoreOlder(!!page?.has_more_older);
+      const older = page?.messages ?? [];
+      if (older.length) {
+        setMessages((prev) => prependOlderPage(prev, older));
+      } else {
+        olderScrollAnchorRef.current = null;
+        setHasMoreOlder(false);
+      }
+    } catch (err) {
+      olderScrollAnchorRef.current = null;
+      console.error(err);
+    } finally {
+      loadingOlderRef.current = false;
+    }
+  }
 
   // Keep pinned to bottom when bubbles grow (decrypt / images) without yanking
   // the user if they scrolled up.
@@ -864,26 +1024,55 @@ export function ChatScreen({
     return () => ro.disconnect();
   }, [active?.id, highlightMsgId, messages.length]);
 
-  // WhatsApp-style jump + flash when opening a saved message.
+  // WhatsApp-style jump + flash when opening a saved / in-chat / global-search hit.
   useEffect(() => {
     if (!highlightMsgId || !active) return;
-    if (!messages.some((m) => m.id === highlightMsgId)) return;
+    if (!messages.some((m) => m.id === highlightMsgId)) {
+      // Target not in loaded window yet — page older history until it appears.
+      if (hasMoreOlder && !loadingOlderRef.current) {
+        void loadOlderMessages();
+      }
+      const clear = window.setTimeout(() => setHighlightMsgId(null), 12000);
+      return () => window.clearTimeout(clear);
+    }
     stickToBottomRef.current = false;
-    const t = window.setTimeout(() => {
-      const node = document.getElementById(`msg-${highlightMsgId}`);
-      node?.scrollIntoView({ behavior: "smooth", block: "center" });
-    }, 120);
+    requestAnimationFrame(() => {
+      document.getElementById(`msg-${highlightMsgId}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    });
     const clear = window.setTimeout(() => setHighlightMsgId(null), 2800);
-    return () => {
-      window.clearTimeout(t);
-      window.clearTimeout(clear);
-    };
-  }, [highlightMsgId, active?.id, messages]);
+    return () => window.clearTimeout(clear);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightMsgId, active?.id, messages, hasMoreOlder]);
 
   useEffect(() => {
     if (!active || !messages.some((m) => m.sender_id !== profile.id)) return;
     peerApi.markConversationRead(active.id).catch(console.error);
   }, [active?.id, messages, profile.id]);
+
+  // Ref to track active chat ID for clearing fileThumbs on switch
+  const prevActiveIdRef = useRef<string | undefined>(undefined);
+  
+  // Clear thumbs / local-path hints when switching chats; revoke blob URLs.
+  useEffect(() => {
+    if (!active) {
+      prevActiveIdRef.current = undefined;
+      return;
+    }
+    if (prevActiveIdRef.current !== undefined && prevActiveIdRef.current !== active.id) {
+      setFileThumbs((prev) => {
+        for (const url of Object.values(prev)) {
+          if (url?.startsWith("blob:")) URL.revokeObjectURL(url);
+        }
+        return {};
+      });
+      setFileLocalPaths({});
+      setFileMetaReady({});
+    }
+    prevActiveIdRef.current = active.id;
+  }, [active?.id]);
 
   useMessageDecrypt({
     active,
@@ -899,85 +1088,48 @@ export function ChatScreen({
     setPlain,
     setFileNames,
     setFileSizes,
+    setFileLocalPaths,
+    setFileMetaReady,
   });
 
-  // Thumbs from local_path when set; for our own uploads, rebuild from staging if needed.
+  // Disk-cached JPEG thumbs via Rust; never decode full originals in JS for chat tiles.
   useEffect(() => {
     let cancel = false;
+    const gen = thumbGenRef.current;
     (async () => {
+      if (!active || messages.length === 0) return;
+
       const wanted: string[] = [];
       for (const m of messages) {
-        if (!active || m.conversation_id !== active.id || m.kind === "deleted") continue;
+        if (m.kind === "deleted") continue;
         for (const fid of messageAttachmentIds(m)) {
           const name = fileNames[fid];
-          if (!name || !isGridMediaName(name)) continue;
+          if (!name || !isImageFileName(name)) continue;
           if (fileThumbs[fid] || thumbInflightRef.current.has(fid)) continue;
+          if (!fileLocalPaths[fid]) continue;
           wanted.push(fid);
         }
       }
+
+      if (wanted.length === 0) return;
+
       for (const fid of wanted.slice(0, 8)) {
-        if (cancel) break;
+        if (cancel || thumbGenRef.current !== gen) break;
         thumbInflightRef.current.add(fid);
         try {
-          const meta = await peerApi.getFile(fid);
-          if (!meta) continue;
-          const name = fileNames[fid] || "file";
-          let data: Uint8Array | null = null;
-          if (meta.local_path) {
-            try {
-              data = fromB64(await peerApi.readLocalFile(fid));
-            } catch {
-              /* try staging below */
-            }
-          }
-          // Own media with no/missing path: decrypt from local staging (≤8 MiB).
-          if (
-            !data &&
-            meta.uploader_id === profile.id &&
-            (Number(meta.size_bytes) || 0) <= 8 * 1024 * 1024
-          ) {
-            try {
-              const key = unwrapContentKey(meta.wrapped_keys, profile.id, identity);
-              const total = Math.max(1, Number(meta.chunk_count) || 1);
-              const cryptoV = Number(meta.file_crypto_v) || 1;
-              const batch = await peerApi.fetchFileChunks(fid, 0, total, profile.id);
-              const parts: Uint8Array[] = [];
-              for (const chunk of batch) {
-                const idx = Number(chunk.index ?? parts.length);
-                parts.push(
-                  decryptChunk(
-                    key,
-                    chunk.nonce,
-                    fromB64(chunk.data_b64),
-                    cryptoV >= 2 ? idx : undefined
-                  )
-                );
-              }
-              const totalLen = parts.reduce((n, p) => n + p.length, 0);
-              const merged = new Uint8Array(totalLen);
-              let off = 0;
-              for (const p of parts) {
-                merged.set(p, off);
-                off += p.length;
-              }
-              data = merged;
-              // Pin so later navigations don't need to decrypt again.
-              try {
-                await peerApi.cacheOutgoingPlain(fid, name, b64(merged));
-              } catch {
-                /* optional */
-              }
-            } catch {
-              /* thumb optional */
-            }
-          }
-          if (!data || cancel) continue;
+          const thumb = await peerApi.ensureFileThumbnail(fid);
+          if (cancel || thumbGenRef.current !== gen) break;
+          const bytes = fromB64(thumb.data_b64);
           const url = URL.createObjectURL(
-            new Blob([new Uint8Array(data)], { type: mimeForName(name) })
+            new Blob([new Uint8Array(bytes)], { type: thumb.mime || "image/jpeg" })
           );
-          setFileThumbs((prev) => ({ ...prev, [fid]: url }));
+          setFileThumbs((prev) => {
+            const old = prev[fid];
+            if (old?.startsWith("blob:")) URL.revokeObjectURL(old);
+            return { ...prev, [fid]: url };
+          });
         } catch {
-          /* thumb optional */
+          /* thumb optional — video/docs stay as placeholders */
         } finally {
           thumbInflightRef.current.delete(fid);
         }
@@ -986,7 +1138,7 @@ export function ChatScreen({
     return () => {
       cancel = true;
     };
-  }, [messages, fileNames, active?.id, fileThumbs, profile.id, identity]);
+  }, [messages, fileNames, active?.id, fileThumbs, fileLocalPaths]);
 
   // Listen for --share <file> launched from the Windows right-click context menu.
   useEffect(() => {
@@ -1147,7 +1299,7 @@ export function ChatScreen({
             name: meta.name,
             size: meta.size,
             isDir: false,
-            previewUrl: null,
+            previewUrl: isImageFileName(meta.name) ? convertFileSrc(meta.path) : null,
           });
         }
       } catch (err: any) {
@@ -1206,20 +1358,110 @@ export function ChatScreen({
     }
   }
 
+  function discardStagedCapture(sf: StagedFile | undefined) {
+    if (sf?.captureId) {
+      void peerApi.discardCapture(sf.captureId).catch(() => {});
+    }
+  }
+
   function removeStagedFile(id: string) {
     setStagedFiles((prev) => {
       const found = prev.find((f) => f.id === id);
-      if (found?.previewUrl) URL.revokeObjectURL(found.previewUrl);
+      if (found?.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(found.previewUrl);
+      discardStagedCapture(found);
       return prev.filter((f) => f.id !== id);
     });
   }
 
   function clearStagedFiles() {
     setStagedFiles((prev) => {
-      for (const f of prev) if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
+      for (const f of prev) {
+        if (f.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(f.previewUrl);
+        discardStagedCapture(f);
+      }
       return [];
     });
   }
+
+  async function stageCapturePath(path: string, name: string, captureId: string) {
+    try {
+      const meta = await peerApi.localPathMeta(path);
+      const previewUrl = URL.createObjectURL(
+        // Preview from disk via read is heavy; use empty preview and let send use path.
+        // Prefer object URL from capture preview when available.
+        new Blob([])
+      );
+      URL.revokeObjectURL(previewUrl);
+      let thumb: string | null = null;
+      try {
+        const prev = await peerApi.readCapturePreview(captureId);
+        const bin = Uint8Array.from(atob(prev.data_b64), (c) => c.charCodeAt(0));
+        thumb = URL.createObjectURL(new Blob([bin], { type: prev.mime || "image/png" }));
+      } catch {
+        thumb = null;
+      }
+      setStagedFiles((prev) => [
+        ...prev,
+        {
+          id: `${name}-${meta.size}-${Math.random().toString(16).slice(2)}`,
+          source: { path: meta.path, name: meta.name || name, size: meta.size },
+          name: name || meta.name,
+          size: meta.size,
+          isDir: false,
+          previewUrl: thumb,
+          captureId,
+        },
+      ]);
+    } catch (err: any) {
+      setStatus(err?.message || "Could not attach screenshot");
+      await peerApi.discardCapture(captureId).catch(() => {});
+    }
+  }
+
+  async function startScreenshotCapture() {
+    if (!active || screenshotBusy || screenshotCaptureId) return;
+    if (outgoingFile && !outgoingFile.cancelled) return;
+    if (editingMessage) return;
+    setScreenshotBusy(true);
+    try {
+      // Clear any leftover overlay from a previous failed attempt.
+      await peerApi.cancelScreenshotSession(screenshotSessionRef.current).catch(() => {});
+      const { sessionId } = await peerApi.beginScreenshotSession();
+      screenshotSessionRef.current = sessionId;
+    } catch (err: any) {
+      screenshotSessionRef.current = null;
+      setStatus(err?.message || String(err));
+      await peerApi.cancelScreenshotSession(null).catch(() => {});
+    } finally {
+      setScreenshotBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ captureId: string }>("screenshot-captured", (ev) => {
+      const id = ev.payload?.captureId;
+      if (!id) return;
+      screenshotSessionRef.current = null;
+      setScreenshotCaptureId(id);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.key.toLowerCase() !== "s") return;
+      if (!active || editingMessage || screenshotBusy || screenshotCaptureId) return;
+      if (outgoingFile && !outgoingFile.cancelled) return;
+      e.preventDefault();
+      void startScreenshotCapture();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.id, editingMessage, screenshotBusy, screenshotCaptureId, outgoingFile?.cancelled]);
 
   async function sendControlMessage(
     conv: Conversation,
@@ -1247,7 +1489,7 @@ export function ChatScreen({
     if (!active) return;
     try {
       await sendControlMessage(active, "reaction", message.id, emoji);
-      setMessages(await peerApi.listMessages(active.id));
+      await refreshNewestMessages(active.id);
     } catch (err: any) {
       setStatus(err?.message || String(err));
     }
@@ -1257,8 +1499,15 @@ export function ChatScreen({
     if (!active) return;
     setMsgMenu(null);
     try {
+      if (!message.pinned) {
+        const pinnedCount = messages.filter((m) => m.pinned && m.kind !== "deleted").length;
+        if (pinnedCount >= MAX_PINNED_MESSAGES_PER_CHAT ) {
+          setStatus(`Pin limit reached (${MAX_PINNED_MESSAGES_PER_CHAT}). Unpin a message first.`);
+          return;
+        }
+      }
       await sendControlMessage(active, message.pinned ? "unpin" : "pin", message.id);
-      setMessages(await peerApi.listMessages(active.id));
+      await refreshNewestMessages(active.id);
     } catch (err: any) {
       setStatus(err?.message || String(err));
     }
@@ -1348,7 +1597,7 @@ export function ChatScreen({
             memberIds.filter((id) => id !== profile.id)
           );
         }
-        if (active?.id === target.id) setMessages(await peerApi.listMessages(target.id));
+        if (active?.id === target.id) await refreshNewestMessages(target.id);
         sent += 1;
       }
       setStatus(sent > 1 ? `Forwarded to ${sent} chats` : "Forwarded");
@@ -1362,6 +1611,13 @@ export function ChatScreen({
 
   async function togglePinChat(conv: Conversation) {
     try {
+      if (!conv.pinned_at) {
+        const pinnedChats = convs.filter((c) => !!c.pinned_at).length;
+        if (pinnedChats >= 10) {
+          setStatus("Pin limit reached (10 chats). Unpin a chat first.");
+          return;
+        }
+      }
       await peerApi.setConversationPinned(conv.id, !conv.pinned_at);
       await refresh();
     } catch (err: any) {
@@ -1476,7 +1732,7 @@ export function ChatScreen({
       message,
       memberIds.filter((id) => id !== profile.id)
     );
-    setMessages(await peerApi.listMessages(active.id));
+    await refreshNewestMessages(active.id);
   }
 
   /** One logical message for files (± optional caption). */
@@ -1508,7 +1764,7 @@ export function ChatScreen({
       reply_to: replyToId ?? null,
     };
     await peerApi.sendMessage(active.id, message, recipients);
-    setMessages(await peerApi.listMessages(active.id));
+    await refreshNewestMessages(active.id);
   }
 
   /**
@@ -1575,7 +1831,7 @@ export function ChatScreen({
       !!editing
     );
     setEditingMessage(null);
-    setMessages(await peerApi.listMessages(active.id));
+    await refreshNewestMessages(active.id);
   }
 
   async function submitComposer() {
@@ -1653,10 +1909,10 @@ export function ChatScreen({
           resolve(value);
         };
         setScanWarn({
-          title: `Threat warning — ${flaggedFiles.length} file${flaggedFiles.length === 1 ? "" : "s"} flagged`,
-          detail: flaggedFiles.map((f) => f.detail).join("\n\n"),
-          body: `${flaggedFiles.length === 1 ? "A selected file was" : `${flaggedFiles.length} selected files were`} flagged by Windows Defender. Sending will encrypt and deliver ${flaggedFiles.length === 1 ? "it" : "them"}, but the recipient's scanner may also flag ${flaggedFiles.length === 1 ? "it" : "them"}.`,
-          proceedLabel: "Send files anyway",
+          title: `Scanner warning — ${flaggedFiles.length} file${flaggedFiles.length === 1 ? "" : "s"}`,
+          detail: flaggedFiles.map((f) => `${f.name}\n${f.detail}`).join("\n\n"),
+          body: `Windows Defender reported a concern for ${flaggedFiles.length === 1 ? "this file" : "these files"}. This can be a false positive. Sending will still encrypt and deliver ${flaggedFiles.length === 1 ? "it" : "them"}; the recipient's scanner may also warn.`,
+          proceedLabel: "Send anyway",
           onProceed: () => finish(true),
           onCancel: () => finish(false),
         });
@@ -1672,17 +1928,40 @@ export function ChatScreen({
 
     // Clear the composer only after preflight succeeds, so a cancelled batch
     // remains staged and the user can remove files or try again.
-    if (!outgoingFile || outgoingFile.cancelled) setStagedFiles([]);
+    const captureIds = files.map((f) => f.captureId).filter(Boolean) as string[];
+    // Clear UI staging without discarding capture temps yet (send still needs the paths).
+    if (!outgoingFile || outgoingFile.cancelled) {
+      setStagedFiles((prev) => {
+        for (const f of prev) {
+          if (
+            f.previewUrl?.startsWith("blob:") &&
+            !files.some((x) => x.id === f.id && x.previewUrl === f.previewUrl)
+          ) {
+            URL.revokeObjectURL(f.previewUrl);
+          }
+        }
+        return [];
+      });
+    }
 
     // Upload all attachments, then post ONE message (caption + files together).
     queueAbortRef.current = false;
     const fileIds: string[] = [];
+    /** Capture temps to promote into durable outgoing cache before discard. */
+    const capturePromotions: {
+      fileId: string;
+      captureId: string;
+      sourcePath: string;
+      name: string;
+    }[] = [];
     const keptPreviewUrls = new Set<string>();
+    const sendables = files.filter((sf) => !(sf.isDir && !(sf.source instanceof File)));
+    let batchPos = 0;
     for (const sf of files) {
       if (queueAbortRef.current) break;
       const src = sf.source;
       if (sf.isDir && !(src instanceof File)) {
-        if (sf.previewUrl) URL.revokeObjectURL(sf.previewUrl);
+        if (sf.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(sf.previewUrl);
         try {
           await packFolderAndSend(src.path, src.name);
         } catch (err: any) {
@@ -1690,30 +1969,66 @@ export function ChatScreen({
         }
         continue;
       }
-      const id = await sendFile(src, { skipNotice: true });
+      batchPos += 1;
+      const id = await sendFile(src, {
+        skipNotice: true,
+        batchIndex: batchPos,
+        batchTotal: sendables.length,
+      });
       if (id) {
         fileIds.push(id);
         setFileNames((s) => ({ ...s, [id]: sf.name }));
         setFileSizes((s) => ({ ...s, [id]: sf.size }));
         if (sf.previewUrl && isImageFileName(sf.name)) {
-          keptPreviewUrls.add(sf.previewUrl);
+          if (sf.previewUrl.startsWith("blob:")) keptPreviewUrls.add(sf.previewUrl);
           setFileThumbs((s) => ({ ...s, [id]: sf.previewUrl! }));
+        }
+        if (sf.captureId && !(src instanceof File) && src.path) {
+          capturePromotions.push({
+            fileId: id,
+            captureId: sf.captureId,
+            sourcePath: src.path,
+            name: sf.name,
+          });
         }
       }
     }
     for (const f of files) {
-      if (f.previewUrl && !keptPreviewUrls.has(f.previewUrl)) {
+      if (f.previewUrl?.startsWith("blob:") && !keptPreviewUrls.has(f.previewUrl)) {
         URL.revokeObjectURL(f.previewUrl);
       }
     }
     if (fileIds.length) {
       try {
         await sendAttachmentBundle(fileIds, body, replyId);
+        // Brief status — keep it short so the toast doesn't dominate the composer.
         setStatus(
           body
-            ? `Sent message with ${fileIds.length} attachment${fileIds.length > 1 ? "s" : ""}`
+            ? `Sent with ${fileIds.length} file${fileIds.length > 1 ? "s" : ""}`
             : `Sent ${fileIds.length} file${fileIds.length > 1 ? "s" : ""}`
         );
+        // Keep annotated screenshots on disk (outgoing cache) so thumbs survive
+        // chat switches; only then discard temp captures/.
+        const discarded = new Set<string>();
+        for (const item of capturePromotions) {
+          try {
+            const durable = await peerApi.persistOutgoingFromPath(
+              item.fileId,
+              item.sourcePath,
+              item.name
+            );
+            setFileLocalPaths((prev) => ({ ...prev, [item.fileId]: durable }));
+            await peerApi.discardCapture(item.captureId);
+            discarded.add(item.captureId);
+          } catch (err) {
+            console.warn("persistOutgoingFromPath failed; keeping capture temp", err);
+          }
+        }
+        for (const cid of captureIds) {
+          // Do not discard captures we failed to promote — local_path still points there.
+          if (discarded.has(cid) || capturePromotions.some((p) => p.captureId === cid)) continue;
+          void peerApi.discardCapture(cid).catch(() => {});
+        }
       } catch (err: any) {
         setStatus(err?.message || String(err));
       }
@@ -1732,9 +2047,9 @@ export function ChatScreen({
   }
 
   const dayGroups = useMemo(() => {
-    const visible = active
-      ? messages.filter((m) => m.conversation_id === active.id && m.kind !== "poll_vote")
-      : [];
+    // `messages` is already scoped to the active chat (cleared on switch). Do not
+    // filter by conversation_id — DM history can span related legacy ids.
+    const visible = active ? messages.filter((m) => m.kind !== "poll_vote") : [];
     const out: { day: string; label: string; items: Message[] }[] = [];
     for (const m of visible) {
       const day = dayKey(m.created_at);
@@ -1844,6 +2159,7 @@ export function ChatScreen({
     setOutgoingFile,
     setIncomingFile,
     setFilePreview,
+    setFileThumbs,
     setPreviewBusy,
     setStatus,
     abortSendRef,
@@ -1942,7 +2258,7 @@ export function ChatScreen({
   async function retrySend(message: Message) {
     try {
       await peerApi.retryMessage(message.id);
-      if (active) setMessages(await peerApi.listMessages(active.id));
+      if (active) await refreshNewestMessages(active.id);
       setStatus("Retrying…");
     } catch (err: any) {
       setStatus(err?.message || String(err));
@@ -1953,7 +2269,7 @@ export function ChatScreen({
     setMsgMenu(null);
     try {
       await peerApi.deleteMessageForMe(message.id);
-      if (active) setMessages(await peerApi.listMessages(active.id));
+      if (active) await refreshNewestMessages(active.id);
       setSavedItems(await peerApi.listSavedItems().catch(() => []));
     } catch (err: any) {
       setStatus(err?.message || String(err));
@@ -1965,7 +2281,7 @@ export function ChatScreen({
     if (!canMutateMessageToday(message.created_at)) return;
     try {
       await peerApi.deleteMessageForEveryone(message.id);
-      if (active) setMessages(await peerApi.listMessages(active.id));
+      if (active) await refreshNewestMessages(active.id);
       setSavedItems(await peerApi.listSavedItems().catch(() => []));
     } catch (err: any) {
       setStatus(err?.message || String(err));
@@ -2032,7 +2348,7 @@ export function ChatScreen({
   /** Upload encrypted file chunks. When `skipNotice`, no separate file_notice is posted (caller attaches file_id). */
   async function sendFile(
     file: File | { path: string; name: string; size: number },
-    opts?: { skipNotice?: boolean }
+    opts?: { skipNotice?: boolean; batchIndex?: number; batchTotal?: number }
   ): Promise<string | undefined> {
     if (!active) return undefined;
     const name = file instanceof File ? file.name : file.name;
@@ -2058,6 +2374,8 @@ export function ChatScreen({
       sizeBytes: size,
       paused: false,
       cancelled: false,
+      batchIndex: opts?.batchIndex,
+      batchTotal: opts?.batchTotal,
     });
     await recordTransfer({
       id: transferId,
@@ -2236,7 +2554,7 @@ export function ChatScreen({
           fileId,
           memberIds.filter((id) => id !== profile.id)
         );
-        setMessages(await peerApi.listMessages(conversationId));
+        await refreshNewestMessages(conversationId);
       }
       const seconds = Math.max(0.1, (Date.now() - startedMs) / 1000);
       await recordTransfer({
@@ -2401,22 +2719,39 @@ export function ChatScreen({
     uploaderId: string,
     gallery?: { fileIds: string[]; index: number }
   ) {
-    // Prefer known name so zip/exe never enter the decrypt→"Opening…" path.
+    // Prefer known name so zip/exe never enter the preview path.
     const known = fileNames[fileId];
     if (known && !canPreviewFileName(known)) {
       await downloadFileToDownloads(fileId, uploaderId);
       return;
     }
+
     setPreviewBusy(true);
     setStatus("");
     try {
+      // Step 1: ensure the file is on disk first (download if needed).
+      // This shows the progress bar and saves local_path so future opens are offline.
+      const fileMeta = await peerApi.getFile(fileId);
+      if (!fileMeta) throw new Error("File metadata missing");
+
+      let localPath = fileMeta.local_path;
+      if (!localPath) {
+        // Not yet downloaded — download it fully before showing the preview.
+        // downloadFileToDownloads manages its own setPreviewBusy/setIncomingFile.
+        setPreviewBusy(false);
+        await downloadFileToDownloads(fileId, uploaderId);
+        // After download, re-fetch meta to get the local_path.
+        const updated = await peerApi.getFile(fileId);
+        localPath = updated?.local_path ?? null;
+        if (!localPath) return; // download was cancelled/failed
+        setPreviewBusy(true);
+      }
+
+      // Step 2: decrypt from the local file for the in-memory blob/preview.
       const { file, name, data } = await decryptFile(fileId, uploaderId);
       if (abortOpenRef.current) return;
       if (!canPreviewFileName(name)) {
-        setIncomingFile(null);
-        setPreviewBusy(false);
-        abortOpenRef.current = false;
-        await downloadFileToDownloads(fileId, uploaderId);
+        // Shouldn't happen since we checked above, but be safe.
         return;
       }
       const mime = mimeForName(name);
@@ -2483,6 +2818,8 @@ export function ChatScreen({
         await peerApi.ackFileDownload(filePreview.fileId, filePreview.uploaderId);
       }
       setFilePreview((p) => (p ? { ...p, localPath: path } : p));
+      setFileLocalPaths((prev) => ({ ...prev, [filePreview.fileId]: path }));
+      setFileMetaReady((prev) => ({ ...prev, [filePreview.fileId]: true }));
       setStatus(`Saved to Downloads: ${filePreview.name}`);
     } catch (err: any) {
       setStatus(err?.message || String(err));
@@ -2565,20 +2902,28 @@ export function ChatScreen({
       if (next < totalChunks && !abortOpenRef.current) {
         let unlistenStream: (() => void) | undefined;
         try {
+          let lastUi = 0;
           unlistenStream = await listen<{
             file_id: string;
             done: number;
             total: number;
           }>("file-stream-progress", (ev) => {
             if (ev.payload.file_id !== fileId) return;
-            setIncomingFile({
+            const snap = {
               fileId,
               conversationId: convId,
               name,
               done: ev.payload.done,
               total: ev.payload.total || totalChunks,
-              label: "Downloading…",
-            });
+              label: "Downloading…" as const,
+            };
+            // Store updates ~8 Hz for the progress chrome; React state less often.
+            publishTransferProgress({ incoming: snap });
+            const now = Date.now();
+            if (now - lastUi > 250) {
+              lastUi = now;
+              setIncomingFile(snap);
+            }
           });
           const streamed = await peerApi.downloadFileStream(
             fileId,
@@ -2697,6 +3042,9 @@ export function ChatScreen({
         started_at: started,
       });
       const path = await peerApi.finalizeFileReceive(fileId, name);
+      // Record local path so the UI immediately knows this file is saved.
+      setFileLocalPaths((prev) => ({ ...prev, [fileId]: path }));
+      setFileMetaReady((prev) => ({ ...prev, [fileId]: true }));
       const check = await peerApi.verifyDownloadedFile(fileId);
 
       // Virus scan — warn on hit but keep the download (preview/save already bypassed scan).
@@ -2708,10 +3056,10 @@ export function ChatScreen({
         scanWarned = true;
         await new Promise<void>((resolve) => {
           setScanWarn({
-            title: "Virus scanner warning",
+            title: "Scanner warning",
             detail: scanResult.detail,
             body:
-              "Windows Defender flagged this file. It is still saved so you can open or delete it yourself. Treat unexpected files from unknown peers with caution.",
+              "Windows Defender reported a concern for this downloaded file. It is still saved so you can open or delete it. Treat unexpected files from unknown peers with caution.",
             proceedLabel: "Keep file",
             onProceed: () => {
               setScanWarn(null);
@@ -2887,7 +3235,7 @@ export function ChatScreen({
         console.error(e);
       }
       setMembers(await peerApi.listMembers(active.id));
-      setMessages(await peerApi.listMessages(active.id));
+      await refreshNewestMessages(active.id);
       setStatus(
         missing.length
           ? `Removed. ${missing.join(", ")} will need to come online to get the new key.`
@@ -3144,7 +3492,13 @@ export function ChatScreen({
       return;
     }
     setSearchBusy(true);
-    const hits: { id: string; title: string; detail: string; conversationId?: string }[] = [];
+    const hits: {
+      id: string;
+      title: string;
+      detail: string;
+      conversationId?: string;
+      messageId?: string;
+    }[] = [];
     for (const c of convs) {
       const title = (c.kind === "dm" ? c.peer_name : c.title) || "";
       if (title.toLowerCase().includes(q)) {
@@ -3153,7 +3507,13 @@ export function ChatScreen({
     }
     for (const item of savedItems) {
       if (item.preview.toLowerCase().includes(q)) {
-        hits.push({ id: `s-${item.id}`, title: item.preview, detail: "Saved", conversationId: item.conversation_id });
+        hits.push({
+          id: `s-${item.id}`,
+          title: item.preview,
+          detail: "Saved",
+          conversationId: item.conversation_id,
+          messageId: item.message_id || undefined,
+        });
       }
     }
     for (const row of transfers) {
@@ -3163,7 +3523,6 @@ export function ChatScreen({
     }
     for (const c of convs) {
       try {
-        const msgs = await peerApi.listMessages(c.id);
         if (c.kind === "group") {
           try {
             await ensureGroupKey(c.id);
@@ -3171,24 +3530,51 @@ export function ChatScreen({
             continue;
           }
         }
-        for (const m of msgs) {
-          if (m.kind === "file_notice" || m.kind === "deleted" || m.kind === "poll_vote") continue;
-          let textBody = "";
-          try {
-            if (c.kind === "group") {
-              await ensureGroupKey(c.id);
-              textBody = await decryptGroupMessageText(m);
-            } else {
-              textBody = await decryptMessage({ ...m, wrapped_keys: m.wrapped_keys || {} }, profile.id, identity);
+        let beforeSortKey: string | null = null;
+        let beforeId: string | null = null;
+        let scanned = 0;
+        const SCAN_CAP = 400;
+        while (hits.length <= 40 && scanned < SCAN_CAP) {
+          const page = await peerApi.listMessages(c.id, {
+            limit: MESSAGE_PAGE_SIZE,
+            beforeSortKey,
+            beforeId,
+          });
+          if (!page.messages.length) break;
+          scanned += page.messages.length;
+          // Newest→older pages arrive ASC within page; walk newest first.
+          for (const m of [...page.messages].reverse()) {
+            if (m.kind === "file_notice" || m.kind === "deleted" || m.kind === "poll_vote") continue;
+            let textBody = "";
+            try {
+              if (c.kind === "group") {
+                textBody = await decryptGroupMessageText(m);
+              } else {
+                textBody = await decryptMessage(
+                  { ...m, wrapped_keys: m.wrapped_keys || {} },
+                  profile.id,
+                  identity
+                );
+              }
+            } catch {
+              continue;
             }
-          } catch {
-            continue;
+            if (textBody.toLowerCase().includes(q)) {
+              const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
+              hits.push({
+                id: `m-${m.id}`,
+                title,
+                detail: textBody.slice(0, 140),
+                conversationId: c.id,
+                messageId: m.id,
+              });
+            }
+            if (hits.length > 40) break;
           }
-          if (textBody.toLowerCase().includes(q)) {
-            const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
-            hits.push({ id: `m-${m.id}`, title, detail: textBody.slice(0, 140), conversationId: c.id });
-          }
-          if (hits.length > 40) break;
+          if (!page.has_more_older) break;
+          const oldest = page.messages[0]!;
+          beforeSortKey = oldest.sort_at || oldest.created_at;
+          beforeId = oldest.id;
         }
       } catch {
         /* skip locked conversation */
@@ -3232,16 +3618,22 @@ export function ChatScreen({
     dayGroups,
     draftsRef,
     editingMessage,
+    hasMoreOlder,
+    loadOlderMessages,
+    stickToBottomRef,
     ensureAnnounceBoards,
     fileNames,
     filePickRef,
     fileSizes,
     fileThumbs,
+    fileLocalPaths,
+    fileMetaReady,
     filteredConvs,
     gameInviteBusy,
     gamesOn,
     handleRemoveLeftGroup,
     highlightMsgId,
+    setHighlightMsgId,
     inGroup,
     canAddMembers,
     incomingFile,
@@ -3296,6 +3688,7 @@ export function ChatScreen({
     pickAndStageFiles,
     stageFiles,
     stagedFiles,
+    startScreenshotCapture,
     status,
     submitComposer,
     tab,
@@ -3419,21 +3812,33 @@ export function ChatScreen({
             onPendingConsumed={() => setPendingGameInvite(null)}
             replayLanMoves={async (peerId, matchId) => {
               const conv = await peerApi.openDm(peerId);
-              const msgs = await peerApi.listMessages(conv.id);
               const out: GameMsg[] = [];
-              for (const m of msgs) {
-                if (m.kind !== "game_move") continue;
-                try {
-                  const plaintext = await decryptMessage(
-                    { ...m, wrapped_keys: m.wrapped_keys || {} },
-                    profile.id,
-                    identity
-                  );
-                  const gm = JSON.parse(plaintext) as GameMsg;
-                  if (matchIdOf(gm) === matchId) out.push(gm);
-                } catch {
-                  /* skip */
+              let beforeSortKey: string | null = null;
+              let beforeId: string | null = null;
+              for (let pageN = 0; pageN < 20; pageN++) {
+                const page = await peerApi.listMessages(conv.id, {
+                  limit: MESSAGE_PAGE_SIZE,
+                  beforeSortKey,
+                  beforeId,
+                });
+                for (const m of page.messages) {
+                  if (m.kind !== "game_move") continue;
+                  try {
+                    const plaintext = await decryptMessage(
+                      { ...m, wrapped_keys: m.wrapped_keys || {} },
+                      profile.id,
+                      identity
+                    );
+                    const gm = JSON.parse(plaintext) as GameMsg;
+                    if (matchIdOf(gm) === matchId) out.push(gm);
+                  } catch {
+                    /* skip */
+                  }
                 }
+                if (!page.has_more_older || !page.messages.length) break;
+                const oldest = page.messages[0]!;
+                beforeSortKey = oldest.sort_at || oldest.created_at;
+                beforeId = oldest.id;
               }
               return out;
             }}
@@ -3785,9 +4190,9 @@ export function ChatScreen({
             if (ignoreScrollRef.current) return;
             const el = e.currentTarget;
             const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-            // Hysteresis: easier to lock to bottom than to unlock while reading.
             if (dist < 80) stickToBottomRef.current = true;
             else if (dist > 120) stickToBottomRef.current = false;
+            if (el.scrollTop < 120) void loadOlderMessages();
           }}
           onDragOver={(e) => {
             e.preventDefault();
@@ -3811,7 +4216,6 @@ export function ChatScreen({
             outline: dragOverChat ? "2px dashed" : "none",
             outlineColor: "primary.main",
             outlineOffset: -8,
-            // Hide until first bottom-pin so opening a chat never flashes at the top.
             opacity: chatPaintReady ? 1 : 0,
             transition: chatPaintReady ? "opacity 80ms ease-out" : "none",
           }}
@@ -3862,6 +4266,19 @@ export function ChatScreen({
         </Box>
 
         <Composer vm={vm} />
+        <ScreenshotAnnotator
+          open={!!screenshotCaptureId}
+          captureId={screenshotCaptureId}
+          onCancel={() => {
+            const id = screenshotCaptureId;
+            setScreenshotCaptureId(null);
+            if (id) void peerApi.discardCapture(id).catch(() => {});
+          }}
+          onDone={({ captureId, path, name }) => {
+            setScreenshotCaptureId(null);
+            void stageCapturePath(path, name, captureId);
+          }}
+        />
         </Box>
       <Popover
         open={!!emojiAnchor}
@@ -4405,9 +4822,13 @@ export function ChatScreen({
         onSearch={runSearch}
         busy={searchBusy}
         results={searchHits}
-        onJump={(conversationId) => {
+        onJump={(conversationId, messageId) => {
           const conv = convs.find((c) => c.id === conversationId);
           if (conv) {
+            if (messageId) {
+              stickToBottomRef.current = false;
+              setHighlightMsgId(messageId);
+            }
             selectConversation(conv);
             setNav("chats");
             setTab(1);
@@ -4495,10 +4916,10 @@ export function ChatScreen({
 
       <Snackbar
         open={!!status}
-        autoHideDuration={8000}
+        autoHideDuration={3500}
         onClose={() => setStatus("")}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-        sx={{ bottom: { xs: 88, sm: 24 } }}
+        anchorOrigin={{ vertical: "top", horizontal: "center" }}
+        sx={{ top: { xs: 72, sm: 80 } }}
       >
         <Alert
           severity="info"
@@ -4541,12 +4962,25 @@ export function ChatScreen({
               });
             };
             if (chatInfoTab === 0 || chatInfoTab === 1) {
-              const files = messages.filter((m) => m.kind === "file_notice" && m.file_id);
-              const rows = files.filter((m) => {
-                const name = (m.file_id && fileNames[m.file_id]) || "";
-                const isImg = IMAGE_RE.test(name);
-                return chatInfoTab === 0 ? isImg : !isImg;
-              });
+              // Flatten attachment ids from file notices and captioned messages.
+              type Row = { key: string; messageId: string; fileId: string; name: string; at: string };
+              const rows: Row[] = [];
+              for (const m of messages) {
+                if (m.kind === "deleted" || m.kind === "poll_vote") continue;
+                for (const fid of messageAttachmentIds(m)) {
+                  const name = fileNames[fid] || "Encrypted file";
+                  const isImg = IMAGE_RE.test(name);
+                  if (chatInfoTab === 0 ? isImg : !isImg) {
+                    rows.push({
+                      key: `${m.id}:${fid}`,
+                      messageId: m.id,
+                      fileId: fid,
+                      name,
+                      at: m.created_at,
+                    });
+                  }
+                }
+              }
               if (!rows.length) {
                 return (
                   <Typography color="text.secondary" sx={{ p: 2.5 }}>
@@ -4556,20 +4990,34 @@ export function ChatScreen({
               }
               return (
                 <List dense>
-                  {rows.map((m) => {
-                    const name = (m.file_id && fileNames[m.file_id]) || "Encrypted file";
+                  {rows.map((row) => {
+                    const thumb = fileThumbs[row.fileId];
                     return (
-                      <ListItemButton key={m.id} onClick={() => jump(m.id)}>
-                        <ListItemIcon>
-                          {chatInfoTab === 0 ? (
-                            <InsertDriveFileIcon fontSize="small" color="primary" />
+                      <ListItemButton key={row.key} onClick={() => jump(row.messageId)}>
+                        <ListItemAvatar sx={{ minWidth: 56 }}>
+                          {thumb ? (
+                            <Avatar
+                              variant="rounded"
+                              src={thumb}
+                              alt=""
+                              sx={{ width: 44, height: 44 }}
+                            />
                           ) : (
-                            <InsertDriveFileIcon fontSize="small" />
+                            <Avatar
+                              variant="rounded"
+                              sx={{
+                                width: 44,
+                                height: 44,
+                                bgcolor: chatInfoTab === 0 ? "primary.main" : "action.selected",
+                              }}
+                            >
+                              <InsertDriveFileIcon fontSize="small" />
+                            </Avatar>
                           )}
-                        </ListItemIcon>
+                        </ListItemAvatar>
                         <ListItemText
-                          primary={name}
-                          secondary={formatClock(m.created_at)}
+                          primary={row.name}
+                          secondary={formatClock(row.at)}
                           primaryTypographyProps={{ noWrap: true }}
                         />
                       </ListItemButton>
@@ -4627,15 +5075,15 @@ export function ChatScreen({
       {/* Virus scan warning — outgoing send confirm, or inbound download notice */}
       <Dialog open={!!scanWarn} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ color: "warning.main" }}>
-          {scanWarn?.title || "Virus threat detected"}
+          {scanWarn?.title || "Scanner warning"}
         </DialogTitle>
         <DialogContent>
-          <Alert severity="warning" sx={{ mb: 1.5 }}>
+          <Alert severity="warning" sx={{ mb: 1.5, whiteSpace: "pre-wrap" }}>
             {scanWarn?.detail}
           </Alert>
           <Typography variant="body2">
             {scanWarn?.body ||
-              "Windows Defender flagged this file before encryption. Sending it will still encrypt and deliver it, but the recipient's scanner may also flag it."}
+              "Windows Defender reported a concern for this file. It can be a false positive. Sending will still encrypt and deliver it; the recipient's scanner may also warn."}
           </Typography>
         </DialogContent>
         <DialogActions>

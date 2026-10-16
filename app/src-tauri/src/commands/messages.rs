@@ -24,7 +24,13 @@ use crate::runtime::group_events::{enqueue_group_event, enqueue_group_event_extr
 use crate::runtime::bootstrap::{start_runtime_inner, show_main_window};
 
 #[tauri::command]
-pub fn list_messages(state: State<AppState>, conversation_id: String) -> Result<Vec<Value>, String> {
+pub fn list_messages(
+    state: State<AppState>,
+    conversation_id: String,
+    limit: Option<u32>,
+    before_sort_key: Option<String>,
+    before_id: Option<String>,
+) -> Result<Value, String> {
     let conn = state.db.lock();
     let me = db::get_profile(&conn)?
         .ok_or("no profile")?
@@ -32,7 +38,20 @@ pub fn list_messages(state: State<AppState>, conversation_id: String) -> Result<
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    db::list_messages(&conn, &conversation_id, &me)
+    // Default page size for UI; pass a very large limit only for rare full scans.
+    let lim = limit.unwrap_or(80) as i64;
+    let page = db::list_messages_page(
+        &conn,
+        &conversation_id,
+        &me,
+        Some(lim),
+        before_sort_key.as_deref(),
+        before_id.as_deref(),
+    )?;
+    Ok(json!({
+        "messages": page.messages,
+        "has_more_older": page.has_more_older,
+    }))
 }
 
 #[tauri::command]

@@ -5,7 +5,6 @@ import {
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeftRounded";
 import ChevronRightIcon from "@mui/icons-material/ChevronRightRounded";
 import CloseIcon from "@mui/icons-material/CloseRounded";
-import DownloadIcon from "@mui/icons-material/DownloadRounded";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFileRounded";
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
 import { formatBytes } from "../../shared/format";
@@ -19,7 +18,6 @@ export function FilePreviewDialog({ vm }: { vm: ChatScreenVm }) {
     openPreviewedFile,
     previewBusy,
     previewGalleryStep,
-    savePreviewedFile,
     text
   } = vm;
   return (
@@ -198,23 +196,10 @@ export function FilePreviewDialog({ vm }: { vm: ChatScreenVm }) {
                   : undefined,
             }}
           >
-            {filePreview?.localPath ? "Available on this computer" : "Encrypted chat copy"}
+            {filePreview?.localPath ? `Saved · ${filePreview.localPath}` : "Available on this computer"}
           </Typography>
-          {!filePreview?.localPath && (
-            <Button
-              startIcon={<DownloadIcon />}
-              onClick={savePreviewedFile}
-              sx={
-                filePreview?.mime.startsWith("image/") || filePreview?.mime.startsWith("video/")
-                  ? { color: "#fff" }
-                  : undefined
-              }
-            >
-              Save to Downloads
-            </Button>
-          )}
           <Button variant="contained" startIcon={<OpenInNewIcon />} onClick={openPreviewedFile}>
-            Open
+            Open in app
           </Button>
         </DialogActions>
       </Dialog>

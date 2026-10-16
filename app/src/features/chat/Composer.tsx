@@ -1,6 +1,6 @@
 // @ts-nocheck
 import {
-  Box, Button, Chip, IconButton, List, ListItemButton, ListItemText, Paper,
+  Box, Button, IconButton, List, ListItemButton, ListItemText, Paper,
   Stack, TextField, Typography,
 } from "@mui/material";
 import AttachFileIcon from "@mui/icons-material/AttachFileRounded";
@@ -8,13 +8,159 @@ import CloseIcon from "@mui/icons-material/CloseRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import EditIcon from "@mui/icons-material/EditRounded";
 import EmojiEmotionsIcon from "@mui/icons-material/EmojiEmotionsRounded";
+import FolderZipIcon from "@mui/icons-material/FolderZipRounded";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFileRounded";
 import PersonOffIcon from "@mui/icons-material/PersonOffRounded";
 import ReplyIcon from "@mui/icons-material/ReplyRounded";
+import ScreenshotMonitorIcon from "@mui/icons-material/ScreenshotMonitorRounded";
 import SendIcon from "@mui/icons-material/SendRounded";
+import Tooltip from "@mui/material/Tooltip";
 import { formatBytes, truncate } from "../../shared/format";
 import { messageAttachmentIds } from "../../shared/messageMeta";
+import { isImageFileName, isVideoFileName } from "../../MediaAlbum";
 import type { ChatScreenVm } from "./chatVm";
+
+function stagedExt(name: string) {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i + 1).toUpperCase().slice(0, 4) : "FILE";
+}
+
+function StagedStrip({
+  stagedFiles,
+  removeStagedFile,
+  clearStagedFiles,
+}: {
+  stagedFiles: ChatScreenVm["stagedFiles"];
+  removeStagedFile: ChatScreenVm["removeStagedFile"];
+  clearStagedFiles: ChatScreenVm["clearStagedFiles"];
+}) {
+  if (!stagedFiles.length) return null;
+  return (
+    <Box sx={{ minWidth: 0 }}>
+      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.65, px: 0.25 }}>
+        <Typography variant="caption" fontWeight={700} color="text.secondary">
+          {stagedFiles.length} selected
+        </Typography>
+        <Button
+          size="small"
+          onClick={() => clearStagedFiles()}
+          sx={{ textTransform: "none", fontWeight: 700, minWidth: 0, px: 0.75, py: 0 }}
+        >
+          Clear
+        </Button>
+      </Stack>
+      <Box
+        sx={{
+          display: "flex",
+          gap: 0.85,
+          overflowX: "auto",
+          pb: 0.35,
+          scrollSnapType: "x mandatory",
+          WebkitOverflowScrolling: "touch",
+          "&::-webkit-scrollbar": { height: 6 },
+          "&::-webkit-scrollbar-thumb": {
+            bgcolor: "action.disabled",
+            borderRadius: 999,
+          },
+        }}
+      >
+        {stagedFiles.map((sf) => {
+          const isImg = !!sf.previewUrl || isImageFileName(sf.name);
+          const isVid = isVideoFileName(sf.name);
+          return (
+            <Box
+              key={sf.id}
+              sx={{
+                position: "relative",
+                flex: "0 0 auto",
+                width: 76,
+                scrollSnapAlign: "start",
+              }}
+            >
+              <Box
+                sx={{
+                  width: 76,
+                  height: 76,
+                  borderRadius: 2,
+                  overflow: "hidden",
+                  border: "1px solid",
+                  borderColor: "divider",
+                  bgcolor: "action.hover",
+                  display: "grid",
+                  placeItems: "center",
+                }}
+              >
+                {sf.previewUrl ? (
+                  <Box
+                    component="img"
+                    src={sf.previewUrl}
+                    alt=""
+                    sx={{ width: "100%", height: "100%", objectFit: "cover" }}
+                  />
+                ) : sf.isDir ? (
+                  <FolderZipIcon color="primary" />
+                ) : isImg || isVid ? (
+                  <Typography variant="caption" fontWeight={800} color="text.secondary">
+                    {stagedExt(sf.name)}
+                  </Typography>
+                ) : (
+                  <Stack alignItems="center" spacing={0.25} px={0.5}>
+                    <InsertDriveFileIcon color="primary" sx={{ fontSize: 28 }} />
+                    <Typography
+                      variant="caption"
+                      fontWeight={800}
+                      color="text.secondary"
+                      sx={{ fontSize: 9, lineHeight: 1 }}
+                    >
+                      {stagedExt(sf.name)}
+                    </Typography>
+                  </Stack>
+                )}
+              </Box>
+              <Tooltip title={sf.name}>
+                <Typography
+                  variant="caption"
+                  noWrap
+                  display="block"
+                  sx={{ mt: 0.35, fontSize: 10.5, maxWidth: 76, px: 0.15 }}
+                >
+                  {sf.name}
+                </Typography>
+              </Tooltip>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                display="block"
+                sx={{ fontSize: 9.5, px: 0.15, lineHeight: 1.1 }}
+              >
+                {formatBytes(sf.size)}
+              </Typography>
+              <IconButton
+                size="small"
+                aria-label={`Remove ${sf.name}`}
+                onClick={() => removeStagedFile(sf.id)}
+                sx={{
+                  position: "absolute",
+                  top: -6,
+                  right: -6,
+                  width: 22,
+                  height: 22,
+                  bgcolor: "background.paper",
+                  border: "1px solid",
+                  borderColor: "divider",
+                  boxShadow: 1,
+                  "&:hover": { bgcolor: "background.paper" },
+                }}
+              >
+                <CloseIcon sx={{ fontSize: 14 }} />
+              </IconButton>
+            </Box>
+          );
+        })}
+      </Box>
+    </Box>
+  );
+}
 
 export function Composer({ vm }: { vm: ChatScreenVm }) {
   const {
@@ -55,6 +201,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
     slashToken,
     stageFiles,
     stagedFiles,
+    startScreenshotCapture,
     submitComposer,
     text,
     toggleBlockPeer,
@@ -81,18 +228,11 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
             <Typography variant="caption" color="text.secondary">
               One-way posts — others can react. Use the message menu to reply privately to the author.
             </Typography>
-            {stagedFiles.length > 0 && (
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                {stagedFiles.map((sf) => (
-                  <Chip
-                    key={sf.id}
-                    label={sf.name}
-                    onDelete={() => removeStagedFile(sf.id)}
-                    size="small"
-                  />
-                ))}
-              </Stack>
-            )}
+            <StagedStrip
+              stagedFiles={stagedFiles}
+              removeStagedFile={removeStagedFile}
+              clearStagedFiles={clearStagedFiles}
+            />
             <TextField
               size="small"
               fullWidth
@@ -262,49 +402,11 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
               </Box>
             )}
             {stagedFiles.length > 0 && !editingMessage && (
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                {stagedFiles.map((sf) => (
-                  <Box
-                    key={sf.id}
-                    sx={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 1,
-                      p: 1,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      borderRadius: 2,
-                      bgcolor: "action.hover",
-                    }}
-                  >
-                    {sf.previewUrl ? (
-                      <Box
-                        component="img"
-                        src={sf.previewUrl}
-                        alt=""
-                        sx={{ width: 40, height: 40, objectFit: "cover", borderRadius: 1 }}
-                      />
-                    ) : (
-                      <InsertDriveFileIcon color="primary" />
-                    )}
-                    <Box minWidth={0}>
-                      <Typography variant="body2" noWrap sx={{ maxWidth: 160 }}>
-                        {sf.name}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {formatBytes(sf.size)}
-                      </Typography>
-                    </Box>
-                    <IconButton
-                      size="small"
-                      aria-label={`Remove ${sf.name}`}
-                      onClick={() => removeStagedFile(sf.id)}
-                    >
-                      <CloseIcon fontSize="small" />
-                    </IconButton>
-                  </Box>
-                ))}
-              </Stack>
+              <StagedStrip
+                stagedFiles={stagedFiles}
+                removeStagedFile={removeStagedFile}
+                clearStagedFiles={clearStagedFiles}
+              />
             )}
             {!!slashSuggestions.length && (
               <List dense sx={{ py: 0 }}>
@@ -347,14 +449,34 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
               >
                 <EmojiEmotionsIcon fontSize="small" />
               </IconButton>
-              <IconButton
-                aria-label="Attach files"
-                disabled={(!!outgoingFile && !outgoingFile.cancelled) || !!editingMessage}
-                size="small"
-                onClick={() => void pickAndStageFiles()}
-              >
-                <AttachFileIcon fontSize="small" />
-              </IconButton>
+              <Tooltip title="Attach files">
+                <span>
+                  <IconButton
+                    aria-label="Attach files"
+                    size="small"
+                    disabled={(!!outgoingFile && !outgoingFile.cancelled) || !!editingMessage}
+                    onClick={() => void pickAndStageFiles()}
+                  >
+                    <AttachFileIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Tooltip title="Capture screenshot · Ctrl+Shift+S">
+                <span>
+                  <IconButton
+                    aria-label="Capture screenshot"
+                    size="small"
+                    disabled={
+                      (!!outgoingFile && !outgoingFile.cancelled) ||
+                      !!editingMessage ||
+                      typeof startScreenshotCapture !== "function"
+                    }
+                    onClick={() => void startScreenshotCapture?.()}
+                  >
+                    <ScreenshotMonitorIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
               {/* Fallback for browser preview when native dialog is unavailable */}
               <input
                 ref={filePickRef}
@@ -412,7 +534,6 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    // While a file is staging, only allow text (no new attachments).
                     if (outgoingFile && !outgoingFile.cancelled && !text.trim()) return;
                     submitComposer();
                   } else if (e.key === "Escape" && slashSuggestions.length) {

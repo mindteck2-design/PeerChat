@@ -633,8 +633,14 @@ export function SearchDialog({
   setQuery: (q: string) => void;
   onSearch: () => void;
   busy: boolean;
-  results: { id: string; title: string; detail: string; conversationId?: string }[];
-  onJump: (conversationId: string) => void;
+  results: {
+    id: string;
+    title: string;
+    detail: string;
+    conversationId?: string;
+    messageId?: string;
+  }[];
+  onJump: (conversationId: string, messageId?: string) => void;
 }) {
   return (
     <Dialog open={isOpen} onClose={onClose} fullWidth maxWidth="sm">
@@ -661,7 +667,7 @@ export function SearchDialog({
             <ListItemButton
               key={r.id}
               disabled={!r.conversationId}
-              onClick={() => r.conversationId && onJump(r.conversationId)}
+              onClick={() => r.conversationId && onJump(r.conversationId, r.messageId)}
             >
               <ListItemText primary={r.title} secondary={r.detail} />
             </ListItemButton>
