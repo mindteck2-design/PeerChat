@@ -2662,10 +2662,10 @@ fn scan_file(path: String) -> ScanResult {
     scan_file_inner(&path)
 }
 
-fn scan_file_inner(path: &str) -> ScanResult {
+fn scan_file_inner(_path: &str) -> ScanResult {
     #[cfg(target_os = "windows")]
     {
-        windows_defender_scan(path)
+        windows_defender_scan(_path)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -2737,6 +2737,7 @@ fn windows_defender_scan(path: &str) -> ScanResult {
 
 // ─── Windows autostart (HKCU Run → tray) ───────────────────────────────────────
 
+#[cfg(windows)]
 const AUTOSTART_VALUE: &str = "PeerChat";
 
 #[cfg(windows)]
@@ -2858,10 +2859,10 @@ use std::os::windows::process::CommandExt;
 /// Write HKCU shell verb so "Share in PeerChat" appears on right-click for all files.
 /// exe_path should be the full path to PeerChat.exe.
 #[tauri::command]
-fn install_shell_extension(exe_path: String) -> Result<(), String> {
+fn install_shell_extension(_exe_path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        shell_verb_write(&exe_path)
+        shell_verb_write(&_exe_path)
     }
     #[cfg(not(target_os = "windows"))]
     {
