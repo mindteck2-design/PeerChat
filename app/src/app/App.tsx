@@ -6,11 +6,10 @@ import { peerApi, type Profile } from "../peer";
 import { type Identity } from "../crypto";
 import { getOrCreateIdentity } from "../storage";
 import { SetupScreen } from "../features/setup/SetupScreen";
-import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { ChatScreen } from "./ChatScreen";
 import { appLog } from "../shared/appLog";
 
-type Screen = "setup" | "chat" | "settings";
+type Screen = "setup" | "chat";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("setup");
@@ -80,24 +79,12 @@ export default function App() {
     );
   }
 
-  if (screen === "settings") {
-    return (
-      <SettingsScreen
-        profile={profile}
-        identity={identity}
-        version={version}
-        onBack={() => setScreen("chat")}
-        onNameUpdated={(p) => setProfile(p)}
-      />
-    );
-  }
-
   return (
     <ChatScreen
       profile={profile}
       identity={identity}
       version={version}
-      onSettings={() => setScreen("settings")}
+      onProfileUpdated={(p) => setProfile(p)}
     />
   );
 }

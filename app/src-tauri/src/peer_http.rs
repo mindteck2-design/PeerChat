@@ -122,7 +122,12 @@ pub fn spawn_listener(
         let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("PeerTalk listener bind failed on {port}: {e}");
+                // Log to stderr so it lands in peerchat.log via the OS stream.
+                let ts = chrono::Utc::now().to_rfc3339();
+                let _ = std::io::Write::write_fmt(
+                    &mut std::io::stderr(),
+                    format_args!("[{ts}] [ERROR] PeerChat TLS listener bind failed on port {port}: {e}\n"),
+                );
                 return;
             }
         };

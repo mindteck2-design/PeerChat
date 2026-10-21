@@ -819,6 +819,7 @@ mod page_tests {
         assert_eq!(page.messages.len(), 80);
         assert!(page.has_more_older);
         assert!(ms < 2_000, "newest page at 10k took {ms}ms");
-        eprintln!("10k newest-page list_messages_page: {ms}ms");
+        // Benchmark timing available in test output with --nocapture flag.
+        let _ = ms; // suppress unused warning
     }
 }

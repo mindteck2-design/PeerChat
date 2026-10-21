@@ -53,7 +53,7 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
           borderRight: "1px solid",
           borderColor: "divider",
           bgcolor: "background.paper",
-          display: nav === "transfers" || nav === "games" || nav === "saved" ? "none" : "flex",
+          display: nav === "transfers" || nav === "games" || nav === "saved" || nav === "settings" ? "none" : "flex",
         }}
       >
         <Box sx={{ px: 2, pt: 1.75, pb: 1, display: "flex", alignItems: "center", gap: 1 }}>

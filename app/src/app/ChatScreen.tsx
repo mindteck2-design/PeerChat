@@ -153,6 +153,7 @@ import {
 import CampaignIcon from "@mui/icons-material/CampaignRounded";
 import type { SavedItem, ScanResult, TransferLog } from "../peer";
 import { ThemeMode } from "../theme";
+import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { FEATURE_GAMES } from "../features";
 import {
   GamesHub,
@@ -219,16 +220,22 @@ import { publishTransferProgress } from "../features/files/transferProgressStore
 import { appLog } from "../shared/appLog";
 
 export function ChatScreen({
-  profile,
+  profile: initialProfile,
   identity,
   onSettings,
   version,
+  onProfileUpdated,
 }: {
   profile: Profile;
   identity: Identity;
-  onSettings: () => void;
+  onSettings?: () => void;
   version: string;
+  onProfileUpdated?: (p: Profile) => void;
 }) {
+  const [profile, setProfile] = useState<Profile>(initialProfile);
+  useEffect(() => {
+    setProfile(initialProfile);
+  }, [initialProfile]);
   useEffect(() => {
     appLog("info", "ChatScreen mounted", { profileId: profile.id });
   }, [profile.id]);
@@ -3746,7 +3753,10 @@ export function ChatScreen({
       <NavRail
         nav={nav}
         gamesOn={gamesOn}
-        onSettings={onSettings}
+        onSettings={() => {
+          setNav("settings");
+          onSettings?.();
+        }}
         setNav={setNav}
         setTab={setTab}
         ensureAnnounceBoards={ensureAnnounceBoards}
@@ -3863,6 +3873,23 @@ export function ChatScreen({
               setSavedItems(await peerApi.listSavedItems());
             }}
           />
+        )}
+        {nav === "settings" && (
+          <Box sx={{ flex: 1, height: "100%", overflowY: "auto", bgcolor: "background.default" }}>
+            <SettingsScreen
+              profile={profile}
+              identity={identity}
+              version={version}
+              onBack={() => {
+                setNav("chats");
+                setTab(1);
+              }}
+              onNameUpdated={(p) => {
+                setProfile(p);
+                onProfileUpdated?.(p);
+              }}
+            />
+          </Box>
         )}
         <Box
           sx={{

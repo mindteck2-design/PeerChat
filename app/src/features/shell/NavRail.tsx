@@ -15,7 +15,8 @@ export type ShellNav =
   | "transfers"
   | "games"
   | "saved"
-  | "announcements";
+  | "announcements"
+  | "settings";
 
 export function NavRail(props: {
   nav: ShellNav;
@@ -78,7 +79,7 @@ export function NavRail(props: {
                   const boards = await ensureAnnounceBoards();
                   if (boards[0]) {
                     const full =
-                      (await listConversations()).find((c) => c.id === boards[0].id) ||
+                       (await listConversations()).find((c) => c.id === boards[0].id) ||
                       boards[0];
                     await selectConversation(full);
                   }
@@ -96,7 +97,18 @@ export function NavRail(props: {
       ))}
       <Box flex={1} />
       <Tooltip title="Settings" placement="right">
-        <IconButton onClick={onSettings} sx={{ borderRadius: 2.5 }}>
+        <IconButton
+          color={nav === "settings" ? "primary" : "default"}
+          aria-label="Settings"
+          onClick={() => {
+            setNav("settings");
+            onSettings();
+          }}
+          sx={{
+            bgcolor: nav === "settings" ? "action.selected" : "transparent",
+            borderRadius: 2.5,
+          }}
+        >
           <SettingsIcon />
         </IconButton>
       </Tooltip>

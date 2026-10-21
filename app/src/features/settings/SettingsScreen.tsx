@@ -3,24 +3,40 @@ import {
   Alert,
   Box,
   Button,
-  Chip,
-  FormControlLabel,
   IconButton,
+  InputAdornment,
   Paper,
-  Stack,
+  SvgIcon,
   Switch,
   TextField,
   Typography,
 } from "@mui/material";
 import ContentCopyIcon from "@mui/icons-material/ContentCopyRounded";
+import InfoRoundedIcon from "@mui/icons-material/InfoRounded";
+import NotificationsNoneRoundedIcon from "@mui/icons-material/NotificationsNoneRounded";
+import PersonOutlineRoundedIcon from "@mui/icons-material/PersonOutlineRounded";
+import SecurityRoundedIcon from "@mui/icons-material/SecurityRounded";
+import LinkRoundedIcon from "@mui/icons-material/LinkRounded";
+import PaletteOutlinedIcon from "@mui/icons-material/PaletteOutlined";
+import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
 import {
   isPermissionGranted,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
 import { exportPublic, fingerprintPublic, type Identity } from "../../crypto";
-import { FEATURE_GAMES } from "../../features";
 import { peerApi, type Profile } from "../../peer";
 import { ThemeMode } from "../../theme";
+
+function WindowsLogo(props: any) {
+  return (
+    <SvgIcon {...props} viewBox="0 0 24 24">
+      <path
+        d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.401H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.951-1.801"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
 
 export function SettingsScreen(props: {
   profile: Profile;
@@ -37,10 +53,9 @@ export function SettingsScreen(props: {
   const [status, setStatus] = useState("");
   const [notifOn, setNotifOn] = useState(true);
   const [notifBusy, setNotifBusy] = useState(false);
-  const [autostartOn, setAutostartOn] = useState(false);
+  const [autostartOn, setAutostartOn] = useState(true);
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [downloadDir, setDownloadDir] = useState("");
-  const [gamesEnabled, setGamesEnabled] = useState(false);
   const [shellExt, setShellExt] = useState(false);
   const [shellBusy, setShellBusy] = useState(false);
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
@@ -49,12 +64,11 @@ export function SettingsScreen(props: {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
     peerApi.getNotificationsEnabled().then(setNotifOn).catch(() => setNotifOn(true));
     peerApi.getAppSetting("download_dir").then((v) => setDownloadDir(v || "")).catch(() => {});
-    peerApi.getAppSetting("games_enabled").then((v) => setGamesEnabled(v === "1")).catch(() => setGamesEnabled(false));
     peerApi.shellExtensionInstalled().then(setShellExt).catch(() => setShellExt(false));
     peerApi
       .getAutostartEnabled()
-      .then(setAutostartOn)
-      .catch(() => setAutostartOn(false));
+      .then((enabled) => setAutostartOn(enabled))
+      .catch(() => setAutostartOn(true));
   }, []);
 
   async function toggleAutostart(enabled: boolean) {
@@ -127,70 +141,158 @@ export function SettingsScreen(props: {
     }
   }
 
+  const cardSx = {
+    p: 2.5,
+    borderRadius: 3,
+    bgcolor: "#0d1527",
+    border: "1px solid rgba(255, 255, 255, 0.08)",
+    boxShadow: "0 4px 20px rgba(0, 0, 0, 0.2)",
+  };
+
+  const inputSx = {
+    "& .MuiOutlinedInput-root": {
+      bgcolor: "#070c18",
+      borderRadius: 2,
+      color: "#f8fafc",
+      "& fieldset": { borderColor: "rgba(255, 255, 255, 0.1)" },
+      "&:hover fieldset": { borderColor: "rgba(255, 255, 255, 0.2)" },
+      "&.Mui-focused fieldset": { borderColor: "#38bdf8" },
+    },
+    "& .MuiInputBase-input": {
+      fontSize: "0.875rem",
+      py: 1,
+    },
+  };
+
+  const switchSx = {
+    "& .MuiSwitch-switchBase.Mui-checked": { color: "#38bdf8" },
+    "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track": { bgcolor: "#0284c7" },
+  };
+
   return (
-    <Box minHeight="100vh" p={3} maxWidth={720} mx="auto">
-      <Stack direction="row" alignItems="center" spacing={1} mb={3}>
-        <Button onClick={props.onBack}>Back</Button>
-        <Typography variant="h5">Settings</Typography>
-        <Chip size="small" label={`v${props.version}`} sx={{ ml: "auto" }} />
-      </Stack>
-      <Stack spacing={3}>
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
+    <Box
+      sx={{
+        minHeight: "100%",
+        width: "100%",
+        maxWidth: 1080,
+        mx: "auto",
+        p: { xs: 2.5, md: 4 },
+        boxSizing: "border-box",
+      }}
+    >
+      {/* Header */}
+      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", mb: 3 }}>
+        <Box>
+          <Typography variant="h4" sx={{ fontWeight: 700, color: "#f8fafc", letterSpacing: "-0.02em" }}>
+            Settings
+          </Typography>
+          <Typography variant="body2" sx={{ color: "#94a3b8", mt: 0.5 }}>
+            Configure PeerChat to work the way you want
+          </Typography>
+        </Box>
+        <Box
+          sx={{
+            px: 2,
+            py: 0.6,
+            borderRadius: "20px",
+            bgcolor: "rgba(30, 41, 59, 0.7)",
+            border: "1px solid rgba(255, 255, 255, 0.1)",
+            color: "#cbd5e1",
+            fontSize: "0.8125rem",
+            fontWeight: 600,
+            letterSpacing: "0.01em",
+          }}
+        >
+          PeerChat v{props.version}
+        </Box>
+      </Box>
+
+      {/* Top Banner Card: About */}
+      <Paper sx={{ ...cardSx, mb: 2.5 }} elevation={0}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.25 }}>
+          <InfoRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
+          <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
             About
           </Typography>
-          <Typography variant="body1" fontWeight={600}>
-            PeerChat {props.version}
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            A lightweight, secure peer-to-peer messaging app for direct communication and file sharing over your network.
-          </Typography>
-        </Paper>
+        </Box>
+        <Typography sx={{ fontWeight: 700, fontSize: "0.9375rem", color: "#f1f5f9", mb: 0.5 }}>
+          PeerChat {props.version}
+        </Typography>
+        <Typography sx={{ fontSize: "0.875rem", color: "#94a3b8", lineHeight: 1.5 }}>
+          A lightweight, secure peer-to-peer messaging app for direct communication and file sharing over your network.
+        </Typography>
+      </Paper>
 
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Notifications
-          </Typography>
-          <FormControlLabel
-            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
-            labelPlacement="start"
-            disabled={notifBusy}
-            control={
-              <Switch checked={notifOn} onChange={(_, v) => toggleNotifications(v)} />
-            }
-            label="Desktop notifications for new messages"
-          />
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+      {/* 2-Column Grid */}
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" },
+          gap: 2.5,
+          alignItems: "start",
+        }}
+      >
+        {/* Row 1 Left: Notifications */}
+        <Paper sx={cardSx} elevation={0}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+            <NotificationsNoneRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+              Notifications
+            </Typography>
+          </Box>
+          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: "#f1f5f9" }}>
+              Desktop notifications for new messages
+            </Typography>
+            <Switch
+              checked={notifOn}
+              disabled={notifBusy}
+              onChange={(_, v) => toggleNotifications(v)}
+              sx={switchSx}
+            />
+          </Box>
+          <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
             Get desktop alerts for new messages. Muted chats stay silent.
           </Typography>
         </Paper>
 
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Startup
-          </Typography>
-          <FormControlLabel
-            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
-            labelPlacement="start"
-            disabled={autostartBusy}
-            control={
-              <Switch checked={autostartOn} onChange={(_, v) => toggleAutostart(v)} />
-            }
-            label="Start with Windows (system tray)"
-          />
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            After you sign in, PeerChat runs in the tray so it can receive messages and show
-            notifications. Open it from the tray icon.
+        {/* Row 1 Right: Startup */}
+        <Paper sx={cardSx} elevation={0}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+            <WindowsLogo sx={{ color: "#38bdf8", fontSize: 20 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+              Startup
+            </Typography>
+          </Box>
+          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: "#f1f5f9" }}>
+              Start with Windows (system tray)
+            </Typography>
+            <Switch
+              checked={autostartOn}
+              disabled={autostartBusy}
+              onChange={(_, v) => toggleAutostart(v)}
+              sx={switchSx}
+            />
+          </Box>
+          <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
+            After you sign in, PeerChat runs in the tray so it can receive messages and show notifications. Open it from the tray icon.
           </Typography>
         </Paper>
 
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Profile
-          </Typography>
-          <Stack spacing={1.5} sx={{ mb: 1.5 }}>
+        {/* Row 2 Left: Profile */}
+        <Paper sx={cardSx} elevation={0}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+            <PersonOutlineRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+              Profile
+            </Typography>
+          </Box>
+          <Box sx={{ mb: 1.5 }}>
+            <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", fontWeight: 500, mb: 0.75 }}>
+              Display name
+            </Typography>
             <TextField
-              label="Display name"
               size="small"
               fullWidth
               value={name}
@@ -201,114 +303,163 @@ export function SettingsScreen(props: {
                   saveName();
                 }
               }}
+              sx={inputSx}
             />
+          </Box>
+          <Box sx={{ mb: 1.75 }}>
+            <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", fontWeight: 500, mb: 0.75 }}>
+              Team
+            </Typography>
             <TextField
-              label="Team"
               size="small"
               fullWidth
               value={team}
-              onChange={(e) => setTeam(e.target.value)}
               placeholder="HMIS"
-              helperText="e.g. HMIS, Shakti"
+              onChange={(e) => setTeam(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
                   saveName();
                 }
               }}
+              sx={inputSx}
             />
-            <Button
-              variant="contained"
-              disabled={
-                savingName ||
-                !name.trim() ||
-                (name.trim() === props.profile.display_name &&
-                  team.trim() === (props.profile.team || "").trim())
-              }
-              onClick={saveName}
-              sx={{ alignSelf: "flex-start" }}
-            >
-              Save
-            </Button>
-          </Stack>
-          <Stack direction="row" spacing={1} alignItems="center">
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              fontFamily="monospace"
-              sx={{ wordBreak: "break-all" }}
-              flex={1}
-            >
+            <Typography sx={{ fontSize: "0.75rem", color: "#64748b", mt: 0.5 }}>
+              e.g. HMIS, Shakti
+            </Typography>
+          </Box>
+          <Button
+            variant="contained"
+            disabled={
+              savingName ||
+              !name.trim() ||
+              (name.trim() === props.profile.display_name &&
+                team.trim() === (props.profile.team || "").trim())
+            }
+            onClick={saveName}
+            sx={{
+              bgcolor: "#2563eb",
+              "&:hover": { bgcolor: "#1d4ed8" },
+              borderRadius: 2,
+              px: 3,
+              py: 0.75,
+              fontWeight: 600,
+              textTransform: "none",
+              mb: 2,
+            }}
+          >
+            Save
+          </Button>
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              pt: 1.5,
+              borderTop: "1px solid rgba(255,255,255,0.06)",
+            }}
+          >
+            <Typography sx={{ fontFamily: "monospace", fontSize: "0.8125rem", color: "#94a3b8", wordBreak: "break-all" }}>
               {props.profile.id}
             </Typography>
-            <IconButton size="small" aria-label="Copy user id" onClick={() => copy("User id", props.profile.id)}>
-              <ContentCopyIcon fontSize="small" />
+            <IconButton
+              size="small"
+              onClick={() => copy("User id", props.profile.id)}
+              sx={{ color: "#94a3b8", "&:hover": { color: "#f8fafc" }, ml: 1 }}
+            >
+              <ContentCopyIcon sx={{ fontSize: 18 }} />
             </IconButton>
-          </Stack>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Listening port: Managed automatically
-          </Typography>
+          </Box>
         </Paper>
 
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Security fingerprints
-          </Typography>
-          <Stack direction="row" spacing={1} alignItems="center">
-            <Box flex={1} minWidth={0}>
-              <Typography variant="body2" color="text.secondary">
+        {/* Row 2 Right: Stack of Security fingerprints + Windows shell integration */}
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+          {/* Security fingerprints */}
+          <Paper sx={cardSx} elevation={0}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+              <SecurityRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
+              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+                Security fingerprints
+              </Typography>
+            </Box>
+            <Box sx={{ mb: 1.5 }}>
+              <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", fontWeight: 500, mb: 0.75 }}>
                 Your key fingerprint
               </Typography>
-              <Typography fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
-                {keyFp}
-              </Typography>
+              <TextField
+                size="small"
+                fullWidth
+                value={keyFp}
+                InputProps={{
+                  readOnly: true,
+                  sx: { fontFamily: "monospace", fontSize: "0.8125rem" },
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton
+                        size="small"
+                        onClick={() => copy("Key fingerprint", keyFp)}
+                        sx={{ color: "#94a3b8", "&:hover": { color: "#f8fafc" } }}
+                      >
+                        <ContentCopyIcon sx={{ fontSize: 18 }} />
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+                }}
+                sx={inputSx}
+              />
             </Box>
-            <IconButton
-              size="small"
-              aria-label="Copy key fingerprint"
-              onClick={() => copy("Key fingerprint", keyFp)}
-            >
-              <ContentCopyIcon fontSize="small" />
-            </IconButton>
-          </Stack>
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.5 }}>
-            <Box flex={1} minWidth={0}>
-              <Typography variant="body2" color="text.secondary">
+            <Box>
+              <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", fontWeight: 500, mb: 0.75 }}>
                 Your peer TLS fingerprint
               </Typography>
-              <Typography fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
-                {fp || "…"}
+              <TextField
+                size="small"
+                fullWidth
+                value={fp || "…"}
+                InputProps={{
+                  readOnly: true,
+                  sx: { fontFamily: "monospace", fontSize: "0.8125rem" },
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton
+                        size="small"
+                        disabled={!fp}
+                        onClick={() => copy("TLS fingerprint", fp)}
+                        sx={{ color: "#94a3b8", "&:hover": { color: "#f8fafc" } }}
+                      >
+                        <ContentCopyIcon sx={{ fontSize: 18 }} />
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+                }}
+                sx={inputSx}
+              />
+            </Box>
+          </Paper>
+
+          {/* Windows shell integration */}
+          <Paper sx={cardSx} elevation={0}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+              <LinkRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
+              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+                Windows shell integration
               </Typography>
             </Box>
-            <IconButton
-              size="small"
-              aria-label="Copy TLS fingerprint"
-              disabled={!fp}
-              onClick={() => copy("TLS fingerprint", fp)}
-            >
-              <ContentCopyIcon fontSize="small" />
-            </IconButton>
-          </Stack>
-        </Paper>
-
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Windows shell integration
-          </Typography>
-          <FormControlLabel
-            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
-            labelPlacement="start"
-            disabled={shellBusy}
-            control={
+            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: "#f1f5f9" }}>
+                Add 'Share in PeerChat' to right-click menu
+              </Typography>
               <Switch
                 checked={shellExt}
+                disabled={shellBusy}
                 onChange={async (_, v) => {
                   setShellBusy(true);
                   try {
                     if (v) {
-                      const exePath = (window as any).__TAURI_INTERNALS__?.metadata?.currentExe
-                        || (window as any).__TAURI__?.metadata?.currentExe
-                        || "PeerChat.exe";
+                      const exePath =
+                        (window as any).__TAURI_INTERNALS__?.metadata?.currentExe ||
+                        (window as any).__TAURI__?.metadata?.currentExe ||
+                        "PeerChat.exe";
                       await peerApi.installShellExtension(exePath);
                       setShellExt(true);
                       setStatus("Right-click 'Share in PeerChat' registered");
@@ -323,106 +474,120 @@ export function SettingsScreen(props: {
                     setShellBusy(false);
                   }
                 }}
+                sx={switchSx}
               />
-            }
-            label="Add 'Share in PeerChat' to right-click menu"
-          />
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          Add "Share in PeerChat" to the File Explorer right-click menu to share files easily.
-          </Typography>
-        </Paper>
+            </Box>
+            <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
+              Add "Share in PeerChat" to the File Explorer right-click menu to share files easily.
+            </Typography>
+          </Paper>
+        </Box>
 
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Appearance
-          </Typography>
-          <FormControlLabel
-            sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
-            labelPlacement="start"
-            control={
-              <Switch
-                checked={mode === "light"}
-                onChange={(_, v) => {
-                  const next = v ? "light" : "dark";
-                  setMode(next);
-                  peerApi.setAppSetting("theme", next).catch(() => {});
-                }}
-              />
-            }
-            label="Light theme"
-          />
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+        {/* Row 3 Left: Appearance */}
+        <Paper sx={cardSx} elevation={0}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+            <PaletteOutlinedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+              Appearance
+            </Typography>
+          </Box>
+          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: "#f1f5f9" }}>
+              Light theme
+            </Typography>
+            <Switch
+              checked={mode === "light"}
+              onChange={(_, v) => {
+                const next = v ? "light" : "dark";
+                setMode(next);
+                peerApi.setAppSetting("theme", next).catch(() => {});
+              }}
+              sx={switchSx}
+            />
+          </Box>
+          <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
             Dark theme is the default. Your choice is saved locally.
           </Typography>
         </Paper>
 
-        <Paper sx={{ p: 2.5 }} variant="outlined">
-          <Typography variant="h6" gutterBottom>
-            Downloads
-          </Typography>
-          <Stack direction="row" spacing={1} alignItems="center">
+        {/* Row 3 Right: Downloads */}
+        <Paper sx={cardSx} elevation={0}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+            <DownloadRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+              Downloads
+            </Typography>
+          </Box>
+          <Box sx={{ display: "flex", gap: 1.25, alignItems: "center" }}>
             <TextField
-              label="Download folder"
               size="small"
               fullWidth
-              placeholder="(default: system Downloads folder)"
+              placeholder="Download folder"
               value={downloadDir}
               onChange={(e) => setDownloadDir(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  peerApi.setAppSetting("download_dir", downloadDir.trim()).then(() => setStatus("Download folder saved")).catch((err: any) => setStatus(err?.message || String(err)));
+                  peerApi
+                    .setAppSetting("download_dir", downloadDir.trim())
+                    .then(() => setStatus("Download folder saved"))
+                    .catch((err: any) => setStatus(err?.message || String(err)));
                 }
               }}
+              sx={inputSx}
             />
             <Button
               variant="contained"
               onClick={() => {
-                peerApi.setAppSetting("download_dir", downloadDir.trim()).then(() => setStatus("Download folder saved")).catch((err: any) => setStatus(err?.message || String(err)));
+                peerApi
+                  .setAppSetting("download_dir", downloadDir.trim())
+                  .then(() => setStatus("Download folder saved"))
+                  .catch((err: any) => setStatus(err?.message || String(err)));
+              }}
+              sx={{
+                bgcolor: "#2563eb",
+                "&:hover": { bgcolor: "#1d4ed8" },
+                borderRadius: 2,
+                px: 3,
+                py: 0.75,
+                fontWeight: 600,
+                textTransform: "none",
+                flexShrink: 0,
               }}
             >
               Save
             </Button>
-          </Stack>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+          </Box>
+          <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
             Received files land here. Leave blank to use the system Downloads folder.
           </Typography>
         </Paper>
+      </Box>
 
-        {FEATURE_GAMES && (
-          <Paper sx={{ p: 2.5 }} variant="outlined">
-            <Typography variant="h6" gutterBottom>
-              Games
-            </Typography>
-            <FormControlLabel
-              sx={{ m: 0, width: "100%", justifyContent: "space-between" }}
-              labelPlacement="start"
-              control={
-                <Switch
-                  checked={gamesEnabled}
-                  onChange={(_, v) => {
-                    setGamesEnabled(v);
-                    peerApi.setAppSetting("games_enabled", v ? "1" : "0").then(() => setStatus(v ? "Games enabled" : "Games disabled")).catch((err: any) => setStatus(err?.message || String(err)));
-                  }}
-                />
-              }
-              label="Enable offline games"
-            />
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              Shows the Games tab in the sidebar. Currently includes Snake, 2048, Tic-Tac-Toe, Rock Paper Scissors, and Dots & Boxes.
-            </Typography>
-          </Paper>
-        )}
-
-        <Alert severity="info">
+      {/* Bottom Info Banner */}
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: 1.25,
+          p: 1.5,
+          mt: 2.5,
+          borderRadius: 2,
+          bgcolor: "rgba(56, 189, 248, 0.05)",
+          border: "1px solid rgba(56, 189, 248, 0.2)",
+        }}
+      >
+        <InfoRoundedIcon sx={{ color: "#38bdf8", fontSize: 20, flexShrink: 0 }} />
+        <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8" }}>
           No central server — chats live in local SQLite and deliver when peers come online.
+        </Typography>
+      </Box>
+
+      {status && (
+        <Alert severity="success" onClose={() => setStatus("")} sx={{ mt: 2 }}>
+          {status}
         </Alert>
-        {status && (
-          <Alert severity="success" onClose={() => setStatus("")}>
-            {status}
-          </Alert>
-        )}
-      </Stack>
+      )}
     </Box>
   );
 }
