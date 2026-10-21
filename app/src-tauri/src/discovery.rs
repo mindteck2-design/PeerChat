@@ -9,6 +9,7 @@ use tokio::time::timeout;
 
 /// Avoid flashing a console window when spawning `ipconfig` / `arp` on Windows.
 fn silent_command(program: &str) -> std::process::Command {
+    #[allow(unused_mut)]
     let mut cmd = std::process::Command::new(program);
     #[cfg(windows)]
     {
@@ -102,6 +103,7 @@ pub fn lan_ip() -> String {
     ip
 }
 
+#[cfg(windows)]
 fn is_virtual_adapter_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.contains("vethernet")

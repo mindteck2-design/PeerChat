@@ -1357,6 +1357,7 @@ pub fn windows_defender_scan(path: &str) -> ScanResult {
 
 // ─── Windows autostart (HKCU Run → tray) ───────────────────────────────────────
 
+#[cfg(windows)]
 const AUTOSTART_VALUE: &str = "PeerChat";
 
 #[cfg(windows)]

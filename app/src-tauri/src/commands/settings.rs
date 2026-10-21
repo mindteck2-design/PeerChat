@@ -173,7 +173,9 @@ use std::os::windows::process::CommandExt;
 /// Write HKCU shell verb so "Share in PeerChat" appears on right-click for all files.
 /// exe_path should be the full path to PeerChat.exe.
 #[tauri::command]
-pub fn install_shell_extension(exe_path: String) -> Result<(), String> {
+pub fn install_shell_extension(_exe_path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let exe_path = _exe_path;
     #[cfg(target_os = "windows")]
     {
         shell_verb_write(&exe_path)
