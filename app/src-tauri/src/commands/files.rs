@@ -1214,6 +1214,7 @@ fn is_low_risk_attachment(path: &str) -> bool {
     )
 }
 
+#[cfg(target_os = "windows")]
 fn defender_output_looks_like_threat(stdout: &str, stderr: &str) -> bool {
     let blob = format!("{stdout}\n{stderr}").to_ascii_lowercase();
     if blob.trim().is_empty() {

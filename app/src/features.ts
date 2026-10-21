@@ -16,4 +16,4 @@
  * Runtime setting "games_enabled" in Settings still works independently
  * when this is true — it lets individual users toggle without a rebuild.
  */
-export const FEATURE_GAMES = true;
+export const FEATURE_GAMES = false;

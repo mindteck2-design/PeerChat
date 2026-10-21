@@ -223,5 +223,6 @@ pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub(crate) fn ensure_windows_firewall_rules(_data_dir: &std::path::Path) {}
 
