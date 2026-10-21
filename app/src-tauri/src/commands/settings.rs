@@ -1,4 +1,5 @@
 #![allow(unused_imports)]
+#[cfg(windows)]
 use crate::commands::files::{set_windows_autostart, windows_autostart_enabled};
 pub(crate) const SETTING_KEYS: &[&str] = &["theme", "games_enabled", "download_dir"];
 use base64::Engine;
