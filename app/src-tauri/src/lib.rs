@@ -194,12 +194,11 @@ pub fn run() {
             // Keep the handle alive for the process lifetime (managed by Tauri).
             std::mem::forget(tray);
 
-            // Login / autostart launches with --tray: stay in tray until user opens.
+            // Login / autostart launches with --tray: stay quietly in tray.
+            // If launched normally (not --tray), show and focus main window.
             let start_in_tray = std::env::args().any(|a| a == "--tray");
-            if start_in_tray {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.hide();
-                }
+            if !start_in_tray {
+                show_main_window(app.handle());
             }
             // First-run default: register Start-with-Windows (tray) once.
             #[cfg(windows)]
@@ -216,8 +215,9 @@ pub fn run() {
             let share_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    // Fast poll so Apps/Start Menu reopen feels instant.
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    // Poll at a calm pace (1s) to avoid consuming disk I/O on system startup.
+                    // Mid-session reopen is already handled instantaneously via single-instance IPC.
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                     drain_second_instance_signals(&share_handle);
                 }
             });

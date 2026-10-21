@@ -48,6 +48,9 @@ pub(crate) fn drain_pending_share(app: &AppHandle) {
     };
     for id in [APP_ID, LEGACY_APP_ID] {
         let path = PathBuf::from(&local).join(id).join("pending-share.json");
+        if !path.exists() {
+            continue;
+        }
         let Ok(raw) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -114,9 +117,15 @@ pub(crate) fn start_runtime_inner(
     )?;
 
     // Best-effort firewall allow for LAN discovery (UDP 41234) + peer TLS (TCP listen).
-    // Silent no-op if netsh needs elevation or is blocked by policy.
+    // Run in background with delay + marker cache so system login startup impact is minimized.
     #[cfg(windows)]
-    ensure_windows_firewall_rules();
+    {
+        let data_dir = state.data_dir.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+            ensure_windows_firewall_rules(&data_dir);
+        });
+    }
 
     let (tx, rx) = tokio::sync::watch::channel(false);
     *state.stop_tx.lock() = Some(tx);
@@ -171,13 +180,17 @@ use std::os::windows::process::CommandExt;
 
 /// Allow inbound TCP/UDP for this PeerChat.exe so LAN beacons and DMs work.
 #[cfg(windows)]
-pub(crate) fn ensure_windows_firewall_rules() {
+pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
     let Some(exe_str) = exe.to_str() else {
         return;
     };
+    let marker = data_dir.join(".firewall_ok");
+    if marker.exists() {
+        return;
+    }
     let _ = std::process::Command::new("netsh")
         .args([
             "advfirewall",
@@ -206,8 +219,9 @@ pub(crate) fn ensure_windows_firewall_rules() {
             .creation_flags(0x08000000)
             .output();
     }
+    let _ = std::fs::write(&marker, b"1");
 }
 
 #[cfg(not(windows))]
-pub(crate) fn ensure_windows_firewall_rules() {}
+pub(crate) fn ensure_windows_firewall_rules(_data_dir: &std::path::Path) {}
 
