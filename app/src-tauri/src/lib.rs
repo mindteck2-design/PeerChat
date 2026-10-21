@@ -26,9 +26,7 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 
-// Re-export windows autostart helper used in setup (defined in commands/settings).
-#[cfg(windows)]
-use commands::files::set_windows_autostart;
+use commands::files::set_autostart;
 
 pub fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -200,12 +198,12 @@ pub fn run() {
             if !start_in_tray {
                 show_main_window(app.handle());
             }
-            // First-run default: register Start-with-Windows (tray) once.
-            #[cfg(windows)]
+            // First-run default: register login autostart (tray) once on supported OSes.
+            #[cfg(any(windows, target_os = "linux"))]
             {
                 let marker = data.join(".autostart_default_v1");
                 if !marker.exists() {
-                    let _ = set_windows_autostart(true);
+                    let _ = set_autostart(true);
                     let _ = std::fs::write(&marker, b"1");
                 }
             }

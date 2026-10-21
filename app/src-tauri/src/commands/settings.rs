@@ -1,6 +1,5 @@
 #![allow(unused_imports)]
-#[cfg(windows)]
-use crate::commands::files::{set_windows_autostart, windows_autostart_enabled};
+use crate::commands::files::{autostart_enabled, set_autostart};
 pub(crate) const SETTING_KEYS: &[&str] = &["theme", "games_enabled", "download_dir"];
 use base64::Engine;
 use rusqlite::OptionalExtension;
@@ -141,27 +140,12 @@ pub fn list_saved_items(state: State<AppState>) -> Result<Vec<Value>, String> {
 
 #[tauri::command]
 pub fn get_autostart_enabled() -> Result<bool, String> {
-    #[cfg(windows)]
-    {
-        Ok(windows_autostart_enabled())
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(false)
-    }
+    Ok(autostart_enabled())
 }
 
 #[tauri::command]
 pub fn set_autostart_enabled(enabled: bool) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        set_windows_autostart(enabled)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = enabled;
-        Err("Autostart is only available on Windows".into())
-    }
+    set_autostart(enabled)
 }
 
 // ─── Windows Firewall (LAN discovery) ─────────────────────────────────────────

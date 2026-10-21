@@ -1356,20 +1356,23 @@ pub fn windows_defender_scan(path: &str) -> ScanResult {
     }
 }
 
-// ─── Windows autostart (HKCU Run → tray) ───────────────────────────────────────
+// ─── Autostart (login → tray): Windows Run key / Linux XDG autostart ───────────
 
 #[cfg(windows)]
 const AUTOSTART_VALUE: &str = "PeerChat";
 
+#[cfg(target_os = "linux")]
+const LINUX_AUTOSTART_DESKTOP: &str = "peerchat.desktop";
+
 #[cfg(windows)]
-pub fn windows_autostart_command_line() -> Result<String, String> {
+fn windows_autostart_command_line() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe = exe.to_string_lossy();
     Ok(format!("\"{exe}\" --tray"))
 }
 
 #[cfg(windows)]
-pub fn set_windows_autostart(enabled: bool) -> Result<(), String> {
+fn set_windows_autostart(enabled: bool) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
@@ -1393,7 +1396,7 @@ pub fn set_windows_autostart(enabled: bool) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-pub fn windows_autostart_enabled() -> bool {
+fn windows_autostart_enabled() -> bool {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
@@ -1402,5 +1405,89 @@ pub fn windows_autostart_enabled() -> bool {
         .creation_flags(CREATE_NO_WINDOW)
         .output();
     matches!(out, Ok(o) if o.status.success())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_autostart_path() -> Result<std::path::PathBuf, String> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| {
+                let mut p = std::path::PathBuf::from(h);
+                p.push(".config");
+                p
+            })
+        })
+        .ok_or_else(|| "Could not resolve XDG config directory".to_string())?;
+    Ok(config.join("autostart").join(LINUX_AUTOSTART_DESKTOP))
+}
+
+#[cfg(target_os = "linux")]
+fn set_linux_autostart(enabled: bool) -> Result<(), String> {
+    let path = linux_autostart_path()?;
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = exe.to_string_lossy();
+        // Quote + escape for Desktop Entry Exec keys.
+        let escaped = exe.replace('\\', "\\\\").replace('"', "\\\"");
+        let body = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Version=1.0\n\
+             Name=PeerChat\n\
+             Comment=PeerChat secure P2P messenger\n\
+             Exec=\"{escaped}\" --tray\n\
+             Terminal=false\n\
+             X-GNOME-Autostart-enabled=true\n\
+             Hidden=false\n"
+        );
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    } else if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_autostart_enabled() -> bool {
+    match linux_autostart_path() {
+        Ok(path) => path.is_file(),
+        Err(_) => false,
+    }
+}
+
+/// Enable/disable login autostart (launches with `--tray`).
+pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return set_windows_autostart(enabled);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return set_linux_autostart(enabled);
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = enabled;
+        Err("Autostart is not supported on this platform".into())
+    }
+}
+
+pub fn autostart_enabled() -> bool {
+    #[cfg(windows)]
+    {
+        return windows_autostart_enabled();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_autostart_enabled();
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        false
+    }
 }
 

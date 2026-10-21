@@ -6,10 +6,10 @@ import {
   IconButton,
   InputAdornment,
   Paper,
-  SvgIcon,
   Switch,
   TextField,
   Typography,
+  useTheme,
 } from "@mui/material";
 import ContentCopyIcon from "@mui/icons-material/ContentCopyRounded";
 import InfoRoundedIcon from "@mui/icons-material/InfoRounded";
@@ -19,6 +19,7 @@ import SecurityRoundedIcon from "@mui/icons-material/SecurityRounded";
 import LinkRoundedIcon from "@mui/icons-material/LinkRounded";
 import PaletteOutlinedIcon from "@mui/icons-material/PaletteOutlined";
 import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
+import PowerSettingsNewRoundedIcon from "@mui/icons-material/PowerSettingsNewRounded";
 import {
   isPermissionGranted,
   requestPermission,
@@ -26,17 +27,6 @@ import {
 import { exportPublic, fingerprintPublic, type Identity } from "../../crypto";
 import { peerApi, type Profile } from "../../peer";
 import { ThemeMode } from "../../theme";
-
-function WindowsLogo(props: any) {
-  return (
-    <SvgIcon {...props} viewBox="0 0 24 24">
-      <path
-        d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.401H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.951-1.801"
-        fill="currentColor"
-      />
-    </SvgIcon>
-  );
-}
 
 export function SettingsScreen(props: {
   profile: Profile;
@@ -46,6 +36,8 @@ export function SettingsScreen(props: {
   onNameUpdated: (p: Profile) => void;
 }) {
   const { mode, setMode } = useContext(ThemeMode);
+  const theme = useTheme();
+  const dark = theme.palette.mode === "dark";
   const [fp, setFp] = useState("");
   const [name, setName] = useState(props.profile.display_name);
   const [team, setTeam] = useState(props.profile.team || "");
@@ -59,6 +51,7 @@ export function SettingsScreen(props: {
   const [shellExt, setShellExt] = useState(false);
   const [shellBusy, setShellBusy] = useState(false);
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
+  const accent = dark ? "#38bdf8" : theme.palette.primary.main;
 
   useEffect(() => {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
@@ -78,8 +71,8 @@ export function SettingsScreen(props: {
       setAutostartOn(await peerApi.getAutostartEnabled());
       setStatus(
         enabled
-          ? "PeerChat will start in the tray when you sign in to Windows"
-          : "Start with Windows turned off"
+          ? "PeerChat will start in the tray when you sign in"
+          : "Start at login turned off"
       );
     } catch (err: any) {
       setStatus(err?.message || String(err));
@@ -144,19 +137,24 @@ export function SettingsScreen(props: {
   const cardSx = {
     p: 2.5,
     borderRadius: 3,
-    bgcolor: "#0d1527",
-    border: "1px solid rgba(255, 255, 255, 0.08)",
-    boxShadow: "0 4px 20px rgba(0, 0, 0, 0.2)",
+    bgcolor: "background.paper",
+    border: 1,
+    borderColor: "divider",
+    boxShadow: dark
+      ? "0 4px 20px rgba(0, 0, 0, 0.2)"
+      : "0 2px 12px rgba(20, 32, 28, 0.08)",
   };
 
   const inputSx = {
     "& .MuiOutlinedInput-root": {
-      bgcolor: "#070c18",
+      bgcolor: dark ? "#070c18" : "#F7FAF8",
       borderRadius: 2,
-      color: "#f8fafc",
-      "& fieldset": { borderColor: "rgba(255, 255, 255, 0.1)" },
-      "&:hover fieldset": { borderColor: "rgba(255, 255, 255, 0.2)" },
-      "&.Mui-focused fieldset": { borderColor: "#38bdf8" },
+      color: "text.primary",
+      "& fieldset": { borderColor: "divider" },
+      "&:hover fieldset": {
+        borderColor: dark ? "rgba(255, 255, 255, 0.2)" : "rgba(20, 32, 28, 0.25)",
+      },
+      "&.Mui-focused fieldset": { borderColor: accent },
     },
     "& .MuiInputBase-input": {
       fontSize: "0.875rem",
@@ -165,8 +163,28 @@ export function SettingsScreen(props: {
   };
 
   const switchSx = {
-    "& .MuiSwitch-switchBase.Mui-checked": { color: "#38bdf8" },
-    "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track": { bgcolor: "#0284c7" },
+    "& .MuiSwitch-switchBase.Mui-checked": { color: accent },
+    "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track": {
+      bgcolor: dark ? "#0284c7" : theme.palette.primary.main,
+    },
+  };
+
+  const titleColor = "text.primary";
+  const mutedColor = "text.secondary";
+  const bodyColor = "text.primary";
+  const iconBtnSx = {
+    color: mutedColor,
+    "&:hover": { color: titleColor },
+  };
+  const saveBtnSx = {
+    bgcolor: dark ? "#2563eb" : "primary.main",
+    color: dark ? undefined : "primary.contrastText",
+    "&:hover": { bgcolor: dark ? "#1d4ed8" : "primary.dark" },
+    borderRadius: 2,
+    px: 3,
+    py: 0.75,
+    fontWeight: 600,
+    textTransform: "none" as const,
   };
 
   return (
@@ -183,10 +201,10 @@ export function SettingsScreen(props: {
       {/* Header */}
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", mb: 3 }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 700, color: "#f8fafc", letterSpacing: "-0.02em" }}>
+          <Typography variant="h4" sx={{ fontWeight: 700, color: titleColor, letterSpacing: "-0.02em" }}>
             Settings
           </Typography>
-          <Typography variant="body2" sx={{ color: "#94a3b8", mt: 0.5 }}>
+          <Typography variant="body2" sx={{ color: mutedColor, mt: 0.5 }}>
             Configure PeerChat to work the way you want
           </Typography>
         </Box>
@@ -195,9 +213,10 @@ export function SettingsScreen(props: {
             px: 2,
             py: 0.6,
             borderRadius: "20px",
-            bgcolor: "rgba(30, 41, 59, 0.7)",
-            border: "1px solid rgba(255, 255, 255, 0.1)",
-            color: "#cbd5e1",
+            bgcolor: dark ? "rgba(30, 41, 59, 0.7)" : "rgba(20, 32, 28, 0.06)",
+            border: 1,
+            borderColor: "divider",
+            color: mutedColor,
             fontSize: "0.8125rem",
             fontWeight: 600,
             letterSpacing: "0.01em",
@@ -210,15 +229,15 @@ export function SettingsScreen(props: {
       {/* Top Banner Card: About */}
       <Paper sx={{ ...cardSx, mb: 2.5 }} elevation={0}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.25 }}>
-          <InfoRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
-          <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+          <InfoRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+          <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
             About
           </Typography>
         </Box>
-        <Typography sx={{ fontWeight: 700, fontSize: "0.9375rem", color: "#f1f5f9", mb: 0.5 }}>
+        <Typography sx={{ fontWeight: 700, fontSize: "0.9375rem", color: bodyColor, mb: 0.5 }}>
           PeerChat {props.version}
         </Typography>
-        <Typography sx={{ fontSize: "0.875rem", color: "#94a3b8", lineHeight: 1.5 }}>
+        <Typography sx={{ fontSize: "0.875rem", color: mutedColor, lineHeight: 1.5 }}>
           A lightweight, secure peer-to-peer messaging app for direct communication and file sharing over your network.
         </Typography>
       </Paper>
@@ -235,13 +254,13 @@ export function SettingsScreen(props: {
         {/* Row 1 Left: Notifications */}
         <Paper sx={cardSx} elevation={0}>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
-            <NotificationsNoneRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
-            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+            <NotificationsNoneRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
               Notifications
             </Typography>
           </Box>
           <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: "#f1f5f9" }}>
+            <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
               Desktop notifications for new messages
             </Typography>
             <Switch
@@ -251,7 +270,7 @@ export function SettingsScreen(props: {
               sx={switchSx}
             />
           </Box>
-          <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
+          <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
             Get desktop alerts for new messages. Muted chats stay silent.
           </Typography>
         </Paper>
@@ -259,14 +278,14 @@ export function SettingsScreen(props: {
         {/* Row 1 Right: Startup */}
         <Paper sx={cardSx} elevation={0}>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
-            <WindowsLogo sx={{ color: "#38bdf8", fontSize: 20 }} />
-            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+            <PowerSettingsNewRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
               Startup
             </Typography>
           </Box>
           <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: "#f1f5f9" }}>
-              Start with Windows (system tray)
+            <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
+              Start at login (system tray)
             </Typography>
             <Switch
               checked={autostartOn}
@@ -275,7 +294,7 @@ export function SettingsScreen(props: {
               sx={switchSx}
             />
           </Box>
-          <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
+          <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
             After you sign in, PeerChat runs in the tray so it can receive messages and show notifications. Open it from the tray icon.
           </Typography>
         </Paper>
@@ -283,13 +302,13 @@ export function SettingsScreen(props: {
         {/* Row 2 Left: Profile */}
         <Paper sx={cardSx} elevation={0}>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
-            <PersonOutlineRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
-            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+            <PersonOutlineRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
               Profile
             </Typography>
           </Box>
           <Box sx={{ mb: 1.5 }}>
-            <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", fontWeight: 500, mb: 0.75 }}>
+            <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
               Display name
             </Typography>
             <TextField
@@ -307,7 +326,7 @@ export function SettingsScreen(props: {
             />
           </Box>
           <Box sx={{ mb: 1.75 }}>
-            <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", fontWeight: 500, mb: 0.75 }}>
+            <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
               Team
             </Typography>
             <TextField
@@ -324,7 +343,7 @@ export function SettingsScreen(props: {
               }}
               sx={inputSx}
             />
-            <Typography sx={{ fontSize: "0.75rem", color: "#64748b", mt: 0.5 }}>
+            <Typography sx={{ fontSize: "0.75rem", color: mutedColor, mt: 0.5 }}>
               e.g. HMIS, Shakti
             </Typography>
           </Box>
@@ -337,16 +356,7 @@ export function SettingsScreen(props: {
                 team.trim() === (props.profile.team || "").trim())
             }
             onClick={saveName}
-            sx={{
-              bgcolor: "#2563eb",
-              "&:hover": { bgcolor: "#1d4ed8" },
-              borderRadius: 2,
-              px: 3,
-              py: 0.75,
-              fontWeight: 600,
-              textTransform: "none",
-              mb: 2,
-            }}
+            sx={{ ...saveBtnSx, mb: 2 }}
           >
             Save
           </Button>
@@ -356,16 +366,17 @@ export function SettingsScreen(props: {
               alignItems: "center",
               justifyContent: "space-between",
               pt: 1.5,
-              borderTop: "1px solid rgba(255,255,255,0.06)",
+              borderTop: 1,
+              borderColor: "divider",
             }}
           >
-            <Typography sx={{ fontFamily: "monospace", fontSize: "0.8125rem", color: "#94a3b8", wordBreak: "break-all" }}>
+            <Typography sx={{ fontFamily: "monospace", fontSize: "0.8125rem", color: mutedColor, wordBreak: "break-all" }}>
               {props.profile.id}
             </Typography>
             <IconButton
               size="small"
               onClick={() => copy("User id", props.profile.id)}
-              sx={{ color: "#94a3b8", "&:hover": { color: "#f8fafc" }, ml: 1 }}
+              sx={{ ...iconBtnSx, ml: 1 }}
             >
               <ContentCopyIcon sx={{ fontSize: 18 }} />
             </IconButton>
@@ -377,13 +388,13 @@ export function SettingsScreen(props: {
           {/* Security fingerprints */}
           <Paper sx={cardSx} elevation={0}>
             <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
-              <SecurityRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
-              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+              <SecurityRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
                 Security fingerprints
               </Typography>
             </Box>
             <Box sx={{ mb: 1.5 }}>
-              <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", fontWeight: 500, mb: 0.75 }}>
+              <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
                 Your key fingerprint
               </Typography>
               <TextField
@@ -398,7 +409,7 @@ export function SettingsScreen(props: {
                       <IconButton
                         size="small"
                         onClick={() => copy("Key fingerprint", keyFp)}
-                        sx={{ color: "#94a3b8", "&:hover": { color: "#f8fafc" } }}
+                        sx={iconBtnSx}
                       >
                         <ContentCopyIcon sx={{ fontSize: 18 }} />
                       </IconButton>
@@ -409,7 +420,7 @@ export function SettingsScreen(props: {
               />
             </Box>
             <Box>
-              <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", fontWeight: 500, mb: 0.75 }}>
+              <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
                 Your peer TLS fingerprint
               </Typography>
               <TextField
@@ -425,7 +436,7 @@ export function SettingsScreen(props: {
                         size="small"
                         disabled={!fp}
                         onClick={() => copy("TLS fingerprint", fp)}
-                        sx={{ color: "#94a3b8", "&:hover": { color: "#f8fafc" } }}
+                        sx={iconBtnSx}
                       >
                         <ContentCopyIcon sx={{ fontSize: 18 }} />
                       </IconButton>
@@ -440,13 +451,13 @@ export function SettingsScreen(props: {
           {/* Windows shell integration */}
           <Paper sx={cardSx} elevation={0}>
             <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
-              <LinkRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
-              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+              <LinkRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
                 Windows shell integration
               </Typography>
             </Box>
             <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: "#f1f5f9" }}>
+              <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
                 Add 'Share in PeerChat' to right-click menu
               </Typography>
               <Switch
@@ -477,7 +488,7 @@ export function SettingsScreen(props: {
                 sx={switchSx}
               />
             </Box>
-            <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
+            <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
               Add "Share in PeerChat" to the File Explorer right-click menu to share files easily.
             </Typography>
           </Paper>
@@ -486,13 +497,13 @@ export function SettingsScreen(props: {
         {/* Row 3 Left: Appearance */}
         <Paper sx={cardSx} elevation={0}>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
-            <PaletteOutlinedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
-            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+            <PaletteOutlinedIcon sx={{ color: accent, fontSize: 22 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
               Appearance
             </Typography>
           </Box>
           <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: "#f1f5f9" }}>
+            <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
               Light theme
             </Typography>
             <Switch
@@ -505,7 +516,7 @@ export function SettingsScreen(props: {
               sx={switchSx}
             />
           </Box>
-          <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
+          <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
             Dark theme is the default. Your choice is saved locally.
           </Typography>
         </Paper>
@@ -513,8 +524,8 @@ export function SettingsScreen(props: {
         {/* Row 3 Right: Downloads */}
         <Paper sx={cardSx} elevation={0}>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
-            <DownloadRoundedIcon sx={{ color: "#38bdf8", fontSize: 22 }} />
-            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: "#f8fafc" }}>
+            <DownloadRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+            <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
               Downloads
             </Typography>
           </Box>
@@ -544,21 +555,12 @@ export function SettingsScreen(props: {
                   .then(() => setStatus("Download folder saved"))
                   .catch((err: any) => setStatus(err?.message || String(err)));
               }}
-              sx={{
-                bgcolor: "#2563eb",
-                "&:hover": { bgcolor: "#1d4ed8" },
-                borderRadius: 2,
-                px: 3,
-                py: 0.75,
-                fontWeight: 600,
-                textTransform: "none",
-                flexShrink: 0,
-              }}
+              sx={{ ...saveBtnSx, flexShrink: 0 }}
             >
               Save
             </Button>
           </Box>
-          <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8", mt: 1 }}>
+          <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
             Received files land here. Leave blank to use the system Downloads folder.
           </Typography>
         </Paper>
@@ -573,12 +575,13 @@ export function SettingsScreen(props: {
           p: 1.5,
           mt: 2.5,
           borderRadius: 2,
-          bgcolor: "rgba(56, 189, 248, 0.05)",
-          border: "1px solid rgba(56, 189, 248, 0.2)",
+          bgcolor: dark ? "rgba(56, 189, 248, 0.05)" : "rgba(15, 107, 92, 0.06)",
+          border: 1,
+          borderColor: dark ? "rgba(56, 189, 248, 0.2)" : "rgba(15, 107, 92, 0.2)",
         }}
       >
-        <InfoRoundedIcon sx={{ color: "#38bdf8", fontSize: 20, flexShrink: 0 }} />
-        <Typography sx={{ fontSize: "0.8125rem", color: "#94a3b8" }}>
+        <InfoRoundedIcon sx={{ color: accent, fontSize: 20, flexShrink: 0 }} />
+        <Typography sx={{ fontSize: "0.8125rem", color: mutedColor }}>
           No central server — chats live in local SQLite and deliver when peers come online.
         </Typography>
       </Box>
