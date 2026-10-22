@@ -83,6 +83,13 @@ fn primary_monitor(monitors: &[MonitorMeta]) -> Option<MonitorMeta> {
 async fn open_overlay(app: &AppHandle, session_id: &str, mon: &MonitorMeta) -> Result<(), String> {
     destroy_overlay_wait(app).await;
     let url = WebviewUrl::App(format!("capture-overlay.html#{session_id}").into());
+    // Builder APIs take logical DIP sizes; convert from xcap physical pixels.
+    let scale = f64::from(mon.scale_factor).max(0.1);
+    let logical_w = mon.width as f64 / scale;
+    let logical_h = mon.height as f64 / scale;
+    let logical_x = mon.x as f64 / scale;
+    let logical_y = mon.y as f64 / scale;
+
     let mut builder = WebviewWindowBuilder::new(app, "capture-overlay", url)
         .title("PeerChat Screenshot")
         // Borderless monitor-sized window — not exclusive fullscreen (avoids GNOME Caffeine).
@@ -94,14 +101,8 @@ async fn open_overlay(app: &AppHandle, session_id: &str, mon: &MonitorMeta) -> R
         .focused(false)
         // Hidden until freeze image is painted (avoids white WebView flash).
         .visible(false)
-        .inner_size(Size::Physical(PhysicalSize {
-            width: mon.width,
-            height: mon.height,
-        }))
-        .position(Position::Physical(PhysicalPosition {
-            x: mon.x,
-            y: mon.y,
-        }))
+        .inner_size(logical_w, logical_h)
+        .position(logical_x, logical_y)
         .background_color(tauri::window::Color(0x12, 0x12, 0x14, 255));
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -113,9 +114,18 @@ async fn open_overlay(app: &AppHandle, session_id: &str, mon: &MonitorMeta) -> R
         builder = builder.no_redirection_bitmap(true);
     }
 
-    builder
+    let win = builder
         .build()
         .map_err(|e| format!("Could not open capture overlay: {e}"))?;
+    // Pin to exact physical monitor bounds (more reliable across DPI / multi-monitor).
+    let _ = win.set_size(Size::Physical(PhysicalSize {
+        width: mon.width,
+        height: mon.height,
+    }));
+    let _ = win.set_position(Position::Physical(PhysicalPosition {
+        x: mon.x,
+        y: mon.y,
+    }));
     Ok(())
 }
 
