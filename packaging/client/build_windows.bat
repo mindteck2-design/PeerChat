@@ -3,7 +3,7 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0..\..\app"
 set PATH=%USERPROFILE%\.cargo\bin;%PATH%
 
-set APPVER=0.4.3
+set APPVER=1.0.0
 for /f "usebackq tokens=2 delims=:," %%V in (`findstr /C:"\"version\"" package.json`) do (
   set APPVER=%%~V
   set APPVER=!APPVER: =!

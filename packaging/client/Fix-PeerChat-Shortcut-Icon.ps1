@@ -14,7 +14,11 @@ function Resolve-IconSource {
     $candidates += (Join-Path $PSScriptRoot "PeerChat.ico")
     $candidates += (Join-Path $PSScriptRoot "..\..\app\src-tauri\icons\peerchat-nsis.ico")
     $candidates += (Join-Path $PSScriptRoot "..\..\app\src-tauri\icons\icon.ico")
-    $candidates += (Join-Path $PSScriptRoot "..\..\dist\windows\PeerChat-Setup-0.4.3\PeerChat.ico")
+    $setupDirs = Get-ChildItem -Path (Join-Path $PSScriptRoot "..\..\dist\windows") -Directory -Filter "PeerChat-Setup-*" -ErrorAction SilentlyContinue |
+      Sort-Object Name -Descending
+    foreach ($d in $setupDirs) {
+      $candidates += (Join-Path $d.FullName "PeerChat.ico")
+    }
   }
   foreach ($c in $candidates) {
     if ($c -and (Test-Path $c)) { return (Resolve-Path $c).Path }

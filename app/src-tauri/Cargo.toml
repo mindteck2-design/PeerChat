@@ -1,6 +1,6 @@
 [package]
 name = "peerchat"
-version = "0.6.0"
+version = "1.0.0"
 description = "PeerChat secure P2P LAN messenger"
 authors = ["PeerChat"]
 edition = "2021"
