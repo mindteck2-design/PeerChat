@@ -422,9 +422,6 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
               </List>
             )}
             <Box
-              display="flex"
-              gap={0.5}
-              alignItems="flex-end"
               onDragOver={(e) => {
                 e.preventDefault();
               }}
@@ -434,49 +431,20 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                 if (files.length) stageFiles(files);
               }}
               sx={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 0.25,
                 border: "1px solid",
                 borderColor: "divider",
-                borderRadius: 999,
+                // Soft radius reads better than a tall pill when the field grows.
+                borderRadius: 3,
                 bgcolor: "action.hover",
-                px: 0.75,
-                py: 0.35,
+                px: 1,
+                pt: 0.75,
+                pb: 0.5,
+                minWidth: 0,
               }}
             >
-              <IconButton
-                aria-label="Emoji picker"
-                onClick={(e) => setEmojiAnchor(e.currentTarget)}
-                size="small"
-              >
-                <EmojiEmotionsIcon fontSize="small" />
-              </IconButton>
-              <Tooltip title="Attach files">
-                <span>
-                  <IconButton
-                    aria-label="Attach files"
-                    size="small"
-                    disabled={(!!outgoingFile && !outgoingFile.cancelled) || !!editingMessage}
-                    onClick={() => void pickAndStageFiles()}
-                  >
-                    <AttachFileIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-              <Tooltip title="Capture screenshot · Ctrl+Shift+S">
-                <span>
-                  <IconButton
-                    aria-label="Capture screenshot"
-                    size="small"
-                    disabled={
-                      (!!outgoingFile && !outgoingFile.cancelled) ||
-                      !!editingMessage ||
-                      typeof startScreenshotCapture !== "function"
-                    }
-                    onClick={() => void startScreenshotCapture?.()}
-                  >
-                    <ScreenshotMonitorIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
               {/* Fallback for browser preview when native dialog is unavailable */}
               <input
                 ref={filePickRef}
@@ -547,34 +515,99 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                     setReplyTo(null);
                   }
                 }}
-                sx={{
-                  mx: 0.5,
-                  "& .MuiInputBase-root": { fontSize: 14, py: 0.6 },
-                }}
-              />
-              <IconButton
-                color="primary"
-                disabled={
-                  (!!editingMessage && !text.trim()) ||
-                  (!text.trim() &&
-                    (!stagedFiles.length || (!!outgoingFile && !outgoingFile.cancelled)))
-                }
-                onClick={submitComposer}
-                aria-label={editingMessage ? "Save edit" : "Send"}
-                sx={{
-                  bgcolor: "primary.main",
-                  color: "primary.contrastText",
-                  width: 36,
-                  height: 36,
-                  "&:hover": { bgcolor: "primary.dark" },
-                  "&.Mui-disabled": {
-                    bgcolor: "action.disabledBackground",
-                    color: "action.disabled",
+                sx={(theme) => ({
+                  minWidth: 0,
+                  "& .MuiInputBase-root": {
+                    fontSize: 14,
+                    py: 0.35,
+                    alignItems: "flex-start",
                   },
-                }}
+                  "& textarea": {
+                    overflowY: "auto !important",
+                    // Thin themed scrollbar (avoids harsh system bar in the bubble).
+                    scrollbarWidth: "thin",
+                    scrollbarColor: `${theme.palette.action.disabled} transparent`,
+                    "&::-webkit-scrollbar": { width: 6 },
+                    "&::-webkit-scrollbar-track": { background: "transparent" },
+                    "&::-webkit-scrollbar-thumb": {
+                      backgroundColor: theme.palette.action.disabled,
+                      borderRadius: 999,
+                    },
+                    "&::-webkit-scrollbar-thumb:hover": {
+                      backgroundColor: theme.palette.action.active,
+                    },
+                  },
+                })}
+              />
+              <Box
+                display="flex"
+                alignItems="center"
+                justifyContent="space-between"
+                gap={0.5}
+                sx={{ minHeight: 36 }}
               >
-                {editingMessage ? <EditIcon fontSize="small" /> : <SendIcon fontSize="small" />}
-              </IconButton>
+                <Stack direction="row" spacing={0.15} alignItems="center">
+                  <IconButton
+                    aria-label="Emoji picker"
+                    onClick={(e) => setEmojiAnchor(e.currentTarget)}
+                    size="small"
+                  >
+                    <EmojiEmotionsIcon fontSize="small" />
+                  </IconButton>
+                  <Tooltip title="Attach files">
+                    <span>
+                      <IconButton
+                        aria-label="Attach files"
+                        size="small"
+                        disabled={(!!outgoingFile && !outgoingFile.cancelled) || !!editingMessage}
+                        onClick={() => void pickAndStageFiles()}
+                      >
+                        <AttachFileIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title="Capture screenshot · Ctrl+Shift+S">
+                    <span>
+                      <IconButton
+                        aria-label="Capture screenshot"
+                        size="small"
+                        disabled={
+                          (!!outgoingFile && !outgoingFile.cancelled) ||
+                          !!editingMessage ||
+                          typeof startScreenshotCapture !== "function"
+                        }
+                        onClick={() => void startScreenshotCapture?.()}
+                      >
+                        <ScreenshotMonitorIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                </Stack>
+                <IconButton
+                  color="primary"
+                  disabled={
+                    (!!editingMessage && !text.trim()) ||
+                    (!text.trim() &&
+                      (!stagedFiles.length || (!!outgoingFile && !outgoingFile.cancelled)))
+                  }
+                  onClick={submitComposer}
+                  aria-label={editingMessage ? "Save edit" : "Send"}
+                  sx={{
+                    bgcolor: "primary.main",
+                    color: "primary.contrastText",
+                    width: 36,
+                    height: 36,
+                    flexShrink: 0,
+                    "&:hover": { bgcolor: "primary.dark" },
+                    "&.Mui-disabled": {
+                      bgcolor: "action.disabledBackground",
+                      color: "action.disabled",
+                    },
+                  }}
+                >
+                  {editingMessage ? <EditIcon fontSize="small" /> : <SendIcon fontSize="small" />}
+                </IconButton>
+              </Box>
             </Box>
           </Paper>
         )}
