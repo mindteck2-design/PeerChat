@@ -327,6 +327,7 @@ pub fn run() {
             app_log_path,
             append_app_log,
             begin_screenshot_session,
+            capture_overlay_mode,
             show_capture_overlay,
             complete_region_capture,
             complete_fullscreen_capture,

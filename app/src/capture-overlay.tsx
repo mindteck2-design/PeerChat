@@ -2,6 +2,8 @@ import { createRoot } from "react-dom/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
+type OverlayMode = "live" | "freeze";
+
 function sessionFromUrl(): string {
   const hash = (window.location.hash || "").replace(/^#/, "").trim();
   if (hash) return hash;
@@ -14,6 +16,7 @@ function CaptureOverlayApp() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
+  const [mode, setMode] = useState<OverlayMode | null>(null);
   const [freezeUrl, setFreezeUrl] = useState<string | null>(null);
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const dragging = useRef(false);
@@ -28,6 +31,17 @@ function CaptureOverlayApp() {
     let cancelled = false;
     (async () => {
       try {
+        const overlayMode = (await invoke<string>("capture_overlay_mode")) as OverlayMode;
+        if (cancelled) return;
+        setMode(overlayMode === "live" ? "live" : "freeze");
+
+        if (overlayMode === "live") {
+          // Live dim over real desktop — no freeze JPEG backdrop.
+          setReady(true);
+          await invoke("show_capture_overlay");
+          return;
+        }
+
         const prev = await invoke<{
           mime: string;
           data_b64: string;
@@ -37,7 +51,6 @@ function CaptureOverlayApp() {
         const url = URL.createObjectURL(new Blob([bin], { type: prev.mime || "image/jpeg" }));
         freezeUrlRef.current = url;
         setFreezeUrl(url);
-        // Wait a frame so the image paints before we show the native window.
         await new Promise<void>((r) => {
           const img = new Image();
           img.onload = () => r();
@@ -132,14 +145,19 @@ function CaptureOverlayApp() {
       }
     : null;
 
+  const isFreeze = mode === "freeze";
+  const rootBackground = isFreeze
+    ? freezeUrl
+      ? `#121214 url(${freezeUrl}) 0 0 / 100% 100% no-repeat`
+      : "#121214"
+    : "transparent";
+
   return (
     <div
       style={{
         position: "fixed",
         inset: 0,
-        background: freezeUrl
-          ? `#121214 url(${freezeUrl}) 0 0 / 100% 100% no-repeat`
-          : "#121214",
+        background: rootBackground,
         cursor: busy || !ready ? "wait" : "crosshair",
         pointerEvents: busy || !ready ? "none" : "auto",
       }}
@@ -168,7 +186,7 @@ function CaptureOverlayApp() {
         void finishRegion(ox, oy, e.clientX, e.clientY);
       }}
     >
-      {/* Dim the freeze so the selection rectangle reads clearly */}
+      {/* Dim: live desktop (Windows) or freeze image (Linux) */}
       <div
         style={{
           position: "absolute",
@@ -186,7 +204,7 @@ function CaptureOverlayApp() {
             top: sel.top,
             width: sel.width,
             height: sel.height,
-            border: "2px dashed #fff",
+            border: "1.5px solid #fff",
             boxShadow: "0 0 0 9999px rgba(0,0,0,0.45)",
             pointerEvents: "none",
             zIndex: 2,
@@ -198,18 +216,20 @@ function CaptureOverlayApp() {
         style={{
           position: "fixed",
           left: "50%",
-          top: 24,
+          top: 20,
           transform: "translateX(-50%)",
-          color: "#fff",
+          color: "rgba(255,255,255,0.92)",
           fontFamily: "system-ui, sans-serif",
-          fontSize: 14,
-          fontWeight: 600,
-          textShadow: "0 1px 3px rgba(0,0,0,.6)",
+          fontSize: 13,
+          fontWeight: 500,
+          letterSpacing: "0.01em",
+          textShadow: "0 1px 2px rgba(0,0,0,.75), 0 0 8px rgba(0,0,0,.4)",
           pointerEvents: "none",
           zIndex: 10,
+          whiteSpace: "nowrap",
         }}
       >
-        {busy ? "Capturing…" : ready ? "Drag to select an area · Esc to cancel" : "Preparing…"}
+        {busy ? "Capturing…" : ready ? "Drag to select · Esc to cancel" : "Preparing…"}
       </div>
 
       <button
@@ -222,17 +242,20 @@ function CaptureOverlayApp() {
         onMouseDown={(e) => e.stopPropagation()}
         style={{
           position: "fixed",
-          right: 20,
-          bottom: 20,
+          left: "50%",
+          top: 48,
+          transform: "translateX(-50%)",
           zIndex: 11,
-          border: 0,
-          borderRadius: 8,
-          padding: "10px 14px",
-          background: busy || !ready ? "#666" : "#5b4dff",
-          color: "#fff",
-          fontWeight: 700,
+          border: "1px solid rgba(255,255,255,0.55)",
+          borderRadius: 6,
+          padding: "6px 12px",
+          background: busy || !ready ? "rgba(40,40,40,0.55)" : "rgba(20,20,22,0.55)",
+          color: "rgba(255,255,255,0.95)",
+          fontWeight: 600,
+          fontSize: 12,
           cursor: busy || !ready ? "wait" : "pointer",
           fontFamily: "system-ui, sans-serif",
+          backdropFilter: "blur(6px)",
         }}
       >
         Full screen
