@@ -16,6 +16,7 @@ import RedoIcon from "@mui/icons-material/Redo";
 import TextFieldsIcon from "@mui/icons-material/TextFields";
 import UndoIcon from "@mui/icons-material/Undo";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import CloseIcon from "@mui/icons-material/Close";
 import { peerApi } from "../../peer";
 import {
   ACCENT, COLORS, type Annotation, type Point, type Tool, newId, normalizeRect,
@@ -524,6 +525,25 @@ export function ScreenshotAnnotator({ open, captureId, onCancel, onDone }: Props
               <DeleteOutlineIcon fontSize="small" />
             </IconButton>
           </span>
+        </Tooltip>
+        <Box flex={1} />
+        <Tooltip title="Close annotation" arrow>
+          <IconButton
+            size="small"
+            aria-label="Close annotation"
+            onClick={() => {
+              if (textEdit) cancelTextEdit();
+              onCancel();
+            }}
+            sx={{
+              ...toolBtnSx(false),
+              ml: 0.5,
+              color: "text.secondary",
+              "&:hover": { bgcolor: "action.hover", color: "text.primary" },
+            }}
+          >
+            <CloseIcon fontSize="small" />
+          </IconButton>
         </Tooltip>
       </Box>
 
