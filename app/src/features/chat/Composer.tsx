@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { useLayoutEffect, useState } from "react";
 import {
   Box, Button, IconButton, List, ListItemButton, ListItemText, Paper,
   Stack, TextField, Typography,
@@ -206,6 +207,100 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
     text,
     toggleBlockPeer,
   } = vm;
+
+  // Single-line → horizontal pill; multi-line → softer radius + toolbar under text.
+  // Hysteresis avoids layout flicker when tools moving changes textarea width/wrap.
+  const [multiline, setMultiline] = useState(false);
+  useLayoutEffect(() => {
+    const el = composerRef?.current as HTMLTextAreaElement | null;
+    if (!el) {
+      setMultiline(false);
+      return;
+    }
+    if ((text || "").includes("\n")) {
+      setMultiline(true);
+      return;
+    }
+    const style = window.getComputedStyle(el);
+    const lineHeight = parseFloat(style.lineHeight) || 20;
+    const padY =
+      (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+    const singleH = lineHeight + padY + 2;
+    const tall = el.scrollHeight > singleH * 1.4;
+    const clearlySingle = el.scrollHeight <= singleH * 1.1;
+    setMultiline((prev) => {
+      if (prev) return !clearlySingle;
+      return tall;
+    });
+  }, [text, composerRef]);
+
+  const toolButtons = (
+    <Stack direction="row" spacing={0.15} alignItems="center" sx={{ flexShrink: 0 }}>
+      <IconButton
+        aria-label="Emoji picker"
+        onClick={(e) => setEmojiAnchor(e.currentTarget)}
+        size="small"
+      >
+        <EmojiEmotionsIcon fontSize="small" />
+      </IconButton>
+      <Tooltip title="Attach files">
+        <span>
+          <IconButton
+            aria-label="Attach files"
+            size="small"
+            disabled={(!!outgoingFile && !outgoingFile.cancelled) || !!editingMessage}
+            onClick={() => void pickAndStageFiles()}
+          >
+            <AttachFileIcon fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
+      <Tooltip title="Capture screenshot · Ctrl+Shift+S">
+        <span>
+          <IconButton
+            aria-label="Capture screenshot"
+            size="small"
+            disabled={
+              (!!outgoingFile && !outgoingFile.cancelled) ||
+              !!editingMessage ||
+              typeof startScreenshotCapture !== "function"
+            }
+            onClick={() => void startScreenshotCapture?.()}
+          >
+            <ScreenshotMonitorIcon fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
+    </Stack>
+  );
+
+  const sendButton = (
+    <IconButton
+      color="primary"
+      disabled={
+        (!!editingMessage && !text.trim()) ||
+        (!text.trim() &&
+          (!stagedFiles.length || (!!outgoingFile && !outgoingFile.cancelled)))
+      }
+      onClick={submitComposer}
+      aria-label={editingMessage ? "Save edit" : "Send"}
+      sx={{
+        bgcolor: "primary.main",
+        color: "primary.contrastText",
+        width: 36,
+        height: 36,
+        flexShrink: 0,
+        "&:hover": { bgcolor: "primary.dark" },
+        "&.Mui-disabled": {
+          bgcolor: "action.disabledBackground",
+          color: "action.disabled",
+        },
+      }}
+    >
+      {editingMessage ? <EditIcon fontSize="small" /> : <SendIcon fontSize="small" />}
+    </IconButton>
+  );
+
   return (
     <>
         {active && inGroup && isAnnounceBoard && (
@@ -432,17 +527,17 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
               }}
               sx={{
                 display: "flex",
-                flexDirection: "column",
-                gap: 0.25,
+                flexDirection: multiline ? "column" : "row",
+                alignItems: multiline ? "stretch" : "center",
+                gap: multiline ? 0.35 : 0.35,
                 border: "1px solid",
                 borderColor: "divider",
-                // Soft radius reads better than a tall pill when the field grows.
-                borderRadius: 3,
+                borderRadius: multiline ? 2 : 999,
                 bgcolor: "action.hover",
-                px: 1,
-                pt: 0.75,
-                pb: 0.5,
+                px: multiline ? 1 : 0.75,
+                py: multiline ? 0.75 : 0.35,
                 minWidth: 0,
+                transition: "border-radius 120ms ease",
               }}
             >
               {/* Fallback for browser preview when native dialog is unavailable */}
@@ -458,6 +553,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   e.target.value = "";
                 }}
               />
+              {!multiline && toolButtons}
               <TextField
                 inputRef={composerRef}
                 fullWidth
@@ -517,14 +613,15 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                 }}
                 sx={(theme) => ({
                   minWidth: 0,
+                  flex: 1,
+                  mx: multiline ? 0 : 0.35,
                   "& .MuiInputBase-root": {
                     fontSize: 14,
-                    py: 0.35,
+                    py: multiline ? 0.35 : 0.45,
                     alignItems: "flex-start",
                   },
                   "& textarea": {
                     overflowY: "auto !important",
-                    // Thin themed scrollbar (avoids harsh system bar in the bubble).
                     scrollbarWidth: "thin",
                     scrollbarColor: `${theme.palette.action.disabled} transparent`,
                     "&::-webkit-scrollbar": { width: 6 },
@@ -539,75 +636,20 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   },
                 })}
               />
-              <Box
-                display="flex"
-                alignItems="center"
-                justifyContent="space-between"
-                gap={0.5}
-                sx={{ minHeight: 36 }}
-              >
-                <Stack direction="row" spacing={0.15} alignItems="center">
-                  <IconButton
-                    aria-label="Emoji picker"
-                    onClick={(e) => setEmojiAnchor(e.currentTarget)}
-                    size="small"
-                  >
-                    <EmojiEmotionsIcon fontSize="small" />
-                  </IconButton>
-                  <Tooltip title="Attach files">
-                    <span>
-                      <IconButton
-                        aria-label="Attach files"
-                        size="small"
-                        disabled={(!!outgoingFile && !outgoingFile.cancelled) || !!editingMessage}
-                        onClick={() => void pickAndStageFiles()}
-                      >
-                        <AttachFileIcon fontSize="small" />
-                      </IconButton>
-                    </span>
-                  </Tooltip>
-                  <Tooltip title="Capture screenshot · Ctrl+Shift+S">
-                    <span>
-                      <IconButton
-                        aria-label="Capture screenshot"
-                        size="small"
-                        disabled={
-                          (!!outgoingFile && !outgoingFile.cancelled) ||
-                          !!editingMessage ||
-                          typeof startScreenshotCapture !== "function"
-                        }
-                        onClick={() => void startScreenshotCapture?.()}
-                      >
-                        <ScreenshotMonitorIcon fontSize="small" />
-                      </IconButton>
-                    </span>
-                  </Tooltip>
-                </Stack>
-                <IconButton
-                  color="primary"
-                  disabled={
-                    (!!editingMessage && !text.trim()) ||
-                    (!text.trim() &&
-                      (!stagedFiles.length || (!!outgoingFile && !outgoingFile.cancelled)))
-                  }
-                  onClick={submitComposer}
-                  aria-label={editingMessage ? "Save edit" : "Send"}
-                  sx={{
-                    bgcolor: "primary.main",
-                    color: "primary.contrastText",
-                    width: 36,
-                    height: 36,
-                    flexShrink: 0,
-                    "&:hover": { bgcolor: "primary.dark" },
-                    "&.Mui-disabled": {
-                      bgcolor: "action.disabledBackground",
-                      color: "action.disabled",
-                    },
-                  }}
+              {multiline ? (
+                <Box
+                  display="flex"
+                  alignItems="center"
+                  justifyContent="space-between"
+                  gap={0.5}
+                  sx={{ minHeight: 36 }}
                 >
-                  {editingMessage ? <EditIcon fontSize="small" /> : <SendIcon fontSize="small" />}
-                </IconButton>
-              </Box>
+                  {toolButtons}
+                  {sendButton}
+                </Box>
+              ) : (
+                sendButton
+              )}
             </Box>
           </Paper>
         )}
