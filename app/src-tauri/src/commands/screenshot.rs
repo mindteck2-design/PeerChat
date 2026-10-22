@@ -1,14 +1,21 @@
 //! Screen capture + temporary PNG lifecycle for Screenshot & Annotate.
-//! Flow: hide main → selection overlay → close overlay → live capture region → annotate.
+//! Flow: hide main → freeze desktop → selection overlay on freeze → crop → annotate.
+//!
+//! Freeze-frame (not a live transparent overlay) so Linux WebKitGTK still shows the
+//! desktop, and we avoid exclusive fullscreen which triggers GNOME Caffeine toasts.
 
 use crate::runtime::bootstrap::show_main_window;
 use crate::state::AppState;
 use base64::Engine;
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage};
 use serde::Serialize;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, State, WebviewUrl,
+    WebviewWindowBuilder,
+};
 use uuid::Uuid;
 
 const CAPTURES_DIR: &str = "captures";
@@ -32,6 +39,10 @@ fn capture_path(dir: &Path, id: &str, suffix: &str) -> PathBuf {
     dir.join(format!("{id}{suffix}.png"))
 }
 
+fn freeze_path(dir: &Path, session_id: &str) -> PathBuf {
+    dir.join(format!("{session_id}-freeze.png"))
+}
+
 fn hide_main(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
@@ -40,7 +51,8 @@ fn hide_main(app: &AppHandle) {
 
 fn destroy_overlay(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("capture-overlay") {
-        // destroy removes the label so a new overlay can be created immediately.
+        // Hide first so destroy does not flash a white webview frame.
+        let _ = win.hide();
         let _ = win.destroy();
     }
 }
@@ -54,24 +66,53 @@ async fn destroy_overlay_wait(app: &AppHandle) {
         tokio::time::sleep(Duration::from_millis(25)).await;
         destroy_overlay(app);
     }
-    // Let the compositor clear the overlay before a live capture.
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    tokio::time::sleep(Duration::from_millis(40)).await;
 }
 
-async fn open_overlay(app: &AppHandle, session_id: &str) -> Result<(), String> {
+fn primary_monitor(monitors: &[MonitorMeta]) -> Option<MonitorMeta> {
+    monitors
+        .iter()
+        .find(|m| m.is_primary)
+        .cloned()
+        .or_else(|| {
+            monitors.iter().max_by_key(|m| m.width.saturating_mul(m.height)).cloned()
+        })
+        .or_else(|| monitors.first().cloned())
+}
+
+async fn open_overlay(app: &AppHandle, session_id: &str, mon: &MonitorMeta) -> Result<(), String> {
     destroy_overlay_wait(app).await;
     let url = WebviewUrl::App(format!("capture-overlay.html#{session_id}").into());
-    let builder = WebviewWindowBuilder::new(app, "capture-overlay", url)
+    let mut builder = WebviewWindowBuilder::new(app, "capture-overlay", url)
         .title("PeerChat Screenshot")
-        .fullscreen(true)
+        // Borderless monitor-sized window — not exclusive fullscreen (avoids GNOME Caffeine).
+        .fullscreen(false)
         .decorations(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
-        .focused(true)
-        .visible(true);
+        .focused(false)
+        // Hidden until freeze image is painted (avoids white WebView flash).
+        .visible(false)
+        .inner_size(Size::Physical(PhysicalSize {
+            width: mon.width,
+            height: mon.height,
+        }))
+        .position(Position::Physical(PhysicalPosition {
+            x: mon.x,
+            y: mon.y,
+        }))
+        .background_color(tauri::window::Color(0x12, 0x12, 0x14, 255));
+
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let builder = builder.transparent(true);
+    {
+        builder = builder.transparent(false);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.no_redirection_bitmap(true);
+    }
+
     builder
         .build()
         .map_err(|e| format!("Could not open capture overlay: {e}"))?;
@@ -109,41 +150,6 @@ fn list_monitor_meta() -> Result<Vec<MonitorMeta>, String> {
         });
     }
     Ok(out)
-}
-
-/// Map overlay CSS viewport selection → physical pixels on the monitor the
-/// fullscreen overlay is covering (primary, or best size match).
-fn map_overlay_selection_to_physical(
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    view_w: f64,
-    view_h: f64,
-) -> Result<(i32, i32, i32, i32), String> {
-    if view_w < 1.0 || view_h < 1.0 {
-        return Err("Invalid overlay viewport size".into());
-    }
-    let monitors = list_monitor_meta()?;
-    let mon = monitors
-        .iter()
-        .find(|m| m.is_primary)
-        .or_else(|| {
-            monitors.iter().min_by(|a, b| {
-                let da = ((a.width as f64) - view_w).abs() + ((a.height as f64) - view_h).abs();
-                let db = ((b.width as f64) - view_w).abs() + ((b.height as f64) - view_h).abs();
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            })
-        })
-        .cloned()
-        .or_else(|| monitors.first().cloned())
-        .ok_or_else(|| "No monitors found for screen capture".to_string())?;
-
-    let px = mon.x + ((x / view_w) * mon.width as f64).round() as i32;
-    let py = mon.y + ((y / view_h) * mon.height as f64).round() as i32;
-    let pw = ((w / view_w) * mon.width as f64).round() as i32;
-    let ph = ((h / view_h) * mon.height as f64).round() as i32;
-    Ok((px, py, pw, ph))
 }
 
 /// Capture a rectangle in physical screen coordinates (xcap space).
@@ -198,6 +204,22 @@ fn capture_screen_region(x: i32, y: i32, w: i32, h: i32) -> Result<RgbaImage, St
     Ok(canvas)
 }
 
+fn virtual_desktop_bounds(monitors: &[MonitorMeta]) -> (i32, i32, i32, i32) {
+    let min_x = monitors.iter().map(|m| m.x).min().unwrap_or(0);
+    let min_y = monitors.iter().map(|m| m.y).min().unwrap_or(0);
+    let max_x = monitors
+        .iter()
+        .map(|m| m.x + m.width as i32)
+        .max()
+        .unwrap_or(0);
+    let max_y = monitors
+        .iter()
+        .map(|m| m.y + m.height as i32)
+        .max()
+        .unwrap_or(0);
+    (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
 fn write_capture_png(dir: &Path, image: &RgbaImage) -> Result<String, String> {
     let capture_id = Uuid::new_v4().to_string();
     let path = capture_path(dir, &capture_id, "");
@@ -207,8 +229,90 @@ fn write_capture_png(dir: &Path, image: &RgbaImage) -> Result<String, String> {
     Ok(capture_id)
 }
 
-fn cleanup_session_marker(dir: &Path, session_id: &str) {
+fn cleanup_session_files(dir: &Path, session_id: &str) {
     let _ = std::fs::remove_file(dir.join(format!("{session_id}.session")));
+    let _ = std::fs::remove_file(freeze_path(dir, session_id));
+}
+
+fn load_freeze(dir: &Path, session_id: &str) -> Result<RgbaImage, String> {
+    let path = freeze_path(dir, session_id);
+    let img = image::open(&path).map_err(|_| "Desktop freeze missing — try again".to_string())?;
+    Ok(img.to_rgba8())
+}
+
+/// Crop from the freeze image using physical desktop coordinates.
+fn crop_freeze_region(
+    freeze: &RgbaImage,
+    monitors: &[MonitorMeta],
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Result<RgbaImage, String> {
+    if w < 2 || h < 2 {
+        return Err("Selection too small — drag a larger area".into());
+    }
+    let (vx, vy, vw, vh) = virtual_desktop_bounds(monitors);
+    if freeze.width() != vw as u32 || freeze.height() != vh as u32 {
+        // Fallback: treat freeze as origin-aligned if size drifted.
+        let sx = x.saturating_sub(0).max(0) as u32;
+        let sy = y.saturating_sub(0).max(0) as u32;
+        let cw = (w as u32).min(freeze.width().saturating_sub(sx));
+        let ch = (h as u32).min(freeze.height().saturating_sub(sy));
+        if cw < 2 || ch < 2 {
+            return Err("Selection too small — drag a larger area".into());
+        }
+        return Ok(image::imageops::crop_imm(freeze, sx, sy, cw, ch).to_image());
+    }
+    let sx = (x - vx).max(0) as u32;
+    let sy = (y - vy).max(0) as u32;
+    let cw = (w as u32).min(freeze.width().saturating_sub(sx));
+    let ch = (h as u32).min(freeze.height().saturating_sub(sy));
+    if cw < 2 || ch < 2 {
+        return Err("Selection too small — drag a larger area".into());
+    }
+    Ok(image::imageops::crop_imm(freeze, sx, sy, cw, ch).to_image())
+}
+
+/// Map overlay CSS viewport selection → physical pixels on the monitor the
+/// overlay is covering (primary).
+fn map_overlay_selection_to_physical(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    view_w: f64,
+    view_h: f64,
+    mon: &MonitorMeta,
+) -> Result<(i32, i32, i32, i32), String> {
+    if view_w < 1.0 || view_h < 1.0 {
+        return Err("Invalid overlay viewport size".into());
+    }
+    let px = mon.x + ((x / view_w) * mon.width as f64).round() as i32;
+    let py = mon.y + ((y / view_h) * mon.height as f64).round() as i32;
+    let pw = ((w / view_w) * mon.width as f64).round() as i32;
+    let ph = ((h / view_h) * mon.height as f64).round() as i32;
+    Ok((px, py, pw, ph))
+}
+
+fn encode_jpeg_b64(img: &RgbaImage, quality: u8) -> Result<(String, usize), String> {
+    let rgb = DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+    let mut buf = Cursor::new(Vec::new());
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
+    enc
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| format!("Failed to encode freeze preview: {e}"))?;
+    let bytes = buf.into_inner();
+    let len = bytes.len();
+    Ok((
+        base64::engine::general_purpose::STANDARD.encode(&bytes),
+        len,
+    ))
 }
 
 #[tauri::command]
@@ -220,25 +324,63 @@ pub async fn begin_screenshot_session(
     let session_id = Uuid::new_v4().to_string();
 
     hide_main(&app);
-    tokio::time::sleep(Duration::from_millis(180)).await;
+    // Let the main window leave the compositor before freezing the desktop.
+    tokio::time::sleep(Duration::from_millis(220)).await;
 
-    // Marker so cancel can validate the session id.
     let _ = std::fs::write(dir.join(format!("{session_id}.session")), b"1");
 
-    // Probe monitors early so we fail before the overlay if capture is unavailable.
-    if let Err(err) = list_monitor_meta() {
-        cleanup_session_marker(&dir, &session_id);
+    let monitors = match list_monitor_meta() {
+        Ok(m) => m,
+        Err(err) => {
+            cleanup_session_files(&dir, &session_id);
+            show_main_window(&app);
+            return Err(err);
+        }
+    };
+    let primary = match primary_monitor(&monitors) {
+        Some(m) => m,
+        None => {
+            cleanup_session_files(&dir, &session_id);
+            show_main_window(&app);
+            return Err("No monitors found for screen capture".into());
+        }
+    };
+
+    let (vx, vy, vw, vh) = virtual_desktop_bounds(&monitors);
+    let freeze = match capture_screen_region(vx, vy, vw, vh) {
+        Ok(i) => i,
+        Err(e) => {
+            cleanup_session_files(&dir, &session_id);
+            show_main_window(&app);
+            return Err(e);
+        }
+    };
+    if let Err(e) = DynamicImage::ImageRgba8(freeze)
+        .save(freeze_path(&dir, &session_id))
+        .map_err(|e| format!("Failed to save desktop freeze: {e}"))
+    {
+        cleanup_session_files(&dir, &session_id);
         show_main_window(&app);
-        return Err(err);
+        return Err(e);
     }
 
-    // open_overlay destroys any leftover webview label before creating a new one.
-    if let Err(err) = open_overlay(&app, &session_id).await {
-        cleanup_session_marker(&dir, &session_id);
+    if let Err(err) = open_overlay(&app, &session_id, &primary).await {
+        cleanup_session_files(&dir, &session_id);
         show_main_window(&app);
         return Err(err);
     }
     Ok(serde_json::json!({ "sessionId": session_id }))
+}
+
+/// Overlay calls this after the freeze image is painted so we never flash a blank webview.
+#[tauri::command]
+pub async fn show_capture_overlay(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("capture-overlay") {
+        let _ = win.set_always_on_top(true);
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -260,36 +402,68 @@ pub async fn complete_region_capture(
     }
     let dir = captures_dir(&state)?;
 
-    // Close overlay FIRST so it is not in the screenshot.
-    destroy_overlay_wait(&app).await;
+    let monitors = match list_monitor_meta() {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = destroy_overlay_wait(&app).await;
+            cleanup_session_files(&dir, &session_id);
+            show_main_window(&app);
+            return Err(e);
+        }
+    };
+    let primary = match primary_monitor(&monitors) {
+        Some(m) => m,
+        None => {
+            let _ = destroy_overlay_wait(&app).await;
+            cleanup_session_files(&dir, &session_id);
+            show_main_window(&app);
+            return Err("No monitors found for screen capture".into());
+        }
+    };
 
     let (px, py, pw, ph) =
-        match map_overlay_selection_to_physical(x, y, width, height, view_width, view_height) {
+        match map_overlay_selection_to_physical(x, y, width, height, view_width, view_height, &primary)
+        {
             Ok(r) => r,
             Err(e) => {
-                cleanup_session_marker(&dir, &session_id);
+                let _ = destroy_overlay_wait(&app).await;
+                cleanup_session_files(&dir, &session_id);
                 show_main_window(&app);
                 return Err(e);
             }
         };
 
-    let img = match capture_screen_region(px, py, pw, ph) {
+    let freeze = match load_freeze(&dir, &session_id) {
         Ok(i) => i,
         Err(e) => {
-            cleanup_session_marker(&dir, &session_id);
+            let _ = destroy_overlay_wait(&app).await;
+            cleanup_session_files(&dir, &session_id);
             show_main_window(&app);
             return Err(e);
         }
     };
+    let img = match crop_freeze_region(&freeze, &monitors, px, py, pw, ph) {
+        Ok(i) => i,
+        Err(e) => {
+            let _ = destroy_overlay_wait(&app).await;
+            cleanup_session_files(&dir, &session_id);
+            show_main_window(&app);
+            return Err(e);
+        }
+    };
+
+    // Crop from freeze first, then tear down overlay (no live re-capture → no white flash gap).
+    destroy_overlay_wait(&app).await;
+
     let capture_id = match write_capture_png(&dir, &img) {
         Ok(id) => id,
         Err(e) => {
-            cleanup_session_marker(&dir, &session_id);
+            cleanup_session_files(&dir, &session_id);
             show_main_window(&app);
             return Err(e);
         }
     };
-    cleanup_session_marker(&dir, &session_id);
+    cleanup_session_files(&dir, &session_id);
     show_main_window(&app);
     let _ = app.emit(
         "screenshot-captured",
@@ -310,46 +484,28 @@ pub async fn complete_fullscreen_capture(
         return Err("Invalid capture session".into());
     }
     let dir = captures_dir(&state)?;
-    destroy_overlay_wait(&app).await;
 
-    let monitors = match list_monitor_meta() {
-        Ok(m) => m,
-        Err(e) => {
-            cleanup_session_marker(&dir, &session_id);
-            show_main_window(&app);
-            return Err(e);
-        }
-    };
-    let min_x = monitors.iter().map(|m| m.x).min().unwrap_or(0);
-    let min_y = monitors.iter().map(|m| m.y).min().unwrap_or(0);
-    let max_x = monitors
-        .iter()
-        .map(|m| m.x + m.width as i32)
-        .max()
-        .unwrap_or(0);
-    let max_y = monitors
-        .iter()
-        .map(|m| m.y + m.height as i32)
-        .max()
-        .unwrap_or(0);
-
-    let img = match capture_screen_region(min_x, min_y, max_x - min_x, max_y - min_y) {
+    let freeze = match load_freeze(&dir, &session_id) {
         Ok(i) => i,
         Err(e) => {
-            cleanup_session_marker(&dir, &session_id);
+            let _ = destroy_overlay_wait(&app).await;
+            cleanup_session_files(&dir, &session_id);
             show_main_window(&app);
             return Err(e);
         }
     };
-    let capture_id = match write_capture_png(&dir, &img) {
+
+    destroy_overlay_wait(&app).await;
+
+    let capture_id = match write_capture_png(&dir, &freeze) {
         Ok(id) => id,
         Err(e) => {
-            cleanup_session_marker(&dir, &session_id);
+            cleanup_session_files(&dir, &session_id);
             show_main_window(&app);
             return Err(e);
         }
     };
-    cleanup_session_marker(&dir, &session_id);
+    cleanup_session_files(&dir, &session_id);
     show_main_window(&app);
     let _ = app.emit(
         "screenshot-captured",
@@ -367,7 +523,7 @@ pub async fn cancel_screenshot_session(
     if let Some(id) = session_id {
         if valid_capture_id(&id) {
             if let Ok(dir) = captures_dir(&state) {
-                cleanup_session_marker(&dir, &id);
+                cleanup_session_files(&dir, &id);
             }
         }
     }
@@ -448,6 +604,37 @@ pub fn discard_capture(state: State<'_, AppState>, capture_id: String) -> Result
     Ok(())
 }
 
+/// Overlay backdrop: primary-monitor crop of the session freeze (JPEG for speed).
+#[tauri::command]
+pub fn read_session_freeze_preview(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    if !valid_capture_id(&session_id) {
+        return Err("Invalid capture session".into());
+    }
+    let dir = captures_dir(&state)?;
+    let monitors = list_monitor_meta()?;
+    let primary = primary_monitor(&monitors).ok_or_else(|| "No monitors found".to_string())?;
+    let freeze = load_freeze(&dir, &session_id)?;
+    let crop = crop_freeze_region(
+        &freeze,
+        &monitors,
+        primary.x,
+        primary.y,
+        primary.width as i32,
+        primary.height as i32,
+    )?;
+    let (b64, bytes) = encode_jpeg_b64(&crop, 82)?;
+    Ok(serde_json::json!({
+        "mime": "image/jpeg",
+        "data_b64": b64,
+        "bytes": bytes,
+        "width": crop.width(),
+        "height": crop.height(),
+    }))
+}
+
 /// Overlay only needs virtual-desktop layout for optional hints — no image payloads.
 #[tauri::command]
 pub fn list_capture_session_monitors() -> Result<serde_json::Value, String> {
@@ -455,13 +642,13 @@ pub fn list_capture_session_monitors() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "monitors": monitors }))
 }
 
-/// Kept for API compatibility; overlay no longer loads previews.
+/// Kept for API compatibility; overlay uses read_session_freeze_preview.
 #[tauri::command]
 pub fn read_session_monitor_preview(
     _session_id: String,
     _index: usize,
 ) -> Result<serde_json::Value, String> {
-    Err("Preview not used — capture happens after selection".into())
+    Err("Use read_session_freeze_preview".into())
 }
 
 pub fn cleanup_stale_captures_dir(data_dir: &Path) {
