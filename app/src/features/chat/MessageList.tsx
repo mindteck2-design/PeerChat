@@ -296,12 +296,12 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                                 setStatus("Games are not available in this build.");
                                 return;
                               }
+                              if (!gamesOn) {
+                                setStatus("Turn on Games in Settings first.");
+                                return;
+                              }
                               setGameInviteBusy(true);
                               try {
-                                if (!gamesOn) {
-                                  setGamesOn(true);
-                                  await peerApi.setAppSetting("games_enabled", "1").catch(() => {});
-                                }
                                 const invite: PendingGameInvite = {
                                   game: gm.game,
                                   matchId: mid,
@@ -344,8 +344,8 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                             }}
                             onOpenGame={() => {
                               if (!gamesOn) {
-                                setGamesOn(true);
-                                peerApi.setAppSetting("games_enabled", "1").catch(() => {});
+                                setStatus("Turn on Games in Settings first.");
+                                return;
                               }
                               const open: PendingGameInvite = {
                                 game: gm.game,

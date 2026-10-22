@@ -11,9 +11,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Include the offline games section (Snake, 2048, Tetris, Tic-Tac-Toe, RPS, Dots & Boxes).
- * Set to false for deployments where teams do not want games.
- * Runtime setting "games_enabled" in Settings still works independently
- * when this is true — it lets individual users toggle without a rebuild.
+ * Include the offline games section (Snake, 2048, Tic-Tac-Toe, RPS, Dots & Boxes).
+ * Tetris is intentionally omitted from the ship catalog.
+ * When true, games stay off until the user enables them in Settings
+ * (`games_enabled`). Set to false to strip games from the build entirely.
  */
-export const FEATURE_GAMES = false;
+export const FEATURE_GAMES = true;

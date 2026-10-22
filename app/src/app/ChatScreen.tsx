@@ -3880,6 +3880,8 @@ export function ChatScreen({
               profile={profile}
               identity={identity}
               version={version}
+              gamesEnabled={gamesOn}
+              onGamesEnabledChange={setGamesOn}
               onBack={() => {
                 setNav("chats");
                 setTab(1);

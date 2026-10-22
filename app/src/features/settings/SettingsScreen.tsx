@@ -20,11 +20,13 @@ import LinkRoundedIcon from "@mui/icons-material/LinkRounded";
 import PaletteOutlinedIcon from "@mui/icons-material/PaletteOutlined";
 import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
 import PowerSettingsNewRoundedIcon from "@mui/icons-material/PowerSettingsNewRounded";
+import SportsEsportsRoundedIcon from "@mui/icons-material/SportsEsportsRounded";
 import {
   isPermissionGranted,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
 import { exportPublic, fingerprintPublic, type Identity } from "../../crypto";
+import { FEATURE_GAMES } from "../../features";
 import { peerApi, type Profile } from "../../peer";
 import { ThemeMode } from "../../theme";
 
@@ -34,6 +36,8 @@ export function SettingsScreen(props: {
   version: string;
   onBack: () => void;
   onNameUpdated: (p: Profile) => void;
+  gamesEnabled?: boolean;
+  onGamesEnabledChange?: (enabled: boolean) => void;
 }) {
   const { mode, setMode } = useContext(ThemeMode);
   const theme = useTheme();
@@ -50,6 +54,7 @@ export function SettingsScreen(props: {
   const [downloadDir, setDownloadDir] = useState("");
   const [shellExt, setShellExt] = useState(false);
   const [shellBusy, setShellBusy] = useState(false);
+  const [gamesEnabled, setGamesEnabled] = useState(props.gamesEnabled ?? false);
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
   const accent = dark ? "#38bdf8" : theme.palette.primary.main;
 
@@ -62,7 +67,17 @@ export function SettingsScreen(props: {
       .getAutostartEnabled()
       .then((enabled) => setAutostartOn(enabled))
       .catch(() => setAutostartOn(true));
+    if (FEATURE_GAMES) {
+      peerApi
+        .getAppSetting("games_enabled")
+        .then((v) => setGamesEnabled(v === "1"))
+        .catch(() => setGamesEnabled(false));
+    }
   }, []);
+
+  useEffect(() => {
+    if (props.gamesEnabled !== undefined) setGamesEnabled(props.gamesEnabled);
+  }, [props.gamesEnabled]);
 
   async function toggleAutostart(enabled: boolean) {
     setAutostartBusy(true);
@@ -521,7 +536,8 @@ export function SettingsScreen(props: {
           </Typography>
         </Paper>
 
-        {/* Row 3 Right: Downloads */}
+        {/* Row 3 Right: Downloads + optional Games */}
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
         <Paper sx={cardSx} elevation={0}>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
             <DownloadRoundedIcon sx={{ color: accent, fontSize: 22 }} />
@@ -564,6 +580,39 @@ export function SettingsScreen(props: {
             Received files land here. Leave blank to use the system Downloads folder.
           </Typography>
         </Paper>
+
+        {FEATURE_GAMES && (
+          <Paper sx={cardSx} elevation={0}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+              <SportsEsportsRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
+                Games
+              </Typography>
+            </Box>
+            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
+                Enable offline games
+              </Typography>
+              <Switch
+                checked={gamesEnabled}
+                onChange={(_, v) => {
+                  setGamesEnabled(v);
+                  props.onGamesEnabledChange?.(v);
+                  peerApi
+                    .setAppSetting("games_enabled", v ? "1" : "0")
+                    .then(() => setStatus(v ? "Games enabled" : "Games disabled"))
+                    .catch((err: any) => setStatus(err?.message || String(err)));
+                }}
+                sx={switchSx}
+              />
+            </Box>
+            <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
+              Off by default. When on, shows the Games tab (Snake, 2048, Tic-Tac-Toe, Rock Paper
+              Scissors, Dots & Boxes).
+            </Typography>
+          </Paper>
+        )}
+        </Box>
       </Box>
 
       {/* Bottom Info Banner */}
