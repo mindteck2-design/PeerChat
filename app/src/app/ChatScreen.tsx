@@ -271,8 +271,17 @@ export function ChatScreen({
   const [searchHits, setSearchHits] = useState<
     { id: string; title: string; detail: string; conversationId?: string; messageId?: string }[]
   >([]);
-  /** Conversation ids whose history matched the chats-sidebar query (message body). */
-  const [sidebarMsgMatchIds, setSidebarMsgMatchIds] = useState<string[]>([]);
+  /** Message hits for chats-sidebar search (snippet + jump target). */
+  const [sidebarMsgHits, setSidebarMsgHits] = useState<
+    {
+      conversationId: string;
+      messageId: string;
+      chatTitle: string;
+      snippet: string;
+      createdAt?: string;
+    }[]
+  >([]);
+  const [sidebarMsgSearchBusy, setSidebarMsgSearchBusy] = useState(false);
   const [announceOpen, setAnnounceOpen] = useState(false);
   const [pollOpen, setPollOpen] = useState(false);
   const [snippetOpen, setSnippetOpen] = useState(false);
@@ -449,18 +458,15 @@ export function ChatScreen({
     [peers, profile.id]
   );
 
+  // Sidebar search: Chats section = name/title matches only. Message hits are listed separately.
   const filteredConvs = useMemo(() => {
     const q = chatSearch.trim().toLowerCase();
     if (!q) return convs;
-    const msgHits = new Set(sidebarMsgMatchIds);
     return convs.filter((c) => {
       const title = (c.kind === "dm" ? c.peer_name : c.title) || "";
-      if (title.toLowerCase().includes(q)) return true;
-      const preview = (lastPreviews[c.id] || "").toLowerCase();
-      if (preview.includes(q)) return true;
-      return msgHits.has(c.id);
+      return title.toLowerCase().includes(q);
     });
-  }, [convs, chatSearch, lastPreviews, sidebarMsgMatchIds]);
+  }, [convs, chatSearch]);
 
   const isAdmin = useMemo(
     () =>
@@ -619,25 +625,33 @@ export function ChatScreen({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Chats sidebar: also match decrypted message bodies (title/preview already covered).
+  // Chats sidebar: collect exact message hits (snippet + jump), not just conversation ids.
   useEffect(() => {
     const q = chatSearch.trim().toLowerCase();
     if (tab !== 1 || q.length < 2) {
-      setSidebarMsgMatchIds([]);
+      setSidebarMsgHits([]);
+      setSidebarMsgSearchBusy(false);
       return;
     }
     let cancel = false;
+    setSidebarMsgSearchBusy(true);
     const timer = window.setTimeout(() => {
       void (async () => {
-        const matched: string[] = [];
+        const hits: {
+          conversationId: string;
+          messageId: string;
+          chatTitle: string;
+          snippet: string;
+          createdAt?: string;
+        }[] = [];
+        const TOTAL_CAP = 30;
+        const PER_CHAT_CAP = 4;
+        const SCAN_CAP = 200;
+
         for (const c of convs) {
-          if (cancel || matched.length >= 30) break;
-          const title = ((c.kind === "dm" ? c.peer_name : c.title) || "").toLowerCase();
-          if (title.includes(q)) continue; // already visible via title filter
-          if ((lastPreviews[c.id] || "").toLowerCase().includes(q)) {
-            matched.push(c.id);
-            continue;
-          }
+          if (cancel || hits.length >= TOTAL_CAP) break;
+          const chatTitle =
+            c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
           try {
             if (c.kind === "group") {
               try {
@@ -649,8 +663,8 @@ export function ChatScreen({
             let beforeSortKey: string | null = null;
             let beforeId: string | null = null;
             let scanned = 0;
-            let found = false;
-            while (!found && scanned < 160) {
+            let perChat = 0;
+            while (perChat < PER_CHAT_CAP && scanned < SCAN_CAP && hits.length < TOTAL_CAP) {
               const page = await peerApi.listMessages(c.id, {
                 limit: MESSAGE_PAGE_SIZE,
                 beforeSortKey,
@@ -658,8 +672,11 @@ export function ChatScreen({
               });
               if (cancel || !page.messages.length) break;
               scanned += page.messages.length;
-              for (const m of page.messages) {
-                if (m.kind === "file_notice" || m.kind === "deleted" || m.kind === "poll_vote") continue;
+              // Newest first within page.
+              for (const m of [...page.messages].reverse()) {
+                if (m.kind === "file_notice" || m.kind === "deleted" || m.kind === "poll_vote") {
+                  continue;
+                }
                 let textBody = "";
                 try {
                   textBody =
@@ -673,11 +690,23 @@ export function ChatScreen({
                 } catch {
                   continue;
                 }
-                if (textBody.toLowerCase().includes(q)) {
-                  found = true;
-                  matched.push(c.id);
-                  break;
-                }
+                if (!textBody.toLowerCase().includes(q)) continue;
+                const idx = textBody.toLowerCase().indexOf(q);
+                const start = Math.max(0, idx - 24);
+                const end = Math.min(textBody.length, idx + q.length + 48);
+                const snippet =
+                  (start > 0 ? "…" : "") +
+                  textBody.slice(start, end).replace(/\s+/g, " ").trim() +
+                  (end < textBody.length ? "…" : "");
+                hits.push({
+                  conversationId: c.id,
+                  messageId: m.id,
+                  chatTitle,
+                  snippet,
+                  createdAt: m.created_at,
+                });
+                perChat += 1;
+                if (perChat >= PER_CHAT_CAP || hits.length >= TOTAL_CAP) break;
               }
               if (!page.has_more_older) break;
               const oldest = page.messages[0]!;
@@ -685,10 +714,13 @@ export function ChatScreen({
               beforeId = oldest.id;
             }
           } catch {
-            /* skip */
+            /* skip locked conversation */
           }
         }
-        if (!cancel) setSidebarMsgMatchIds(matched);
+        if (!cancel) {
+          setSidebarMsgHits(hits);
+          setSidebarMsgSearchBusy(false);
+        }
       })();
     }, 280);
     return () => {
@@ -696,7 +728,7 @@ export function ChatScreen({
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatSearch, tab, convs, lastPreviews, identity, profile.id]);
+  }, [chatSearch, tab, convs, identity, profile.id]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -1223,6 +1255,18 @@ export function ChatScreen({
     setInChatSearchOpen(false);
     setInChatQuery("");
     setActive(c);
+  }
+
+  /** Open a chat from sidebar message search and scroll to the matching message. */
+  function openSidebarMsgHit(hit: { conversationId: string; messageId: string }) {
+    const c = convs.find((x) => x.id === hit.conversationId);
+    if (!c) return;
+    if (active?.id !== c.id) {
+      selectConversation(c);
+    }
+    stickToBottomRef.current = false;
+    setHighlightMsgId(hit.messageId);
+    setTab(1);
   }
 
   function notifyTyping() {
@@ -3648,6 +3692,9 @@ export function ChatScreen({
     fileLocalPaths,
     fileMetaReady,
     filteredConvs,
+    sidebarMsgHits,
+    sidebarMsgSearchBusy,
+    openSidebarMsgHit,
     gameInviteBusy,
     gamesOn,
     handleRemoveLeftGroup,
