@@ -17,6 +17,7 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  Fab,
   Fade,
   Grow,
   IconButton,
@@ -87,6 +88,7 @@ import LogoutIcon from "@mui/icons-material/LogoutRounded";
 import PersonAddAltIcon from "@mui/icons-material/PersonAddAltRounded";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeftRounded";
 import ChevronRightIcon from "@mui/icons-material/ChevronRightRounded";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 
 import {
   isPermissionGranted,
@@ -397,6 +399,7 @@ export function ChatScreen({
     onCancel?: () => void;
   } | null>(null);
   const [dragOverChat, setDragOverChat] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const stickToBottomRef = useRef(true);
   const ignoreScrollRef = useRef(false);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -853,6 +856,7 @@ export function ChatScreen({
     const conv = active;
     let cancel = false;
     stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
     setChatPaintReady(false);
     setMessages([]);
     setHasMoreOlder(false);
@@ -956,15 +960,23 @@ export function ChatScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.id]);
 
-  function scrollChatToBottom(_behavior: ScrollBehavior = "auto") {
+  function scrollChatToBottom(behavior: ScrollBehavior = "auto") {
     const el = scroller.current;
     if (!el) return;
     ignoreScrollRef.current = true;
-    el.scrollTop = el.scrollHeight;
     stickToBottomRef.current = true;
-    window.setTimeout(() => {
-      ignoreScrollRef.current = false;
-    }, 50);
+    setShowJumpToLatest(false);
+    if (behavior === "smooth") {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      window.setTimeout(() => {
+        ignoreScrollRef.current = false;
+      }, 400);
+    } else {
+      el.scrollTop = el.scrollHeight;
+      window.setTimeout(() => {
+        ignoreScrollRef.current = false;
+      }, 50);
+    }
   }
 
   // Keep pinned before paint when content changes (no visible jump while already revealed).
@@ -4205,91 +4217,121 @@ export function ChatScreen({
           </Alert>
         )}
 
-        <Box
-          ref={scroller}
-          flex={1}
-          minHeight={0}
-          px={2}
-          py={1.5}
-          overflow="auto"
-          position="relative"
-          onScroll={(e) => {
-            if (ignoreScrollRef.current) return;
-            const el = e.currentTarget;
-            const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-            if (dist < 80) stickToBottomRef.current = true;
-            else if (dist > 120) stickToBottomRef.current = false;
-            if (el.scrollTop < 120) void loadOlderMessages();
-          }}
-          onDragOver={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setDragOverChat(true);
-          }}
-          onDragLeave={() => setDragOverChat(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setDragOverChat(false);
-            const files = Array.from(e.dataTransfer.files || []);
-            if (files.length) stageFiles(files);
-          }}
-          sx={{
-            bgcolor: "background.default",
-            backgroundImage: dark
-              ? "radial-gradient(rgba(76,141,255,0.08) 1px, transparent 1px)"
-              : "radial-gradient(rgba(15,107,92,0.06) 1px, transparent 1px)",
-            backgroundSize: "18px 18px",
-            outline: dragOverChat ? "2px dashed" : "none",
-            outlineColor: "primary.main",
-            outlineOffset: -8,
-            opacity: chatPaintReady ? 1 : 0,
-            transition: chatPaintReady ? "opacity 80ms ease-out" : "none",
-          }}
-        >
-          {/*
-            Inner column with minHeight 100% + justify flex-end keeps short threads
-            visually at the bottom without a flex:1 spacer (which inflates scrollHeight
-            and lets you scroll into empty space past the last message).
-          */}
+        <Box flex={1} minHeight={0} position="relative" display="flex" flexDirection="column">
           <Box
-            minHeight="100%"
-            display="flex"
-            flexDirection="column"
-            justifyContent="flex-end"
-            gap={0.75}
+            ref={scroller}
+            flex={1}
+            minHeight={0}
+            px={2}
+            py={1.5}
+            overflow="auto"
+            position="relative"
+            onScroll={(e) => {
+              if (ignoreScrollRef.current) return;
+              const el = e.currentTarget;
+              const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+              if (dist < 80) {
+                stickToBottomRef.current = true;
+                setShowJumpToLatest(false);
+              } else if (dist > 140) {
+                stickToBottomRef.current = false;
+                setShowJumpToLatest(true);
+              }
+              if (el.scrollTop < 120) void loadOlderMessages();
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragOverChat(true);
+            }}
+            onDragLeave={() => setDragOverChat(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragOverChat(false);
+              const files = Array.from(e.dataTransfer.files || []);
+              if (files.length) stageFiles(files);
+            }}
+            sx={{
+              bgcolor: "background.default",
+              backgroundImage: dark
+                ? "radial-gradient(rgba(76,141,255,0.08) 1px, transparent 1px)"
+                : "radial-gradient(rgba(15,107,92,0.06) 1px, transparent 1px)",
+              backgroundSize: "18px 18px",
+              outline: dragOverChat ? "2px dashed" : "none",
+              outlineColor: "primary.main",
+              outlineOffset: -8,
+              opacity: chatPaintReady ? 1 : 0,
+              transition: chatPaintReady ? "opacity 80ms ease-out" : "none",
+            }}
           >
-          {dragOverChat && (
+            {/*
+              Inner column with minHeight 100% + justify flex-end keeps short threads
+              visually at the bottom without a flex:1 spacer (which inflates scrollHeight
+              and lets you scroll into empty space past the last message).
+            */}
             <Box
-              position="absolute"
-              top={0}
-              left={0}
-              right={0}
-              bottom={0}
-              zIndex={5}
+              minHeight="100%"
               display="flex"
-              alignItems="center"
-              justifyContent="center"
-              sx={{ bgcolor: "rgba(15,107,92,0.12)", pointerEvents: "none" }}
+              flexDirection="column"
+              justifyContent="flex-end"
+              gap={0.75}
             >
-              <Paper sx={{ px: 3, py: 2 }}>
-                <Typography fontWeight={700}>Drop files to attach</Typography>
-              </Paper>
+            {dragOverChat && (
+              <Box
+                position="absolute"
+                top={0}
+                left={0}
+                right={0}
+                bottom={0}
+                zIndex={5}
+                display="flex"
+                alignItems="center"
+                justifyContent="center"
+                sx={{ bgcolor: "rgba(15,107,92,0.12)", pointerEvents: "none" }}
+              >
+                <Paper sx={{ px: 3, py: 2 }}>
+                  <Typography fontWeight={700}>Drop files to attach</Typography>
+                </Paper>
+              </Box>
+            )}
+            {!active && (
+              <Box m="auto" textAlign="center" maxWidth={360}>
+                <Typography variant="h5" gutterBottom>
+                  Peer chat on your LAN
+                </Typography>
+                <Typography color="text.secondary">
+                  Messages wait in your outbox if the other PC is offline, then deliver when they
+                  return.
+                </Typography>
+              </Box>
+            )}
+            <MessageList vm={vm} />
             </Box>
-          )}
-          {!active && (
-            <Box m="auto" textAlign="center" maxWidth={360}>
-              <Typography variant="h5" gutterBottom>
-                Peer chat on your LAN
-              </Typography>
-              <Typography color="text.secondary">
-                Messages wait in your outbox if the other PC is offline, then deliver when they
-                return.
-              </Typography>
-            </Box>
-          )}
-          <MessageList vm={vm} />
           </Box>
+
+          <Fade in={!!active && showJumpToLatest} unmountOnExit>
+            <Box
+              sx={{
+                position: "absolute",
+                right: 16,
+                bottom: 12,
+                zIndex: 4,
+              }}
+            >
+              <Tooltip title="Jump to latest" placement="left">
+                <Fab
+                  size="small"
+                  color="primary"
+                  aria-label="Scroll to bottom"
+                  onClick={() => scrollChatToBottom("smooth")}
+                  sx={{ width: 40, height: 40, boxShadow: 3 }}
+                >
+                  <KeyboardArrowDownIcon />
+                </Fab>
+              </Tooltip>
+            </Box>
+          </Fade>
         </Box>
 
         <Composer vm={vm} />
