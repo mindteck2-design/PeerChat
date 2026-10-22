@@ -371,6 +371,91 @@ pub async fn fetch_file_chunk(
         .ok_or_else(|| "missing chunk".to_string())
 }
 
+fn peer_endpoint_from_db(
+    state: &AppState,
+    uploader_id: &str,
+) -> Result<(String, u16, Option<String>), String> {
+    let conn = state.db.lock();
+    let peer = db::get_peer(&conn, uploader_id)?.ok_or("uploader offline/unknown")?;
+    let ip = peer["last_ip"]
+        .as_str()
+        .filter(|s| discovery::is_usable_lan_ip(s))
+        .ok_or("no ip")?
+        .to_string();
+    let port = peer["last_port"]
+        .as_u64()
+        .or_else(|| peer["last_port"].as_i64().map(|p| p as u64))
+        .ok_or("no port")? as u16;
+    let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
+    Ok((ip, port, fp))
+}
+
+fn is_reachability_error(err: &str) -> bool {
+    let s = err.to_ascii_lowercase();
+    s.contains("timeout")
+        || s.contains("connect")
+        || s.contains("refused")
+        || s.contains("reset")
+        || s.contains("unreachable")
+        || s.contains("resolve")
+        || s.contains("broken pipe")
+        || s.contains("network")
+        || s.contains("no route")
+        || s.contains("os error 10060")
+        || s.contains("os error 10061")
+        || s.contains("os error 110")
+        || s.contains("os error 111")
+        || s.contains("tls")
+}
+
+/// Who-scan + hub refresh so we pick up the sender again after lock/Wi‑Fi blips.
+async fn refresh_uploader_reachability(state: &AppState, uploader_id: &str) {
+    let self_id = {
+        let conn = state.db.lock();
+        db::get_profile(&conn)
+            .ok()
+            .flatten()
+            .and_then(|p| p["id"].as_str().map(|s| s.to_string()))
+            .unwrap_or_default()
+    };
+    let scanned = discovery::scan(41234, &self_id).await.unwrap_or_default();
+    for p in scanned {
+        state.discovery.upsert(p.clone()).await;
+        if p.user_id == uploader_id && discovery::is_usable_lan_ip(&p.ip) {
+            let conn = state.db.lock();
+            let _ = db::upsert_peer_with_team(
+                &conn,
+                &p.user_id,
+                &p.display_name,
+                &p.x25519_public,
+                &p.ed25519_public,
+                Some(&p.ip),
+                Some(p.port as i64),
+                Some(&p.fingerprint),
+                true,
+                Some(p.team.as_str()),
+            );
+        }
+    }
+    if let Some(p) = state.discovery.fresh_peers().await.get(uploader_id).cloned() {
+        if discovery::is_usable_lan_ip(&p.ip) {
+            let conn = state.db.lock();
+            let _ = db::upsert_peer_with_team(
+                &conn,
+                &p.user_id,
+                &p.display_name,
+                &p.x25519_public,
+                &p.ed25519_public,
+                Some(&p.ip),
+                Some(p.port as i64),
+                Some(&p.fingerprint),
+                true,
+                Some(p.team.as_str()),
+            );
+        }
+    }
+}
+
 /// IPMsg-style binary stream download: decrypt on the wire path, append to receive temp.
 /// Falls back is handled by the frontend when this errors (old peers).
 #[tauri::command]
@@ -401,44 +486,68 @@ pub async fn download_file_stream(
     if from_index as i64 != expected {
         return Err(format!("expected chunk {expected}, got {from_index}"));
     }
-    let peer = {
-        let conn = state.db.lock();
-        db::get_peer(&conn, &uploader_id)?.ok_or("uploader offline/unknown")?
-    };
-    let ip = peer["last_ip"]
-        .as_str()
-        .filter(|s| discovery::is_usable_lan_ip(s))
-        .ok_or("no ip")?
-        .to_string();
-    let port = peer["last_port"]
-        .as_u64()
-        .or_else(|| peer["last_port"].as_i64().map(|p| p as u64))
-        .ok_or("no port")? as u16;
-    let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
     let db = state.db.clone();
     let fid = file_id.clone();
     let temp_s = temp_path.display().to_string();
     let cancel = peer_http::register_stream_cancel(&file_id);
-    let next = peer_http::stream_download_and_append(
-        &ip,
-        port,
-        fp,
-        &file_id,
-        from_index,
-        &content_key,
-        crypto_v,
-        &temp_path,
-        total_chunks,
-        &app,
-        cancel,
-        |done| {
-            let conn = db.lock();
-            db::upsert_receive_progress(&conn, &fid, done as i64, Some(&temp_s))
-        },
-    )
-    .await;
+
+    let mut resume_from = from_index;
+    let mut attempt = 0;
+    let next = loop {
+        attempt += 1;
+        let (ip, port, fp) = match peer_endpoint_from_db(&state, &uploader_id) {
+            Ok(ep) => ep,
+            Err(e) if attempt == 1 => {
+                refresh_uploader_reachability(&state, &uploader_id).await;
+                peer_endpoint_from_db(&state, &uploader_id).map_err(|_| e)?
+            }
+            Err(e) => {
+                peer_http::clear_stream_cancel(&file_id);
+                return Err(e);
+            }
+        };
+        let result = peer_http::stream_download_and_append(
+            &ip,
+            port,
+            fp,
+            &file_id,
+            resume_from,
+            &content_key,
+            crypto_v,
+            &temp_path,
+            total_chunks,
+            &app,
+            cancel.clone(),
+            |done| {
+                let conn = db.lock();
+                db::upsert_receive_progress(&conn, &fid, done as i64, Some(&temp_s))
+            },
+        )
+        .await;
+        match result {
+            Ok(n) => break n,
+            Err(e)
+                if attempt == 1
+                    && is_reachability_error(&e)
+                    && !e.to_ascii_lowercase().contains("cancelled") =>
+            {
+                // Pick up any chunks already persisted, then rediscover sender.
+                if let Ok(Some((expected, _))) = {
+                    let conn = state.db.lock();
+                    db::get_receive_progress(&conn, &file_id)
+                } {
+                    resume_from = expected.max(0) as u32;
+                }
+                refresh_uploader_reachability(&state, &uploader_id).await;
+                continue;
+            }
+            Err(e) => {
+                peer_http::clear_stream_cancel(&file_id);
+                return Err(format!("stream download failed: {e}"));
+            }
+        }
+    };
     peer_http::clear_stream_cancel(&file_id);
-    let next = next.map_err(|e| format!("stream download failed: {e}"))?;
     Ok(json!({ "next_index": next, "total": total_chunks }))
 }
 
@@ -489,23 +598,26 @@ pub async fn fetch_file_chunks(
             }
         }
     }
-    let peer = {
-        let conn = state.db.lock();
-        db::get_peer(&conn, &uploader_id)?.ok_or("uploader offline/unknown")?
-    };
-    let ip = peer["last_ip"]
-        .as_str()
-        .filter(|s| discovery::is_usable_lan_ip(s))
-        .ok_or("no ip")?
-        .to_string();
-    let port = peer["last_port"]
-        .as_u64()
-        .or_else(|| peer["last_port"].as_i64().map(|p| p as u64))
-        .ok_or("no port")? as u16;
-    let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
-    peer_http::fetch_chunks_keep_alive(&ip, port, fp, &file_id, from_index, count)
-        .await
-        .map_err(|e| format!("connect to sender failed: {e}"))
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let (ip, port, fp) = match peer_endpoint_from_db(&state, &uploader_id) {
+            Ok(ep) => ep,
+            Err(e) if attempt == 1 => {
+                refresh_uploader_reachability(&state, &uploader_id).await;
+                peer_endpoint_from_db(&state, &uploader_id).map_err(|_| e)?
+            }
+            Err(e) => return Err(e),
+        };
+        match peer_http::fetch_chunks_keep_alive(&ip, port, fp, &file_id, from_index, count).await {
+            Ok(chunks) => return Ok(chunks),
+            Err(e) if attempt == 1 && is_reachability_error(&e) => {
+                refresh_uploader_reachability(&state, &uploader_id).await;
+                continue;
+            }
+            Err(e) => return Err(format!("connect to sender failed: {e}")),
+        }
+    }
 }
 
 #[tauri::command]

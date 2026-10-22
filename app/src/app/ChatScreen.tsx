@@ -2923,7 +2923,7 @@ export function ChatScreen({
     if (/integrity/i.test(raw)) return raw;
     if (/invalid destination/i.test(raw)) return raw;
     if (/offline|no ip|no port|uploader|connect|tls|fingerprint|forbidden|missing chunk/i.test(raw)) {
-      return "Can't reach the sender. Keep PeerChat open on both computers on the same LAN, then retry.";
+      return "Can't reach the sender. Keep PeerChat running on their PC (tray is OK — even if the screen is locked). If their PC sleeps, powers off, or leaves the LAN, retry when they're back.";
     }
     return raw;
   }

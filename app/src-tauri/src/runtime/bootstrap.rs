@@ -5,6 +5,7 @@ use crate::discovery::{self, DiscoveryHub, PeerBeacon};
 use crate::peer_http::{self, SharedDb};
 use crate::state::AppState;
 use crate::util::*;
+use crate::runtime::keep_awake::KeepAwakeGuard;
 use crate::runtime::outbox::{flush_outbox, kick_flush};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -170,6 +171,8 @@ pub(crate) fn start_runtime_inner(
         }
     });
 
+    // Stay reachable for LAN transfers even if the screen is locked / window is in tray.
+    *state.keep_awake.lock() = Some(KeepAwakeGuard::acquire());
     *state.started.lock() = true;
     Ok(())
 }
