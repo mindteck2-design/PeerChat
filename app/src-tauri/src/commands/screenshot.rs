@@ -1,8 +1,9 @@
 //! Screen capture + temporary PNG lifecycle for Screenshot & Annotate.
-//! Flow: hide main → freeze desktop → selection overlay on freeze → crop → annotate.
+//! Flow: hide main → freeze desktop → selection overlay → crop from freeze → annotate.
 //!
-//! Freeze-frame (not a live transparent overlay) so Linux WebKitGTK still shows the
-//! desktop, and we avoid exclusive fullscreen which triggers GNOME Caffeine toasts.
+//! Windows: transparent live dim overlay (native snip feel); freeze is capture source only.
+//! Linux: opaque freeze-frame backdrop (WebKitGTK can't show desktop through transparency);
+//! borderless monitor window — not exclusive fullscreen (avoids GNOME Caffeine toasts).
 
 use crate::runtime::bootstrap::show_main_window;
 use crate::state::AppState;
@@ -80,6 +81,18 @@ fn primary_monitor(monitors: &[MonitorMeta]) -> Option<MonitorMeta> {
         .or_else(|| monitors.first().cloned())
 }
 
+fn overlay_background_color() -> tauri::window::Color {
+    #[cfg(target_os = "windows")]
+    {
+        // Fully transparent so the live desktop shows through the dim layer.
+        tauri::window::Color(0, 0, 0, 0)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        tauri::window::Color(0x12, 0x12, 0x14, 255)
+    }
+}
+
 async fn open_overlay(app: &AppHandle, session_id: &str, mon: &MonitorMeta) -> Result<(), String> {
     destroy_overlay_wait(app).await;
     let url = WebviewUrl::App(format!("capture-overlay.html#{session_id}").into());
@@ -99,19 +112,20 @@ async fn open_overlay(app: &AppHandle, session_id: &str, mon: &MonitorMeta) -> R
         .skip_taskbar(true)
         .resizable(false)
         .focused(false)
-        // Hidden until freeze image is painted (avoids white WebView flash).
+        // Hidden until the overlay UI is ready (avoids white WebView flash).
         .visible(false)
         .inner_size(logical_w, logical_h)
         .position(logical_x, logical_y)
-        .background_color(tauri::window::Color(0x12, 0x12, 0x14, 255));
+        .background_color(overlay_background_color());
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    {
-        builder = builder.transparent(false);
-    }
     #[cfg(target_os = "windows")]
     {
-        builder = builder.no_redirection_bitmap(true);
+        builder = builder.transparent(true).no_redirection_bitmap(true);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Opaque freeze backdrop — WebKitGTK does not composite live desktop under transparency.
+        builder = builder.transparent(false);
     }
 
     let win = builder
@@ -127,6 +141,19 @@ async fn open_overlay(app: &AppHandle, session_id: &str, mon: &MonitorMeta) -> R
         y: mon.y,
     }));
     Ok(())
+}
+
+/// Overlay UI mode: Windows = live transparent dim; Linux = freeze-frame backdrop.
+#[tauri::command]
+pub fn capture_overlay_mode() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "live"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "freeze"
+    }
 }
 
 #[derive(Clone, Serialize, serde::Deserialize)]
