@@ -13,12 +13,57 @@ function CaptureOverlayApp() {
   const sessionId = useMemo(() => sessionFromUrl(), []);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [freezeUrl, setFreezeUrl] = useState<string | null>(null);
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const dragging = useRef(false);
   const origin = useRef<{ x: number; y: number } | null>(null);
+  const freezeUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!sessionId) setError("Missing capture session");
+    if (!sessionId) {
+      setError("Missing capture session");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const prev = await invoke<{
+          mime: string;
+          data_b64: string;
+        }>("read_session_freeze_preview", { sessionId });
+        if (cancelled) return;
+        const bin = Uint8Array.from(atob(prev.data_b64), (c) => c.charCodeAt(0));
+        const url = URL.createObjectURL(new Blob([bin], { type: prev.mime || "image/jpeg" }));
+        freezeUrlRef.current = url;
+        setFreezeUrl(url);
+        // Wait a frame so the image paints before we show the native window.
+        await new Promise<void>((r) => {
+          const img = new Image();
+          img.onload = () => r();
+          img.onerror = () => r();
+          img.src = url;
+        });
+        if (cancelled) return;
+        setReady(true);
+        await invoke("show_capture_overlay");
+      } catch (err: any) {
+        if (cancelled) return;
+        setError(err?.message || String(err));
+        try {
+          await invoke("show_capture_overlay");
+        } catch {
+          /* ignore */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (freezeUrlRef.current) {
+        URL.revokeObjectURL(freezeUrlRef.current);
+        freezeUrlRef.current = null;
+      }
+    };
   }, [sessionId]);
 
   const cancel = useCallback(async () => {
@@ -39,7 +84,6 @@ function CaptureOverlayApp() {
       setBusy(true);
       setError(null);
       try {
-        // Pass CSS viewport coords; Rust maps them onto the primary monitor's physical pixels.
         await invoke("complete_region_capture", {
           sessionId,
           x,
@@ -93,12 +137,14 @@ function CaptureOverlayApp() {
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.35)",
-        cursor: busy ? "wait" : "crosshair",
-        pointerEvents: busy ? "none" : "auto",
+        background: freezeUrl
+          ? `#121214 url(${freezeUrl}) 0 0 / 100% 100% no-repeat`
+          : "#121214",
+        cursor: busy || !ready ? "wait" : "crosshair",
+        pointerEvents: busy || !ready ? "none" : "auto",
       }}
       onMouseDown={(e) => {
-        if (busy || e.button !== 0) return;
+        if (busy || !ready || e.button !== 0) return;
         dragging.current = true;
         origin.current = { x: e.clientX, y: e.clientY };
         setDrag({ x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY });
@@ -122,6 +168,16 @@ function CaptureOverlayApp() {
         void finishRegion(ox, oy, e.clientX, e.clientY);
       }}
     >
+      {/* Dim the freeze so the selection rectangle reads clearly */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: "rgba(0,0,0,0.28)",
+          pointerEvents: "none",
+        }}
+      />
+
       {sel && sel.width > 2 && sel.height > 2 && (
         <div
           style={{
@@ -131,8 +187,9 @@ function CaptureOverlayApp() {
             width: sel.width,
             height: sel.height,
             border: "2px dashed #fff",
-            boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
+            boxShadow: "0 0 0 9999px rgba(0,0,0,0.45)",
             pointerEvents: "none",
+            zIndex: 2,
           }}
         />
       )}
@@ -152,12 +209,12 @@ function CaptureOverlayApp() {
           zIndex: 10,
         }}
       >
-        {busy ? "Capturing…" : "Drag to select an area · Esc to cancel"}
+        {busy ? "Capturing…" : ready ? "Drag to select an area · Esc to cancel" : "Preparing…"}
       </div>
 
       <button
         type="button"
-        disabled={busy}
+        disabled={busy || !ready}
         onClick={(e) => {
           e.stopPropagation();
           void finishFull();
@@ -171,10 +228,10 @@ function CaptureOverlayApp() {
           border: 0,
           borderRadius: 8,
           padding: "10px 14px",
-          background: busy ? "#666" : "#5b4dff",
+          background: busy || !ready ? "#666" : "#5b4dff",
           color: "#fff",
           fontWeight: 700,
-          cursor: busy ? "wait" : "pointer",
+          cursor: busy || !ready ? "wait" : "pointer",
           fontFamily: "system-ui, sans-serif",
         }}
       >
