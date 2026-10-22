@@ -165,28 +165,12 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
   const incomingFile = useIncomingTransfer() ?? vm.incomingFile;
 
   const jumpToReferencedMessage = (messageId: string) => {
+    if (vm.stickToBottomRef) vm.stickToBottomRef.current = false;
+    // ChatScreen centers via highlightMsgId (with layout-settle retries).
     if (typeof setHighlightMsgId === "function") {
       setHighlightMsgId(messageId);
     }
-    if (vm.stickToBottomRef) vm.stickToBottomRef.current = false;
-    window.requestAnimationFrame(() => {
-      const target = document.getElementById(`msg-${messageId}`);
-      if (!target) return;
-      target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-    });
   };
-
-  // Highlight / in-chat search jump (scroll when highlightMsgId is set externally too).
-  useEffect(() => {
-    if (!highlightMsgId) return;
-    if (vm.stickToBottomRef) vm.stickToBottomRef.current = false;
-    window.requestAnimationFrame(() => {
-      const target = document.getElementById(`msg-${highlightMsgId}`);
-      if (!target) return;
-      target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [highlightMsgId, dayGroups.length, messages.length]);
 
   const msgById = useMemo(() => {
     const map = new Map();

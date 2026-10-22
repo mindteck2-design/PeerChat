@@ -411,6 +411,7 @@ export function ChatScreen({
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const stickToBottomRef = useRef(true);
   const ignoreScrollRef = useRef(false);
+  const highlightMsgIdRef = useRef<string | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   /** Hide scroller until first bottom-pin so chat never flashes at the top. */
   const [chatPaintReady, setChatPaintReady] = useState(true);
@@ -1011,15 +1012,41 @@ export function ChatScreen({
     }
   }
 
+  /** Center a message in the chat scroller (retries while decrypt / layout settle). */
+  function centerMessageInScroller(messageId: string) {
+    const scrollerEl = scroller.current;
+    const target = document.getElementById(`msg-${messageId}`);
+    if (!scrollerEl || !target) return false;
+    stickToBottomRef.current = false;
+    ignoreScrollRef.current = true;
+    const sRect = scrollerEl.getBoundingClientRect();
+    const tRect = target.getBoundingClientRect();
+    const delta = tRect.top + tRect.height / 2 - (sRect.top + sRect.height / 2);
+    if (Math.abs(delta) > 1) {
+      scrollerEl.scrollTop += delta;
+    }
+    window.setTimeout(() => {
+      ignoreScrollRef.current = false;
+    }, 80);
+    return true;
+  }
+
+  highlightMsgIdRef.current = highlightMsgId;
+
   // Keep pinned before paint when content changes (no visible jump while already revealed).
   // Do NOT depend on transfer progress ticks — those must not re-pin scroll.
   useLayoutEffect(() => {
     const el = scroller.current;
     const anchor = olderScrollAnchorRef.current;
     if (anchor && el) {
-      el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
-      olderScrollAnchorRef.current = null;
-      return;
+      // While seeking a search hit, don't restore the "load older" anchor — it fights jump-to.
+      if (highlightMsgIdRef.current) {
+        olderScrollAnchorRef.current = null;
+      } else {
+        el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+        olderScrollAnchorRef.current = null;
+        return;
+      }
     }
     if (!active?.id || highlightMsgId) return;
     if (!stickToBottomRef.current) return;
@@ -1036,7 +1063,8 @@ export function ChatScreen({
     loadingOlderRef.current = true;
     try {
       const el = scroller.current;
-      if (el) {
+      // Skip anchor restore while jumping to a search/pin hit.
+      if (el && !highlightMsgIdRef.current) {
         olderScrollAnchorRef.current = { height: el.scrollHeight, top: el.scrollTop };
       }
       const oldest = messages[0]!;
@@ -1075,7 +1103,7 @@ export function ChatScreen({
     return () => ro.disconnect();
   }, [active?.id, highlightMsgId, messages.length]);
 
-  // WhatsApp-style jump + flash when opening a saved / in-chat / global-search hit.
+  // Jump + flash for search / pin / saved hits. Re-center after decrypt & layout settle.
   useEffect(() => {
     if (!highlightMsgId || !active) return;
     if (!messages.some((m) => m.id === highlightMsgId)) {
@@ -1083,20 +1111,25 @@ export function ChatScreen({
       if (hasMoreOlder && !loadingOlderRef.current) {
         void loadOlderMessages();
       }
-      const clear = window.setTimeout(() => setHighlightMsgId(null), 12000);
+      const clear = window.setTimeout(() => setHighlightMsgId(null), 15000);
       return () => window.clearTimeout(clear);
     }
     stickToBottomRef.current = false;
-    requestAnimationFrame(() => {
-      document.getElementById(`msg-${highlightMsgId}`)?.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
-    });
-    const clear = window.setTimeout(() => setHighlightMsgId(null), 2800);
-    return () => window.clearTimeout(clear);
+    setShowJumpToLatest(true);
+    const timers: number[] = [];
+    const center = () => centerMessageInScroller(highlightMsgId);
+    center();
+    requestAnimationFrame(center);
+    // Retries cover Grow/Fade entrance, decrypt text expansion, and image layout.
+    for (const delay of [80, 200, 400, 700, 1100, 1600]) {
+      timers.push(window.setTimeout(center, delay));
+    }
+    timers.push(window.setTimeout(() => setHighlightMsgId(null), 3600));
+    return () => {
+      for (const t of timers) window.clearTimeout(t);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [highlightMsgId, active?.id, messages, hasMoreOlder]);
+  }, [highlightMsgId, active?.id, messages, hasMoreOlder, plain[highlightMsgId || ""]]);
 
   useEffect(() => {
     if (!active || !messages.some((m) => m.sender_id !== profile.id)) return;
@@ -2196,14 +2229,8 @@ export function ChatScreen({
   ]);
 
   function jumpToInChatHit(messageId: string) {
-    setHighlightMsgId(messageId);
     stickToBottomRef.current = false;
-    requestAnimationFrame(() => {
-      document.getElementById(`msg-${messageId}`)?.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
-    });
+    setHighlightMsgId(messageId);
   }
 
   const {
@@ -4196,14 +4223,8 @@ export function ChatScreen({
                   <Box
                     key={m.id}
                     onClick={() => {
-                      setHighlightMsgId(m.id);
                       stickToBottomRef.current = false;
-                      requestAnimationFrame(() => {
-                        document.getElementById(`msg-${m.id}`)?.scrollIntoView({
-                          behavior: "smooth",
-                          block: "center",
-                        });
-                      });
+                      setHighlightMsgId(m.id);
                     }}
                     sx={{
                       display: "flex",
@@ -5068,14 +5089,8 @@ export function ChatScreen({
             const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|svg|heic|avif)$/i;
             const jump = (messageId: string) => {
               setChatInfoOpen(false);
-              setHighlightMsgId(messageId);
               stickToBottomRef.current = false;
-              requestAnimationFrame(() => {
-                document.getElementById(`msg-${messageId}`)?.scrollIntoView({
-                  behavior: "smooth",
-                  block: "center",
-                });
-              });
+              setHighlightMsgId(messageId);
             };
             if (chatInfoTab === 0 || chatInfoTab === 1) {
               // Flatten attachment ids from file notices and captioned messages.
