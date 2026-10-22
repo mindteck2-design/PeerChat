@@ -2,10 +2,10 @@ name: Build PeerChat Installers (Windows & Linux)
 
 on:
   push:
-    branches: [ "main", "v1" ]
+    branches: [ "main", "v*" ]
     tags: [ "v*" ]
   pull_request:
-    branches: [ "main", "v1" ]
+    branches: [ "main", "v*" ]
   workflow_dispatch:
 
 jobs:
