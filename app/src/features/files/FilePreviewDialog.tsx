@@ -221,12 +221,12 @@ export function FilePreviewDialog({ vm }: { vm: ChatScreenVm }) {
         maxWidth={isMedia || isPdf ? "lg" : "md"}
         PaperProps={{
           sx: {
-            bgcolor: isMedia ? "#0d0d0d" : undefined,
+            bgcolor: isMedia ? "chat.canvas" : undefined,
             backgroundImage: "none",
           },
         }}
       >
-        <DialogTitle sx={{ pr: 6, color: isMedia ? "#eee" : undefined }}>
+        <DialogTitle sx={{ pr: 6, color: isMedia ? "text.primary" : undefined }}>
           <Typography fontWeight={700} noWrap>
             {filePreview?.name}
             {filePreview?.gallery && filePreview.gallery.fileIds.length > 1
@@ -240,7 +240,7 @@ export function FilePreviewDialog({ vm }: { vm: ChatScreenVm }) {
               position: "absolute",
               right: 12,
               top: 12,
-              color: isMedia ? "#fff" : undefined,
+              color: isMedia ? "text.primary" : undefined,
             }}
           >
             <CloseIcon />
@@ -251,7 +251,7 @@ export function FilePreviewDialog({ vm }: { vm: ChatScreenVm }) {
             minHeight: 240,
             display: "grid",
             placeItems: "center",
-            bgcolor: isMedia ? "#111" : "action.hover",
+            bgcolor: isMedia ? "background.default" : "action.hover",
             p: isImage ? 0 : 2,
             position: "relative",
             overflow: "hidden",
@@ -385,7 +385,7 @@ export function FilePreviewDialog({ vm }: { vm: ChatScreenVm }) {
           sx={{
             px: 3,
             py: 2,
-            bgcolor: isMedia ? "#0d0d0d" : undefined,
+            bgcolor: isMedia ? "chat.canvas" : undefined,
           }}
         >
           <Typography
@@ -393,7 +393,7 @@ export function FilePreviewDialog({ vm }: { vm: ChatScreenVm }) {
             color="text.secondary"
             sx={{
               mr: "auto",
-              color: isMedia ? "rgba(255,255,255,0.55)" : undefined,
+              color: isMedia ? "text.secondary" : undefined,
             }}
           >
             {filePreview?.localPath ? `Saved · ${filePreview.localPath}` : "Available on this computer"}

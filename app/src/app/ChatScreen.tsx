@@ -4024,7 +4024,10 @@ export function ChatScreen({
                         <SearchIcon fontSize="small" />
                       </InputAdornment>
                     ),
-                    sx: { borderRadius: 2, bgcolor: "action.hover" },
+                    sx: {
+                      borderRadius: 2,
+                      bgcolor: dark ? "chat.input" : "action.hover",
+                    },
                   }}
                 />
                 <IconButton
@@ -4206,7 +4209,7 @@ export function ChatScreen({
                 py: 0.75,
                 borderBottom: "1px solid",
                 borderColor: "divider",
-                bgcolor: dark ? "rgba(76,180,160,0.12)" : "rgba(220,239,233,0.9)",
+                bgcolor: dark ? "rgba(130,169,248,0.10)" : "rgba(220,239,233,0.9)",
                 display: "flex",
                 flexDirection: "column",
                 gap: 0.5,
@@ -4321,9 +4324,9 @@ export function ChatScreen({
               if (files.length) stageFiles(files);
             }}
             sx={{
-              bgcolor: "background.default",
+              bgcolor: "chat.canvas",
               backgroundImage: dark
-                ? "radial-gradient(rgba(76,141,255,0.08) 1px, transparent 1px)"
+                ? "radial-gradient(rgba(130,169,248,0.06) 1px, transparent 1px)"
                 : "radial-gradient(rgba(15,107,92,0.06) 1px, transparent 1px)",
               backgroundSize: "18px 18px",
               outline: dragOverChat ? "2px dashed" : "none",
@@ -4356,7 +4359,10 @@ export function ChatScreen({
                 display="flex"
                 alignItems="center"
                 justifyContent="center"
-                sx={{ bgcolor: "rgba(15,107,92,0.12)", pointerEvents: "none" }}
+                sx={{
+                  bgcolor: dark ? "rgba(130,169,248,0.12)" : "rgba(15,107,92,0.12)",
+                  pointerEvents: "none",
+                }}
               >
                 <Paper sx={{ px: 3, py: 2 }}>
                   <Typography fontWeight={700}>Drop files to attach</Typography>
@@ -4827,7 +4833,10 @@ export function ChatScreen({
             }}
             sx={{
               mb: 1.5,
-              "& .MuiOutlinedInput-root": { borderRadius: 999, bgcolor: "action.hover" },
+              "& .MuiOutlinedInput-root": {
+                borderRadius: 999,
+                bgcolor: dark ? "chat.input" : "action.hover",
+              },
             }}
           />
           <List dense disablePadding sx={{ maxHeight: 360, overflow: "auto", mx: -0.5 }}>

@@ -129,7 +129,11 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
                     </Tooltip>
                   </InputAdornment>
                 ) : undefined,
-              sx: { borderRadius: 999, bgcolor: "action.hover" },
+              sx: {
+                borderRadius: 999,
+                bgcolor: (t) =>
+                  t.palette.mode === "dark" ? t.palette.chat.input : "action.hover",
+              },
             }}
           />
         </Box>

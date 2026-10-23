@@ -259,11 +259,7 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                           sx={{
                             px: 1.25,
                             py: 1,
-                            bgcolor: mine
-                              ? dark
-                                ? "rgba(76,141,255,0.22)"
-                                : "#DCEFE9"
-                              : "background.paper",
+                            bgcolor: mine ? "chat.sent" : "chat.received",
                             border: "1px solid",
                             borderColor: "divider",
                             borderRadius: mine ? "10px 10px 3px 10px" : "10px 10px 10px 3px",
@@ -393,32 +389,30 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                             bgcolor: bigEmoji
                               ? highlighted
                                 ? dark
-                                  ? "rgba(76, 180, 160, 0.18)"
+                                  ? "rgba(130, 169, 248, 0.14)"
                                   : "rgba(196, 232, 220, 0.55)"
                                 : "transparent"
                               : highlighted
                                 ? dark
-                                  ? "rgba(76, 180, 160, 0.32)"
+                                  ? "rgba(130, 169, 248, 0.18)"
                                   : "rgba(196, 232, 220, 0.95)"
                                 : m.kind === "deleted"
                                   ? "action.selected"
                                   : mine
-                                    ? dark
-                                      ? "rgba(76,141,255,0.22)"
-                                      : "#DCEFE9"
-                                    : "background.paper",
+                                    ? "chat.sent"
+                                    : "chat.received",
                             border: bigEmoji ? "1px solid transparent" : "1px solid",
                             borderColor: bigEmoji
                               ? "transparent"
                               : highlighted
                                 ? dark
-                                  ? "rgba(120, 210, 190, 0.7)"
+                                  ? "rgba(130, 169, 248, 0.45)"
                                   : "#7FBFB0"
                                 : m.kind === "deleted"
                                   ? "divider"
                                   : mine
                                     ? dark
-                                      ? "rgba(76,141,255,0.35)"
+                                      ? "rgba(42, 53, 70, 0.95)"
                                       : "#C5DFD6"
                                     : "divider",
                             borderRadius: mine ? "10px 10px 3px 10px" : "10px 10px 10px 3px",
@@ -427,7 +421,7 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                             boxShadow: bigEmoji
                               ? "none"
                               : dark
-                                ? "0 1px 2px rgba(0,0,0,0.25)"
+                                ? "0 1px 2px rgba(0,0,0,0.22)"
                                 : "0 1px 1px rgba(20,32,28,0.04)",
                             transition: "background-color 0.35s ease, border-color 0.35s ease",
                           }}
@@ -442,7 +436,7 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                                   right: mine ? -10 : undefined,
                                   fontSize: 18,
                                   color: "warning.main",
-                                  bgcolor: dark ? "rgba(30,36,48,0.95)" : "background.paper",
+                                  bgcolor: dark ? "chat.input" : "background.paper",
                                   borderRadius: "50%",
                                   p: 0.35,
                                   border: "1px solid",
@@ -467,15 +461,15 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                                 opacity: 0.55,
                                 p: 0.35,
                                 zIndex: 2,
-                                bgcolor: dark ? "rgba(20,28,40,0.72)" : "rgba(255,255,255,0.88)",
+                                bgcolor: dark ? "rgba(26, 35, 51, 0.88)" : "rgba(255,255,255,0.88)",
                                 border: "1px solid",
-                                borderColor: dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.08)",
+                                borderColor: dark ? "divider" : "rgba(0,0,0,0.08)",
                                 boxShadow: dark
-                                  ? "0 1px 2px rgba(0,0,0,0.35)"
+                                  ? "0 1px 2px rgba(0,0,0,0.28)"
                                   : "0 1px 2px rgba(20,32,28,0.08)",
                                 "&:hover": {
                                   opacity: 1,
-                                  bgcolor: dark ? "rgba(30,40,56,0.92)" : "rgba(255,255,255,1)",
+                                  bgcolor: dark ? "action.selected" : "rgba(255,255,255,1)",
                                 },
                               }}
                             >
@@ -816,11 +810,11 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                                   bgcolor: r.users.includes(profile.id)
                                     ? undefined
                                     : dark
-                                      ? "rgba(255,255,255,0.08)"
+                                      ? "chat.input"
                                       : "background.paper",
                                   borderWidth: 1.5,
                                   boxShadow: dark
-                                    ? "0 1px 3px rgba(0,0,0,0.35)"
+                                    ? "0 1px 3px rgba(0,0,0,0.28)"
                                     : "0 1px 2px rgba(20,32,28,0.1)",
                                   "& .MuiChip-label": { px: 0.85 },
                                 }}

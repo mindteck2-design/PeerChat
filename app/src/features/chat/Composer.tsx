@@ -533,7 +533,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                 border: "1px solid",
                 borderColor: "divider",
                 borderRadius: multiline ? 2 : 999,
-                bgcolor: "action.hover",
+                bgcolor: dark ? "chat.input" : "action.hover",
                 px: multiline ? 1 : 0.75,
                 py: multiline ? 0.75 : 0.35,
                 minWidth: 0,

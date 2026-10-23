@@ -324,22 +324,22 @@ export function MediaAlbum({
   const downloadHintIndex = shown.length >= 3 ? 1 : shown.length === 2 ? 0 : 0;
 
   const cardBorder = mine
-    ? dark ? "rgba(142, 180, 255, 0.22)" : "rgba(46,125,50,0.22)"
-    : dark ? "rgba(255,255,255,0.10)" : "divider";
+    ? dark ? "rgba(130, 169, 248, 0.22)" : "rgba(46,125,50,0.22)"
+    : dark ? "rgba(42, 53, 70, 0.95)" : "divider";
   const cardBg = mine
-    ? dark ? "rgba(18, 32, 56, 0.92)" : "rgba(255,255,255,0.35)"
-    : dark ? "rgba(255,255,255,0.05)" : "background.paper";
+    ? dark ? "rgba(32, 43, 64, 0.92)" : "rgba(255,255,255,0.35)"
+    : dark ? "rgba(25, 35, 51, 0.88)" : "background.paper";
   const cardHover = mine
-    ? dark ? "rgba(36, 54, 88, 0.95)" : "rgba(255,255,255,0.5)"
+    ? dark ? "rgba(38, 52, 74, 0.95)" : "rgba(255,255,255,0.5)"
     : "action.hover";
   const iconBg = mine
-    ? dark ? "rgba(76, 141, 255, 0.18)" : "rgba(46,125,50,0.14)"
-    : dark ? "rgba(100, 160, 255, 0.14)" : "rgba(25,118,210,0.12)";
+    ? dark ? "rgba(130, 169, 248, 0.16)" : "rgba(46,125,50,0.14)"
+    : dark ? "rgba(160, 184, 232, 0.14)" : "rgba(25,118,210,0.12)";
   const nameColor = mine
-    ? dark ? "#E7EEF8" : "success.dark"
+    ? dark ? "text.primary" : "success.dark"
     : "text.primary";
   const iconAccent = mine
-    ? dark ? "#8EB4FF" : theme.palette.success.dark
+    ? dark ? "primary.main" : theme.palette.success.dark
     : theme.palette.primary.main;
 
   return (

@@ -2170,7 +2170,7 @@ function DotsAndBoxes({
   const CELL = 72;
   const EDGE_W = 8;
 
-  const playerColor: Record<"A" | "B", string> = { A: "#4C8DFF", B: "#FF6B6B" };
+  const playerColor: Record<"A" | "B", string> = { A: "#82A9F8", B: "#F07878" };
   const playerLabel = (p: "A" | "B") => {
     if (mode === "local") return p === "A" ? "Blue" : "Red";
     return p === myPlayer ? "You" : (opponent?.display_name ?? "Them");
