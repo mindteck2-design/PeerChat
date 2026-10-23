@@ -607,8 +607,8 @@ export function SettingsScreen(props: {
               />
             </Box>
             <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
-              Off by default. When on, shows the Games tab (Snake, 2048, Tic-Tac-Toe, Rock Paper
-              Scissors, Dots & Boxes).
+              Off by default. Sessions limited to 5 minutes; LAN rematch max 3 games in a row.
+              Includes Snake, 2048, Tic-Tac-Toe, Rock Paper Scissors, and Dots & Boxes.
             </Typography>
           </Paper>
         )}

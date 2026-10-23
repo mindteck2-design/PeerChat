@@ -58,6 +58,16 @@ import {
   type GameHistoryEntry,
   type MpPhase as SessionMpPhase,
 } from "./gameSession";
+import {
+  SESSION_LIMIT_SEC,
+  MAX_LAN_STREAK,
+  addPlaySeconds,
+  canLanRematch,
+  clearLanStreak,
+  ensureLanStreakStarted,
+  getMinutesToday,
+  tryIncrementLanStreak,
+} from "./playtime";
 
 // ─── Types the host (App.tsx) must provide ───────────────────────────────────
 
@@ -147,6 +157,8 @@ export function GamesHub({
   const [active, setActive] = useState<GameId | null>(null);
   const [history, setHistory] = useState<GameHistoryEntry[]>(() => loadGameHistory());
   const [sessionTick, setSessionTick] = useState(0);
+  const [minutesToday, setMinutesToday] = useState(() => getMinutesToday());
+  const [sessionExpired, setSessionExpired] = useState(false);
   const childDispatch = useRef<GameDispatchFn | null>(null);
 
   useEffect(() => {
@@ -166,65 +178,137 @@ export function GamesHub({
     };
   }, [dispatchRef]);
 
+  // 5-minute session clock while any game screen is open.
+  useEffect(() => {
+    if (!active) return;
+    let sec = 0;
+    const id = window.setInterval(() => {
+      sec += 1;
+      addPlaySeconds(1);
+      if (sec % 60 === 0) setMinutesToday(getMinutesToday());
+      if (sec >= SESSION_LIMIT_SEC) {
+        window.clearInterval(id);
+        setActive(null);
+        setSessionExpired(true);
+        setSessionTick((n) => n + 1);
+        setHistory(loadGameHistory());
+        setMinutesToday(getMinutesToday());
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [active]);
+
   const back = () => {
     setActive(null);
     setSessionTick((n) => n + 1);
     setHistory(loadGameHistory());
+    setMinutesToday(getMinutesToday());
   };
 
-  if (active === "snake") return <Box sx={{ p: 3 }}><BackBar onBack={back} title="Snake" /><SnakeGame /></Box>;
-  if (active === "2048") return <Game2048 onBack={back} />;
-  if (active === "ttt") return (
-    <TicTacToe
-      onBack={back}
-      peers={peers}
-      myId={myId}
-      myName={myName}
-      sendGameMsg={sendGameMsg}
-      dispatchRef={childDispatch}
-      pendingInvite={pendingInvite?.game === "ttt" ? pendingInvite : null}
-      onPendingConsumed={onPendingConsumed}
-      onHistory={() => setHistory(loadGameHistory())}
-      replayLanMoves={replayLanMoves}
-    />
+  const sessionLimitDialog = (
+    <Dialog open={sessionExpired} onClose={() => setSessionExpired(false)}>
+      <DialogTitle>Session time up</DialogTitle>
+      <DialogContent>
+        <Typography>
+          You have been playing for {SESSION_LIMIT_SEC / 60} minutes. Take a break — games are
+          meant for short pauses between work.
+        </Typography>
+      </DialogContent>
+      <DialogActions>
+        <Button variant="contained" onClick={() => setSessionExpired(false)}>
+          OK
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
-  if (active === "rps") return (
-    <RockPaperScissors
-      onBack={back}
-      peers={peers}
-      myId={myId}
-      myName={myName}
-      sendGameMsg={sendGameMsg}
-      dispatchRef={childDispatch}
-      pendingInvite={pendingInvite?.game === "rps" ? pendingInvite : null}
-      onPendingConsumed={onPendingConsumed}
-      onHistory={() => setHistory(loadGameHistory())}
-    />
-  );
-  if (active === "dab") return (
-    <DotsAndBoxes
-      onBack={back}
-      peers={peers}
-      myId={myId}
-      myName={myName}
-      sendGameMsg={sendGameMsg}
-      dispatchRef={childDispatch}
-      pendingInvite={pendingInvite?.game === "dab" ? pendingInvite : null}
-      onPendingConsumed={onPendingConsumed}
-      onHistory={() => setHistory(loadGameHistory())}
-      replayLanMoves={replayLanMoves}
-    />
-  );
+
+  if (active === "snake") {
+    return (
+      <>
+        {sessionLimitDialog}
+        <Box sx={{ p: 3 }}><BackBar onBack={back} title="Snake" /><SnakeGame /></Box>
+      </>
+    );
+  }
+  if (active === "2048") {
+    return (
+      <>
+        {sessionLimitDialog}
+        <Game2048 onBack={back} />
+      </>
+    );
+  }
+  if (active === "ttt") {
+    return (
+      <>
+        {sessionLimitDialog}
+        <TicTacToe
+          onBack={back}
+          peers={peers}
+          myId={myId}
+          myName={myName}
+          sendGameMsg={sendGameMsg}
+          dispatchRef={childDispatch}
+          pendingInvite={pendingInvite?.game === "ttt" ? pendingInvite : null}
+          onPendingConsumed={onPendingConsumed}
+          onHistory={() => setHistory(loadGameHistory())}
+          replayLanMoves={replayLanMoves}
+        />
+      </>
+    );
+  }
+  if (active === "rps") {
+    return (
+      <>
+        {sessionLimitDialog}
+        <RockPaperScissors
+          onBack={back}
+          peers={peers}
+          myId={myId}
+          myName={myName}
+          sendGameMsg={sendGameMsg}
+          dispatchRef={childDispatch}
+          pendingInvite={pendingInvite?.game === "rps" ? pendingInvite : null}
+          onPendingConsumed={onPendingConsumed}
+          onHistory={() => setHistory(loadGameHistory())}
+        />
+      </>
+    );
+  }
+  if (active === "dab") {
+    return (
+      <>
+        {sessionLimitDialog}
+        <DotsAndBoxes
+          onBack={back}
+          peers={peers}
+          myId={myId}
+          myName={myName}
+          sendGameMsg={sendGameMsg}
+          dispatchRef={childDispatch}
+          pendingInvite={pendingInvite?.game === "dab" ? pendingInvite : null}
+          onPendingConsumed={onPendingConsumed}
+          onHistory={() => setHistory(loadGameHistory())}
+          replayLanMoves={replayLanMoves}
+        />
+      </>
+    );
+  }
 
   void sessionTick; // re-render badges when sessions change while on this screen
 
   return (
     <Box sx={{ p: 3, overflow: "auto", height: "100%" }}>
+      {sessionLimitDialog}
       <Typography variant="h5" fontWeight={700} gutterBottom>
         Games
       </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
         All games run entirely offline. LAN multiplayer uses the existing encrypted peer channel.
+      </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+        Today: {minutesToday} min · Sessions limited to {SESSION_LIMIT_SEC / 60} min · LAN rematch
+        max {MAX_LAN_STREAK} games
       </Typography>
       <Grid container spacing={2}>
         {GAME_CARDS.map((g) => {
@@ -421,6 +505,7 @@ export function applyInboundToSession(
       });
       setTttSession({ ...s, mpPhase: "done", mpError: `${peerName} resigned.` });
     } else if (p.type === "rematch") {
+      if (!tryIncrementLanStreak(s.matchId)) return;
       setTttSession({
         ...s,
         state: newTttState(),
@@ -518,6 +603,18 @@ export function applyInboundToSession(
         detail: "Opponent resigned",
       });
       setRpsSession({ ...s, mpPhase: "done", mpError: `${peerName} resigned.` });
+    } else if (p.type === "rematch") {
+      if (!tryIncrementLanStreak(s.matchId)) return;
+      setRpsSession({
+        ...s,
+        state: newRpsState(p.format),
+        format: p.format,
+        mpPhase: "playing",
+        myChoice: null,
+        theyCommitted: false,
+        theirReveal: null,
+        mpError: "",
+      });
     }
     return;
   }
@@ -605,6 +702,18 @@ export function applyInboundToSession(
         detail: "Opponent resigned",
       });
       setDabSession({ ...s, mpPhase: "done", mpError: `${peerName} resigned.` });
+    } else if (p.type === "rematch") {
+      if (!tryIncrementLanStreak(s.matchId)) return;
+      setDabSession({
+        ...s,
+        state: newDabState(p.rows, p.cols),
+        rows: p.rows,
+        cols: p.cols,
+        seq: 0,
+        mpPhase: "playing",
+        myPlayer: s.myPlayer === "A" ? "B" : "A",
+        mpError: "",
+      });
     }
   }
 }
@@ -934,6 +1043,12 @@ function TicTacToe({
   }, [mode, mpPhase, opponent, myRole, matchId, state, seq, inboundInvite, mpError]);
 
   useEffect(() => {
+    if (mode === "lan" && mpPhase === "playing" && matchId) {
+      ensureLanStreakStarted(matchId);
+    }
+  }, [mode, mpPhase, matchId]);
+
+  useEffect(() => {
     if (!pendingInvite || pendingInvite.game !== "ttt" || pendingConsumed.current) return;
     const fromPeer = peers.find((p) => p.user_id === pendingInvite.fromId);
     if (!fromPeer) return;
@@ -1053,6 +1168,10 @@ function TicTacToe({
         setMpPhase("done");
       }
       if (p.type === "rematch" && mpPhase === "done") {
+        if (!tryIncrementLanStreak(p.matchId || matchId)) {
+          setMpError(`Rematch limit reached (max ${MAX_LAN_STREAK} games).`);
+          return;
+        }
         setState(newTttState());
         setMpPhase("playing");
         setSeq(0);
@@ -1094,6 +1213,7 @@ function TicTacToe({
   }
 
   function startLocalGame() {
+    if (matchId) clearLanStreak(matchId);
     setMode("local");
     setState(newTttState());
     setMpPhase("idle");
@@ -1104,6 +1224,7 @@ function TicTacToe({
 
   function handleInvite(peer: Peer) {
     setPickerOpen(false);
+    if (matchId) clearLanStreak(matchId);
     const mid = `ttt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setMatchId(mid);
     setOpponent(peer);
@@ -1132,6 +1253,7 @@ function TicTacToe({
   function declineInvite() {
     if (!inboundInvite) return;
     sendMsg({ type: "decline", matchId });
+    if (matchId) clearLanStreak(matchId);
     setInboundInvite(null);
     setMpPhase("idle");
     setOpponent(null);
@@ -1166,16 +1288,25 @@ function TicTacToe({
   }
 
   async function handleRematch() {
-    setState(newTttState());
-    setSeq(0);
     if (mode === "lan") {
+      if (!tryIncrementLanStreak(matchId)) {
+        setMpError(`Rematch limit reached (max ${MAX_LAN_STREAK} games).`);
+        return;
+      }
+      setState(newTttState());
+      setSeq(0);
       setMpPhase("playing");
       setMyRole((r) => (r === "X" ? "O" : "X"));
       await sendMsg({ type: "rematch", matchId });
+      return;
     }
+    setState(newTttState());
+    setSeq(0);
   }
 
   const canMove = mode === "local" || (mpPhase === "playing" && state.turn === myRole);
+  const showRematch =
+    state.winner !== null && (mode !== "lan" || canLanRematch(matchId));
   const statusLabel = () => {
     if (state.winner === "draw") return "Draw!";
     if (state.winner) return mode === "local" ? `${state.winner} wins!` : (state.winner === myRole ? "You win!" : "You lose!");
@@ -1274,10 +1405,15 @@ function TicTacToe({
         })}
       </Box>
 
-      {state.winner !== null && (
+      {showRematch && (
         <Button variant="contained" sx={{ mt: 2 }} onClick={handleRematch}>
           {mode === "lan" ? "Rematch" : "Play again"}
         </Button>
+      )}
+      {mode === "lan" && state.winner !== null && !canLanRematch(matchId) && (
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+          Rematch limit reached (max {MAX_LAN_STREAK} games in a row).
+        </Typography>
       )}
     </Box>
   );
@@ -1365,11 +1501,21 @@ function RockPaperScissors({
       theyCommitted,
       theirReveal,
       inboundInvite: inboundInvite
-        ? { fromId: inboundInvite.from.user_id, matchId: inboundInvite.matchId, format: inboundInvite.format }
+        ? {
+            fromId: inboundInvite.from.user_id,
+            matchId: inboundInvite.matchId,
+            format: inboundInvite.format,
+          }
         : null,
       mpError,
     });
   }, [mode, mpPhase, opponent, matchId, format, state, myChoice, theyCommitted, theirReveal, inboundInvite, mpError]);
+
+  useEffect(() => {
+    if (mode === "lan" && mpPhase === "playing" && matchId) {
+      ensureLanStreakStarted(matchId);
+    }
+  }, [mode, mpPhase, matchId]);
 
   useEffect(() => {
     if (!pendingInvite || pendingInvite.game !== "rps" || pendingConsumed.current) return;
@@ -1474,6 +1620,10 @@ function RockPaperScissors({
         setMpPhase("done");
       }
       if (p.type === "rematch" && (mpPhase === "done" || mpPhase === "playing")) {
+        if (!tryIncrementLanStreak(p.matchId || matchId)) {
+          setMpError(`Rematch limit reached (max ${MAX_LAN_STREAK} games).`);
+          return;
+        }
         setState(newRpsState(p.format));
         setFormat(p.format);
         setMpPhase("playing");
@@ -1539,6 +1689,7 @@ function RockPaperScissors({
 
   function handleInvite(peer: Peer) {
     setPickerOpen(false);
+    if (matchId) clearLanStreak(matchId);
     const mid = `rps-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setMatchId(mid);
     setOpponent(peer);
@@ -1571,6 +1722,7 @@ function RockPaperScissors({
   function declineInvite() {
     if (!inboundInvite) return;
     sendMsg({ type: "decline", matchId });
+    if (matchId) clearLanStreak(matchId);
     setInboundInvite(null);
     setMpPhase("idle");
     setOpponent(null);
@@ -1578,14 +1730,23 @@ function RockPaperScissors({
   }
 
   async function rematch() {
+    if (mode === "lan") {
+      if (!tryIncrementLanStreak(matchId)) {
+        setMpError(`Rematch limit reached (max ${MAX_LAN_STREAK} games).`);
+        return;
+      }
+      setState(newRpsState(format));
+      setMyChoice(null);
+      setTheyCommitted(false);
+      setTheirReveal(null);
+      setMpPhase("playing");
+      await sendMsg({ type: "rematch", matchId, format });
+      return;
+    }
     setState(newRpsState(format));
     setMyChoice(null);
     setTheyCommitted(false);
     setTheirReveal(null);
-    if (mode === "lan") {
-      setMpPhase("playing");
-      await sendMsg({ type: "rematch", matchId, format });
-    }
   }
 
   // Local two-player logic
@@ -1603,6 +1764,7 @@ function RockPaperScissors({
     setLocalRevealed(false);
   }
   function startLocalGame() {
+    if (matchId) clearLanStreak(matchId);
     setMode("local");
     setState(newRpsState(format));
     setLocalP1Choice(null);
@@ -1766,9 +1928,16 @@ function RockPaperScissors({
           <Alert severity={state.myScore > state.theirScore ? "success" : state.myScore === state.theirScore ? "info" : "error"}>
             {winnerLabel()}
           </Alert>
-          <Button variant="contained" sx={{ mt: 1 }} onClick={rematch}>
-            {mode === "lan" ? "Rematch" : "Play again"}
-          </Button>
+          {(mode !== "lan" || canLanRematch(matchId)) && (
+            <Button variant="contained" sx={{ mt: 1 }} onClick={rematch}>
+              {mode === "lan" ? "Rematch" : "Play again"}
+            </Button>
+          )}
+          {mode === "lan" && !canLanRematch(matchId) && (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              Rematch limit reached (max {MAX_LAN_STREAK} games in a row).
+            </Typography>
+          )}
         </Box>
       )}
 
@@ -1926,6 +2095,12 @@ function DotsAndBoxes({
   }, [mode, mpPhase, opponent, myPlayer, matchId, state, seq, inboundInvite, mpError]);
 
   useEffect(() => {
+    if (mode === "lan" && mpPhase === "playing" && matchId) {
+      ensureLanStreakStarted(matchId);
+    }
+  }, [mode, mpPhase, matchId]);
+
+  useEffect(() => {
     if (!pendingInvite || pendingInvite.game !== "dab" || pendingConsumed.current) return;
     const fromPeer = peers.find((p) => p.user_id === pendingInvite.fromId);
     if (!fromPeer) return;
@@ -2043,6 +2218,10 @@ function DotsAndBoxes({
         setMpPhase("done");
       }
       if (p.type === "rematch") {
+        if (!tryIncrementLanStreak(p.matchId || matchId)) {
+          setMpError(`Rematch limit reached (max ${MAX_LAN_STREAK} games).`);
+          return;
+        }
         setState(newDabState(p.rows, p.cols));
         setMpPhase("playing");
         setSeq(0);
@@ -2071,6 +2250,7 @@ function DotsAndBoxes({
 
   function handleInvite(peer: Peer) {
     setPickerOpen(false);
+    if (matchId) clearLanStreak(matchId);
     const mid = `dab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setMatchId(mid);
     setOpponent(peer);
@@ -2099,6 +2279,7 @@ function DotsAndBoxes({
   function declineInvite() {
     if (!inboundInvite) return;
     sendMsg({ type: "decline", matchId });
+    if (matchId) clearLanStreak(matchId);
     setInboundInvite(null);
     setMpPhase("idle");
     setOpponent(null);
@@ -2146,16 +2327,24 @@ function DotsAndBoxes({
   }
 
   async function rematch() {
-    setState(newDabState(preset.rows, preset.cols));
-    setSeq(0);
     if (mode === "lan") {
+      if (!tryIncrementLanStreak(matchId)) {
+        setMpError(`Rematch limit reached (max ${MAX_LAN_STREAK} games).`);
+        return;
+      }
+      setState(newDabState(preset.rows, preset.cols));
+      setSeq(0);
       setMpPhase("playing");
       setMyPlayer((pl) => (pl === "A" ? "B" : "A"));
       await sendMsg({ type: "rematch", matchId, rows: preset.rows, cols: preset.cols });
+      return;
     }
+    setState(newDabState(preset.rows, preset.cols));
+    setSeq(0);
   }
 
   function startLocalGame() {
+    if (matchId) clearLanStreak(matchId);
     setMode("local");
     setState(newDabState(preset.rows, preset.cols));
     setMpPhase("idle");
@@ -2455,9 +2644,16 @@ function DotsAndBoxes({
               ? `${playerLabel("B")} wins! (${state.scoreB}–${state.scoreA})`
               : `Draw! (${state.scoreA}–${state.scoreB})`}
           </Alert>
-          <Button variant="contained" sx={{ mt: 1 }} onClick={rematch}>
-            {mode === "lan" ? "Rematch" : "Play again"}
-          </Button>
+          {(mode !== "lan" || canLanRematch(matchId)) && (
+            <Button variant="contained" sx={{ mt: 1 }} onClick={rematch}>
+              {mode === "lan" ? "Rematch" : "Play again"}
+            </Button>
+          )}
+          {mode === "lan" && !canLanRematch(matchId) && (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              Rematch limit reached (max {MAX_LAN_STREAK} games in a row).
+            </Typography>
+          )}
         </Box>
       )}
     </Box>
