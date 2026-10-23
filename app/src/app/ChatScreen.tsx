@@ -17,6 +17,7 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  Fab,
   Fade,
   Grow,
   IconButton,
@@ -87,6 +88,7 @@ import LogoutIcon from "@mui/icons-material/LogoutRounded";
 import PersonAddAltIcon from "@mui/icons-material/PersonAddAltRounded";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeftRounded";
 import ChevronRightIcon from "@mui/icons-material/ChevronRightRounded";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 
 import {
   isPermissionGranted,
@@ -269,8 +271,17 @@ export function ChatScreen({
   const [searchHits, setSearchHits] = useState<
     { id: string; title: string; detail: string; conversationId?: string; messageId?: string }[]
   >([]);
-  /** Conversation ids whose history matched the chats-sidebar query (message body). */
-  const [sidebarMsgMatchIds, setSidebarMsgMatchIds] = useState<string[]>([]);
+  /** Message hits for chats-sidebar search (snippet + jump target). */
+  const [sidebarMsgHits, setSidebarMsgHits] = useState<
+    {
+      conversationId: string;
+      messageId: string;
+      chatTitle: string;
+      snippet: string;
+      createdAt?: string;
+    }[]
+  >([]);
+  const [sidebarMsgSearchBusy, setSidebarMsgSearchBusy] = useState(false);
   const [announceOpen, setAnnounceOpen] = useState(false);
   const [pollOpen, setPollOpen] = useState(false);
   const [snippetOpen, setSnippetOpen] = useState(false);
@@ -397,8 +408,10 @@ export function ChatScreen({
     onCancel?: () => void;
   } | null>(null);
   const [dragOverChat, setDragOverChat] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const stickToBottomRef = useRef(true);
   const ignoreScrollRef = useRef(false);
+  const highlightMsgIdRef = useRef<string | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   /** Hide scroller until first bottom-pin so chat never flashes at the top. */
   const [chatPaintReady, setChatPaintReady] = useState(true);
@@ -446,18 +459,15 @@ export function ChatScreen({
     [peers, profile.id]
   );
 
+  // Sidebar search: Chats section = name/title matches only. Message hits are listed separately.
   const filteredConvs = useMemo(() => {
     const q = chatSearch.trim().toLowerCase();
     if (!q) return convs;
-    const msgHits = new Set(sidebarMsgMatchIds);
     return convs.filter((c) => {
       const title = (c.kind === "dm" ? c.peer_name : c.title) || "";
-      if (title.toLowerCase().includes(q)) return true;
-      const preview = (lastPreviews[c.id] || "").toLowerCase();
-      if (preview.includes(q)) return true;
-      return msgHits.has(c.id);
+      return title.toLowerCase().includes(q);
     });
-  }, [convs, chatSearch, lastPreviews, sidebarMsgMatchIds]);
+  }, [convs, chatSearch]);
 
   const isAdmin = useMemo(
     () =>
@@ -616,25 +626,33 @@ export function ChatScreen({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Chats sidebar: also match decrypted message bodies (title/preview already covered).
+  // Chats sidebar: collect exact message hits (snippet + jump), not just conversation ids.
   useEffect(() => {
     const q = chatSearch.trim().toLowerCase();
     if (tab !== 1 || q.length < 2) {
-      setSidebarMsgMatchIds([]);
+      setSidebarMsgHits([]);
+      setSidebarMsgSearchBusy(false);
       return;
     }
     let cancel = false;
+    setSidebarMsgSearchBusy(true);
     const timer = window.setTimeout(() => {
       void (async () => {
-        const matched: string[] = [];
+        const hits: {
+          conversationId: string;
+          messageId: string;
+          chatTitle: string;
+          snippet: string;
+          createdAt?: string;
+        }[] = [];
+        const TOTAL_CAP = 30;
+        const PER_CHAT_CAP = 4;
+        const SCAN_CAP = 200;
+
         for (const c of convs) {
-          if (cancel || matched.length >= 30) break;
-          const title = ((c.kind === "dm" ? c.peer_name : c.title) || "").toLowerCase();
-          if (title.includes(q)) continue; // already visible via title filter
-          if ((lastPreviews[c.id] || "").toLowerCase().includes(q)) {
-            matched.push(c.id);
-            continue;
-          }
+          if (cancel || hits.length >= TOTAL_CAP) break;
+          const chatTitle =
+            c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
           try {
             if (c.kind === "group") {
               try {
@@ -646,8 +664,8 @@ export function ChatScreen({
             let beforeSortKey: string | null = null;
             let beforeId: string | null = null;
             let scanned = 0;
-            let found = false;
-            while (!found && scanned < 160) {
+            let perChat = 0;
+            while (perChat < PER_CHAT_CAP && scanned < SCAN_CAP && hits.length < TOTAL_CAP) {
               const page = await peerApi.listMessages(c.id, {
                 limit: MESSAGE_PAGE_SIZE,
                 beforeSortKey,
@@ -655,8 +673,11 @@ export function ChatScreen({
               });
               if (cancel || !page.messages.length) break;
               scanned += page.messages.length;
-              for (const m of page.messages) {
-                if (m.kind === "file_notice" || m.kind === "deleted" || m.kind === "poll_vote") continue;
+              // Newest first within page.
+              for (const m of [...page.messages].reverse()) {
+                if (m.kind === "file_notice" || m.kind === "deleted" || m.kind === "poll_vote") {
+                  continue;
+                }
                 let textBody = "";
                 try {
                   textBody =
@@ -670,11 +691,23 @@ export function ChatScreen({
                 } catch {
                   continue;
                 }
-                if (textBody.toLowerCase().includes(q)) {
-                  found = true;
-                  matched.push(c.id);
-                  break;
-                }
+                if (!textBody.toLowerCase().includes(q)) continue;
+                const idx = textBody.toLowerCase().indexOf(q);
+                const start = Math.max(0, idx - 24);
+                const end = Math.min(textBody.length, idx + q.length + 48);
+                const snippet =
+                  (start > 0 ? "…" : "") +
+                  textBody.slice(start, end).replace(/\s+/g, " ").trim() +
+                  (end < textBody.length ? "…" : "");
+                hits.push({
+                  conversationId: c.id,
+                  messageId: m.id,
+                  chatTitle,
+                  snippet,
+                  createdAt: m.created_at,
+                });
+                perChat += 1;
+                if (perChat >= PER_CHAT_CAP || hits.length >= TOTAL_CAP) break;
               }
               if (!page.has_more_older) break;
               const oldest = page.messages[0]!;
@@ -682,10 +715,13 @@ export function ChatScreen({
               beforeId = oldest.id;
             }
           } catch {
-            /* skip */
+            /* skip locked conversation */
           }
         }
-        if (!cancel) setSidebarMsgMatchIds(matched);
+        if (!cancel) {
+          setSidebarMsgHits(hits);
+          setSidebarMsgSearchBusy(false);
+        }
       })();
     }, 280);
     return () => {
@@ -693,7 +729,7 @@ export function ChatScreen({
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatSearch, tab, convs, lastPreviews, identity, profile.id]);
+  }, [chatSearch, tab, convs, identity, profile.id]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -853,6 +889,7 @@ export function ChatScreen({
     const conv = active;
     let cancel = false;
     stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
     setChatPaintReady(false);
     setMessages([]);
     setHasMoreOlder(false);
@@ -956,16 +993,45 @@ export function ChatScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.id]);
 
-  function scrollChatToBottom(_behavior: ScrollBehavior = "auto") {
+  function scrollChatToBottom(behavior: ScrollBehavior = "auto") {
     const el = scroller.current;
     if (!el) return;
     ignoreScrollRef.current = true;
-    el.scrollTop = el.scrollHeight;
     stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+    if (behavior === "smooth") {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      window.setTimeout(() => {
+        ignoreScrollRef.current = false;
+      }, 400);
+    } else {
+      el.scrollTop = el.scrollHeight;
+      window.setTimeout(() => {
+        ignoreScrollRef.current = false;
+      }, 50);
+    }
+  }
+
+  /** Center a message in the chat scroller (retries while decrypt / layout settle). */
+  function centerMessageInScroller(messageId: string) {
+    const scrollerEl = scroller.current;
+    const target = document.getElementById(`msg-${messageId}`);
+    if (!scrollerEl || !target) return false;
+    stickToBottomRef.current = false;
+    ignoreScrollRef.current = true;
+    const sRect = scrollerEl.getBoundingClientRect();
+    const tRect = target.getBoundingClientRect();
+    const delta = tRect.top + tRect.height / 2 - (sRect.top + sRect.height / 2);
+    if (Math.abs(delta) > 1) {
+      scrollerEl.scrollTop += delta;
+    }
     window.setTimeout(() => {
       ignoreScrollRef.current = false;
-    }, 50);
+    }, 80);
+    return true;
   }
+
+  highlightMsgIdRef.current = highlightMsgId;
 
   // Keep pinned before paint when content changes (no visible jump while already revealed).
   // Do NOT depend on transfer progress ticks — those must not re-pin scroll.
@@ -973,9 +1039,14 @@ export function ChatScreen({
     const el = scroller.current;
     const anchor = olderScrollAnchorRef.current;
     if (anchor && el) {
-      el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
-      olderScrollAnchorRef.current = null;
-      return;
+      // While seeking a search hit, don't restore the "load older" anchor — it fights jump-to.
+      if (highlightMsgIdRef.current) {
+        olderScrollAnchorRef.current = null;
+      } else {
+        el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+        olderScrollAnchorRef.current = null;
+        return;
+      }
     }
     if (!active?.id || highlightMsgId) return;
     if (!stickToBottomRef.current) return;
@@ -992,7 +1063,8 @@ export function ChatScreen({
     loadingOlderRef.current = true;
     try {
       const el = scroller.current;
-      if (el) {
+      // Skip anchor restore while jumping to a search/pin hit.
+      if (el && !highlightMsgIdRef.current) {
         olderScrollAnchorRef.current = { height: el.scrollHeight, top: el.scrollTop };
       }
       const oldest = messages[0]!;
@@ -1031,7 +1103,7 @@ export function ChatScreen({
     return () => ro.disconnect();
   }, [active?.id, highlightMsgId, messages.length]);
 
-  // WhatsApp-style jump + flash when opening a saved / in-chat / global-search hit.
+  // Jump + flash for search / pin / saved hits. Re-center after decrypt & layout settle.
   useEffect(() => {
     if (!highlightMsgId || !active) return;
     if (!messages.some((m) => m.id === highlightMsgId)) {
@@ -1039,20 +1111,25 @@ export function ChatScreen({
       if (hasMoreOlder && !loadingOlderRef.current) {
         void loadOlderMessages();
       }
-      const clear = window.setTimeout(() => setHighlightMsgId(null), 12000);
+      const clear = window.setTimeout(() => setHighlightMsgId(null), 15000);
       return () => window.clearTimeout(clear);
     }
     stickToBottomRef.current = false;
-    requestAnimationFrame(() => {
-      document.getElementById(`msg-${highlightMsgId}`)?.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
-    });
-    const clear = window.setTimeout(() => setHighlightMsgId(null), 2800);
-    return () => window.clearTimeout(clear);
+    setShowJumpToLatest(true);
+    const timers: number[] = [];
+    const center = () => centerMessageInScroller(highlightMsgId);
+    center();
+    requestAnimationFrame(center);
+    // Retries cover Grow/Fade entrance, decrypt text expansion, and image layout.
+    for (const delay of [80, 200, 400, 700, 1100, 1600]) {
+      timers.push(window.setTimeout(center, delay));
+    }
+    timers.push(window.setTimeout(() => setHighlightMsgId(null), 3600));
+    return () => {
+      for (const t of timers) window.clearTimeout(t);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [highlightMsgId, active?.id, messages, hasMoreOlder]);
+  }, [highlightMsgId, active?.id, messages, hasMoreOlder, plain[highlightMsgId || ""]]);
 
   useEffect(() => {
     if (!active || !messages.some((m) => m.sender_id !== profile.id)) return;
@@ -1211,6 +1288,18 @@ export function ChatScreen({
     setInChatSearchOpen(false);
     setInChatQuery("");
     setActive(c);
+  }
+
+  /** Open a chat from sidebar message search and scroll to the matching message. */
+  function openSidebarMsgHit(hit: { conversationId: string; messageId: string }) {
+    const c = convs.find((x) => x.id === hit.conversationId);
+    if (!c) return;
+    if (active?.id !== c.id) {
+      selectConversation(c);
+    }
+    stickToBottomRef.current = false;
+    setHighlightMsgId(hit.messageId);
+    setTab(1);
   }
 
   function notifyTyping() {
@@ -2140,14 +2229,8 @@ export function ChatScreen({
   ]);
 
   function jumpToInChatHit(messageId: string) {
-    setHighlightMsgId(messageId);
     stickToBottomRef.current = false;
-    requestAnimationFrame(() => {
-      document.getElementById(`msg-${messageId}`)?.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
-    });
+    setHighlightMsgId(messageId);
   }
 
   const {
@@ -2840,7 +2923,7 @@ export function ChatScreen({
     if (/integrity/i.test(raw)) return raw;
     if (/invalid destination/i.test(raw)) return raw;
     if (/offline|no ip|no port|uploader|connect|tls|fingerprint|forbidden|missing chunk/i.test(raw)) {
-      return "Can't reach the sender. Keep PeerChat open on both computers on the same LAN, then retry.";
+      return "Can't reach the sender. Keep PeerChat running on their PC (tray is OK — even if the screen is locked). If their PC sleeps, powers off, or leaves the LAN, retry when they're back.";
     }
     return raw;
   }
@@ -3636,6 +3719,9 @@ export function ChatScreen({
     fileLocalPaths,
     fileMetaReady,
     filteredConvs,
+    sidebarMsgHits,
+    sidebarMsgSearchBusy,
+    openSidebarMsgHit,
     gameInviteBusy,
     gamesOn,
     handleRemoveLeftGroup,
@@ -3940,7 +4026,10 @@ export function ChatScreen({
                         <SearchIcon fontSize="small" />
                       </InputAdornment>
                     ),
-                    sx: { borderRadius: 2, bgcolor: "action.hover" },
+                    sx: {
+                      borderRadius: 2,
+                      bgcolor: dark ? "chat.input" : "action.hover",
+                    },
                   }}
                 />
                 <IconButton
@@ -4122,7 +4211,7 @@ export function ChatScreen({
                 py: 0.75,
                 borderBottom: "1px solid",
                 borderColor: "divider",
-                bgcolor: dark ? "rgba(76,180,160,0.12)" : "rgba(220,239,233,0.9)",
+                bgcolor: dark ? "rgba(130,169,248,0.10)" : "rgba(220,239,233,0.9)",
                 display: "flex",
                 flexDirection: "column",
                 gap: 0.5,
@@ -4139,14 +4228,8 @@ export function ChatScreen({
                   <Box
                     key={m.id}
                     onClick={() => {
-                      setHighlightMsgId(m.id);
                       stickToBottomRef.current = false;
-                      requestAnimationFrame(() => {
-                        document.getElementById(`msg-${m.id}`)?.scrollIntoView({
-                          behavior: "smooth",
-                          block: "center",
-                        });
-                      });
+                      setHighlightMsgId(m.id);
                     }}
                     sx={{
                       display: "flex",
@@ -4207,91 +4290,124 @@ export function ChatScreen({
           </Alert>
         )}
 
-        <Box
-          ref={scroller}
-          flex={1}
-          minHeight={0}
-          px={2}
-          py={1.5}
-          overflow="auto"
-          position="relative"
-          onScroll={(e) => {
-            if (ignoreScrollRef.current) return;
-            const el = e.currentTarget;
-            const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-            if (dist < 80) stickToBottomRef.current = true;
-            else if (dist > 120) stickToBottomRef.current = false;
-            if (el.scrollTop < 120) void loadOlderMessages();
-          }}
-          onDragOver={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setDragOverChat(true);
-          }}
-          onDragLeave={() => setDragOverChat(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setDragOverChat(false);
-            const files = Array.from(e.dataTransfer.files || []);
-            if (files.length) stageFiles(files);
-          }}
-          sx={{
-            bgcolor: "background.default",
-            backgroundImage: dark
-              ? "radial-gradient(rgba(76,141,255,0.08) 1px, transparent 1px)"
-              : "radial-gradient(rgba(15,107,92,0.06) 1px, transparent 1px)",
-            backgroundSize: "18px 18px",
-            outline: dragOverChat ? "2px dashed" : "none",
-            outlineColor: "primary.main",
-            outlineOffset: -8,
-            opacity: chatPaintReady ? 1 : 0,
-            transition: chatPaintReady ? "opacity 80ms ease-out" : "none",
-          }}
-        >
-          {/*
-            Inner column with minHeight 100% + justify flex-end keeps short threads
-            visually at the bottom without a flex:1 spacer (which inflates scrollHeight
-            and lets you scroll into empty space past the last message).
-          */}
+        <Box flex={1} minHeight={0} position="relative" display="flex" flexDirection="column">
           <Box
-            minHeight="100%"
-            display="flex"
-            flexDirection="column"
-            justifyContent="flex-end"
-            gap={0.75}
+            ref={scroller}
+            flex={1}
+            minHeight={0}
+            px={2}
+            py={1.5}
+            overflow="auto"
+            position="relative"
+            onScroll={(e) => {
+              if (ignoreScrollRef.current) return;
+              const el = e.currentTarget;
+              const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+              if (dist < 80) {
+                stickToBottomRef.current = true;
+                setShowJumpToLatest(false);
+              } else if (dist > 140) {
+                stickToBottomRef.current = false;
+                setShowJumpToLatest(true);
+              }
+              if (el.scrollTop < 120) void loadOlderMessages();
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragOverChat(true);
+            }}
+            onDragLeave={() => setDragOverChat(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragOverChat(false);
+              const files = Array.from(e.dataTransfer.files || []);
+              if (files.length) stageFiles(files);
+            }}
+            sx={{
+              bgcolor: "chat.canvas",
+              backgroundImage: dark
+                ? "radial-gradient(rgba(130,169,248,0.06) 1px, transparent 1px)"
+                : "radial-gradient(rgba(15,107,92,0.06) 1px, transparent 1px)",
+              backgroundSize: "18px 18px",
+              outline: dragOverChat ? "2px dashed" : "none",
+              outlineColor: "primary.main",
+              outlineOffset: -8,
+              opacity: chatPaintReady ? 1 : 0,
+              transition: chatPaintReady ? "opacity 80ms ease-out" : "none",
+            }}
           >
-          {dragOverChat && (
+            {/*
+              Inner column with minHeight 100% + justify flex-end keeps short threads
+              visually at the bottom without a flex:1 spacer (which inflates scrollHeight
+              and lets you scroll into empty space past the last message).
+            */}
             <Box
-              position="absolute"
-              top={0}
-              left={0}
-              right={0}
-              bottom={0}
-              zIndex={5}
+              minHeight="100%"
               display="flex"
-              alignItems="center"
-              justifyContent="center"
-              sx={{ bgcolor: "rgba(15,107,92,0.12)", pointerEvents: "none" }}
+              flexDirection="column"
+              justifyContent="flex-end"
+              gap={0.75}
             >
-              <Paper sx={{ px: 3, py: 2 }}>
-                <Typography fontWeight={700}>Drop files to attach</Typography>
-              </Paper>
+            {dragOverChat && (
+              <Box
+                position="absolute"
+                top={0}
+                left={0}
+                right={0}
+                bottom={0}
+                zIndex={5}
+                display="flex"
+                alignItems="center"
+                justifyContent="center"
+                sx={{
+                  bgcolor: dark ? "rgba(130,169,248,0.12)" : "rgba(15,107,92,0.12)",
+                  pointerEvents: "none",
+                }}
+              >
+                <Paper sx={{ px: 3, py: 2 }}>
+                  <Typography fontWeight={700}>Drop files to attach</Typography>
+                </Paper>
+              </Box>
+            )}
+            {!active && (
+              <Box m="auto" textAlign="center" maxWidth={360}>
+                <Typography variant="h5" gutterBottom>
+                  Peer chat on your LAN
+                </Typography>
+                <Typography color="text.secondary">
+                  Messages wait in your outbox if the other PC is offline, then deliver when they
+                  return.
+                </Typography>
+              </Box>
+            )}
+            <MessageList vm={vm} />
             </Box>
-          )}
-          {!active && (
-            <Box m="auto" textAlign="center" maxWidth={360}>
-              <Typography variant="h5" gutterBottom>
-                Peer chat on your LAN
-              </Typography>
-              <Typography color="text.secondary">
-                Messages wait in your outbox if the other PC is offline, then deliver when they
-                return.
-              </Typography>
-            </Box>
-          )}
-          <MessageList vm={vm} />
           </Box>
+
+          <Fade in={!!active && showJumpToLatest} unmountOnExit>
+            <Box
+              sx={{
+                position: "absolute",
+                right: 16,
+                bottom: 12,
+                zIndex: 4,
+              }}
+            >
+              <Tooltip title="Jump to latest" placement="left">
+                <Fab
+                  size="small"
+                  color="primary"
+                  aria-label="Scroll to bottom"
+                  onClick={() => scrollChatToBottom("smooth")}
+                  sx={{ width: 40, height: 40, boxShadow: 3 }}
+                >
+                  <KeyboardArrowDownIcon />
+                </Fab>
+              </Tooltip>
+            </Box>
+          </Fade>
         </Box>
 
         <Composer vm={vm} />
@@ -4719,7 +4835,10 @@ export function ChatScreen({
             }}
             sx={{
               mb: 1.5,
-              "& .MuiOutlinedInput-root": { borderRadius: 999, bgcolor: "action.hover" },
+              "& .MuiOutlinedInput-root": {
+                borderRadius: 999,
+                bgcolor: dark ? "chat.input" : "action.hover",
+              },
             }}
           />
           <List dense disablePadding sx={{ maxHeight: 360, overflow: "auto", mx: -0.5 }}>
@@ -4981,14 +5100,8 @@ export function ChatScreen({
             const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|svg|heic|avif)$/i;
             const jump = (messageId: string) => {
               setChatInfoOpen(false);
-              setHighlightMsgId(messageId);
               stickToBottomRef.current = false;
-              requestAnimationFrame(() => {
-                document.getElementById(`msg-${messageId}`)?.scrollIntoView({
-                  behavior: "smooth",
-                  block: "center",
-                });
-              });
+              setHighlightMsgId(messageId);
             };
             if (chatInfoTab === 0 || chatInfoTab === 1) {
               // Flatten attachment ids from file notices and captioned messages.

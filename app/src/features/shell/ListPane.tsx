@@ -4,6 +4,8 @@ import {
   ListItemButton, ListItemIcon, ListItemText, TextField, Tooltip, Typography,
 } from "@mui/material";
 import CampaignIcon from "@mui/icons-material/CampaignRounded";
+import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutlineRounded";
+import CircularProgress from "@mui/material/CircularProgress";
 import GroupAddIcon from "@mui/icons-material/GroupAddRounded";
 import GroupIcon from "@mui/icons-material/GroupRounded";
 import GroupsIcon from "@mui/icons-material/GroupsRounded";
@@ -29,6 +31,7 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
     messages,
     nav,
     openDm,
+    openSidebarMsgHit,
     others,
     peers,
     profile,
@@ -38,11 +41,14 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
     setChatSearch,
     setConvMenu,
     setGroupOpen,
+    sidebarMsgHits,
+    sidebarMsgSearchBusy,
     tab,
     text,
     transfers,
     version
   } = vm;
+  const searchingChats = tab === 1 && !!chatSearch.trim();
   return (
     <Box
         sx={{
@@ -123,7 +129,11 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
                     </Tooltip>
                   </InputAdornment>
                 ) : undefined,
-              sx: { borderRadius: 999, bgcolor: "action.hover" },
+              sx: {
+                borderRadius: 999,
+                bgcolor: (t) =>
+                  t.palette.mode === "dark" ? t.palette.chat.input : "action.hover",
+              },
             }}
           />
         </Box>
@@ -249,6 +259,15 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
           )}
           {nav !== "announcements" && tab === 1 && (
             <List dense disablePadding>
+              {searchingChats && filteredConvs.length > 0 && (
+                <Typography
+                  variant="overline"
+                  color="text.secondary"
+                  sx={{ px: 2.5, pt: 1, display: "block", letterSpacing: 0.6 }}
+                >
+                  Chats
+                </Typography>
+              )}
               {filteredConvs.map((c) => {
                 const title = c.kind === "dm" ? c.peer_name || "Direct" : c.title || "Group";
                 const dmPeer =
@@ -406,13 +425,93 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
                   </ListItemButton>
                 );
               })}
-              {!filteredConvs.length && (
+
+              {searchingChats && (
+                <>
+                  <Typography
+                    variant="overline"
+                    color="text.secondary"
+                    sx={{
+                      px: 2.5,
+                      pt: filteredConvs.length ? 1.25 : 1,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 1,
+                      letterSpacing: 0.6,
+                    }}
+                  >
+                    Messages
+                    {sidebarMsgSearchBusy && <CircularProgress size={12} thickness={5} />}
+                  </Typography>
+                  {(sidebarMsgHits || []).map((hit) => (
+                    <ListItemButton
+                      key={`${hit.conversationId}-${hit.messageId}`}
+                      onClick={() => openSidebarMsgHit?.(hit)}
+                      sx={{ py: 1, px: 2, alignItems: "flex-start", gap: 1.25 }}
+                    >
+                      <ListItemIcon sx={{ minWidth: 36, mt: 0.35 }}>
+                        <ChatBubbleOutlineIcon fontSize="small" color="action" />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={
+                          <Box display="flex" alignItems="baseline" gap={1}>
+                            <Typography fontWeight={600} fontSize={14} noWrap flex={1}>
+                              {hit.chatTitle}
+                            </Typography>
+                            {hit.createdAt && (
+                              <Typography
+                                variant="caption"
+                                color="text.secondary"
+                                sx={{ flexShrink: 0, fontSize: 11 }}
+                              >
+                                {formatPreviewTime(hit.createdAt)}
+                              </Typography>
+                            )}
+                          </Box>
+                        }
+                        secondary={
+                          <Typography
+                            variant="body2"
+                            color="text.secondary"
+                            sx={{
+                              fontSize: 13,
+                              lineHeight: 1.35,
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical",
+                              overflow: "hidden",
+                            }}
+                          >
+                            {hit.snippet}
+                          </Typography>
+                        }
+                        secondaryTypographyProps={{ component: "div" }}
+                      />
+                    </ListItemButton>
+                  ))}
+                  {!sidebarMsgSearchBusy &&
+                    !(sidebarMsgHits || []).length &&
+                    filteredConvs.length > 0 && (
+                      <Typography sx={{ px: 2.5, py: 1 }} color="text.secondary" variant="body2">
+                        No messages match “{chatSearch.trim()}”.
+                      </Typography>
+                    )}
+                </>
+              )}
+
+              {!filteredConvs.length && !searchingChats && (
                 <Typography sx={{ p: 2 }} color="text.secondary" variant="body2">
-                  {chatSearch
-                    ? "No chats match your search."
-                    : "No chats yet. When someone messages you, their chat appears here — or start one from People."}
+                  No chats yet. When someone messages you, their chat appears here — or start one from People.
                 </Typography>
               )}
+              {searchingChats &&
+                !filteredConvs.length &&
+                !sidebarMsgSearchBusy &&
+                !(sidebarMsgHits || []).length && (
+                  <Typography sx={{ p: 2 }} color="text.secondary" variant="body2">
+                    No chats or messages match “{chatSearch.trim()}”.
+                  </Typography>
+                )}
             </List>
           )}
         </Box>

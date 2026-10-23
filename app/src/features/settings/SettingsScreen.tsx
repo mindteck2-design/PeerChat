@@ -56,7 +56,7 @@ export function SettingsScreen(props: {
   const [shellBusy, setShellBusy] = useState(false);
   const [gamesEnabled, setGamesEnabled] = useState(props.gamesEnabled ?? false);
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
-  const accent = dark ? "#38bdf8" : theme.palette.primary.main;
+  const accent = theme.palette.primary.main;
 
   useEffect(() => {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
@@ -162,12 +162,12 @@ export function SettingsScreen(props: {
 
   const inputSx = {
     "& .MuiOutlinedInput-root": {
-      bgcolor: dark ? "#070c18" : "#F7FAF8",
+      bgcolor: dark ? "chat.input" : "#F7FAF8",
       borderRadius: 2,
       color: "text.primary",
       "& fieldset": { borderColor: "divider" },
       "&:hover fieldset": {
-        borderColor: dark ? "rgba(255, 255, 255, 0.2)" : "rgba(20, 32, 28, 0.25)",
+        borderColor: dark ? "rgba(160, 184, 232, 0.28)" : "rgba(20, 32, 28, 0.25)",
       },
       "&.Mui-focused fieldset": { borderColor: accent },
     },
@@ -180,7 +180,7 @@ export function SettingsScreen(props: {
   const switchSx = {
     "& .MuiSwitch-switchBase.Mui-checked": { color: accent },
     "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track": {
-      bgcolor: dark ? "#0284c7" : theme.palette.primary.main,
+      bgcolor: dark ? "primary.dark" : theme.palette.primary.main,
     },
   };
 
@@ -192,9 +192,9 @@ export function SettingsScreen(props: {
     "&:hover": { color: titleColor },
   };
   const saveBtnSx = {
-    bgcolor: dark ? "#2563eb" : "primary.main",
-    color: dark ? undefined : "primary.contrastText",
-    "&:hover": { bgcolor: dark ? "#1d4ed8" : "primary.dark" },
+    bgcolor: "primary.main",
+    color: "primary.contrastText",
+    "&:hover": { bgcolor: "primary.dark" },
     borderRadius: 2,
     px: 3,
     py: 0.75,
@@ -228,7 +228,7 @@ export function SettingsScreen(props: {
             px: 2,
             py: 0.6,
             borderRadius: "20px",
-            bgcolor: dark ? "rgba(30, 41, 59, 0.7)" : "rgba(20, 32, 28, 0.06)",
+            bgcolor: dark ? "chat.input" : "rgba(20, 32, 28, 0.06)",
             border: 1,
             borderColor: "divider",
             color: mutedColor,
@@ -624,9 +624,9 @@ export function SettingsScreen(props: {
           p: 1.5,
           mt: 2.5,
           borderRadius: 2,
-          bgcolor: dark ? "rgba(56, 189, 248, 0.05)" : "rgba(15, 107, 92, 0.06)",
+          bgcolor: dark ? "rgba(130, 169, 248, 0.06)" : "rgba(15, 107, 92, 0.06)",
           border: 1,
-          borderColor: dark ? "rgba(56, 189, 248, 0.2)" : "rgba(15, 107, 92, 0.2)",
+          borderColor: dark ? "rgba(130, 169, 248, 0.22)" : "rgba(15, 107, 92, 0.2)",
         }}
       >
         <InfoRoundedIcon sx={{ color: accent, fontSize: 20, flexShrink: 0 }} />
