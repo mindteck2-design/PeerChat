@@ -73,8 +73,10 @@ export function buildTheme(mode: PaletteMode) {
               active: "rgba(224, 230, 239, 0.56)",
               hover: "rgba(38, 52, 74, 0.72)",
               hoverOpacity: 0.12,
+              // Used by some MUI surfaces; ListItemButton still alphas primary.main —
+              // override that component below so Soft Midnight hover keeps light text readable.
               selected: softMidnight.hover,
-              selectedOpacity: 1,
+              selectedOpacity: 0.18,
               disabled: "rgba(154, 174, 200, 0.38)",
               disabledBackground: "rgba(38, 52, 74, 0.45)",
               focus: "rgba(130, 169, 248, 0.22)",
@@ -119,6 +121,22 @@ export function buildTheme(mode: PaletteMode) {
           root: {
             borderRadius: 12,
             marginInline: 8,
+            ...(dark
+              ? {
+                  // Default MUI selected = solid primary (#82A9F8) which washes out
+                  // light preview/time text. Use Soft Midnight hover instead.
+                  "&.Mui-selected": {
+                    backgroundColor: softMidnight.hover,
+                    color: softMidnight.textPrimary,
+                    "&:hover": {
+                      backgroundColor: "#2E3E58",
+                    },
+                    "&.Mui-focusVisible": {
+                      backgroundColor: softMidnight.hover,
+                    },
+                  },
+                }
+              : {}),
           },
         },
       },
