@@ -2532,6 +2532,7 @@ export function ChatScreen({
         // Fast path: native Rust encrypt+stage (no Base64 IPC per chunk).
         let unlistenStage: (() => void) | undefined;
         try {
+          let lastStageUi = 0;
           unlistenStage = await listen<{
             file_id: string;
             done: number;
@@ -2540,19 +2541,27 @@ export function ChatScreen({
           }>("file-stage-progress", (ev) => {
             if (ev.payload.file_id !== fileId) return;
             if (abortSendRef.current) return;
-            setOutgoingFile((prev) => {
-              if (!prev || prev.cancelled) return prev;
-              return {
-                ...prev,
-                conversationId,
-                fileId,
-                name,
-                done: ev.payload.done,
-                total: ev.payload.total || chunkCount,
-                // Preserve paused so spinner stays off while Rust parks.
-                paused: prev.paused,
-              };
-            });
+            const snap: OutgoingFileState = {
+              conversationId,
+              fileId,
+              name,
+              done: ev.payload.done,
+              total: ev.payload.total || chunkCount,
+              sourcePath,
+              sizeBytes: size,
+              batchIndex: opts?.batchIndex,
+              batchTotal: opts?.batchTotal,
+              // Preserve paused so spinner stays off while Rust parks.
+              paused: pauseRef.current,
+              cancelled: false,
+            };
+            // Store updates ~8 Hz for the progress chrome; avoid ChatScreen re-renders.
+            publishTransferProgress({ outgoing: snap });
+            const now = Date.now();
+            if (now - lastStageUi > 400) {
+              lastStageUi = now;
+              setOutgoingFile((prev) => (prev?.cancelled ? prev : snap));
+            }
             sentBytes = Number(ev.payload.bytes_done) || sentBytes;
           });
           const staged = await peerApi.stageOutgoingFromPath(
@@ -2590,26 +2599,36 @@ export function ChatScreen({
           await peerApi.writeFileChunk(fileId, i, ciphertextB64, nonce);
           sentBytes += buf.length;
           if (i === 0 || i + 1 === chunkCount || (i + 1) % 4 === 0) {
-            setOutgoingFile((prev) => ({
+            const snap: OutgoingFileState = {
               conversationId,
               fileId,
               name,
               done: i + 1,
               total: chunkCount,
-              paused: prev?.paused,
-            }));
-            await recordTransfer({
-              id: transferId,
-              filename: name,
-              direction: "send",
-              status: "transferring",
-              size_bytes: size,
-              bytes_done: sentBytes,
-              file_id: fileId,
-              conversation_id: conversationId,
-              peer_label: labelForConversation(conversationId),
-              started_at: started,
-            });
+              paused: pauseRef.current,
+              cancelled: false,
+              sizeBytes: size,
+              batchIndex: opts?.batchIndex,
+              batchTotal: opts?.batchTotal,
+            };
+            publishTransferProgress({ outgoing: snap });
+            if (i === 0 || i + 1 === chunkCount || (i + 1) % 16 === 0) {
+              setOutgoingFile((prev) => (prev?.cancelled ? prev : snap));
+            }
+            if (i === 0 || i + 1 === chunkCount || (i + 1) % 32 === 0) {
+              await recordTransfer({
+                id: transferId,
+                filename: name,
+                direction: "send",
+                status: "transferring",
+                size_bytes: size,
+                bytes_done: sentBytes,
+                file_id: fileId,
+                conversation_id: conversationId,
+                peer_label: labelForConversation(conversationId),
+                started_at: started,
+              });
+            }
             await new Promise((r) => setTimeout(r, 0));
           }
         }
