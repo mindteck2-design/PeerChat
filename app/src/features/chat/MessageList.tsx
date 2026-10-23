@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useIncomingTransfer } from "../files/transferProgressStore";
+import { useIncomingTransfer, useOutgoingTransfer } from "../files/transferProgressStore";
 import {
   Avatar, Box, Chip, Fade, Grow, IconButton,
   Paper, Stack, Tooltip, Typography,
@@ -134,7 +134,6 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
     highlightMsgId,
     messages,
     openAttachment,
-    outgoingFile,
     pauseIncomingTransfer,
     pauseOutgoingTransfer,
     peerApi,
@@ -163,6 +162,7 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
 
   // Narrow subscription — progress ticks need not rebuild ChatScreen's god vm.
   const incomingFile = useIncomingTransfer() ?? vm.incomingFile;
+  const outgoingFile = useOutgoingTransfer() ?? vm.outgoingFile;
 
   const jumpToReferencedMessage = (messageId: string) => {
     if (vm.stickToBottomRef) vm.stickToBottomRef.current = false;

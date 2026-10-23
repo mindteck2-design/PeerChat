@@ -138,17 +138,15 @@ pub struct StageOutgoingResult {
 }
 
 /// Native path staging: read → AES-GCM (v2 AAD) → staging dir. Avoids JS Base64 IPC.
+/// Runs on a blocking pool so encrypt/disk work cannot freeze the WebView.
 #[tauri::command]
-pub fn stage_outgoing_from_path(
+pub async fn stage_outgoing_from_path(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     file_id: String,
     path: String,
     content_key_b64: String,
 ) -> Result<StageOutgoingResult, String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-
     let content_key = base64::engine::general_purpose::STANDARD
         .decode(content_key_b64.trim())
         .map_err(|e| e.to_string())?;
@@ -189,86 +187,110 @@ pub fn stage_outgoing_from_path(
     let dir = resolve_staging_dir(&app, &file_id)?;
     std::fs::create_dir_all(&dir).map_err(explain_io)?;
 
-    let (cancel_flag, pause_flag) = peer_http::register_stage_controls(&file_id);
-    let stage_result = (|| {
-        let mut file = std::fs::File::open(&src).map_err(explain_io)?;
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; PLAIN_CHUNK_BYTES];
-        let mut index: u32 = 0;
-        let mut bytes_written: u64 = 0;
+    let db = state.db.clone();
+    let app_progress = app.clone();
+    let file_id_bg = file_id.clone();
+    let path_bg = path.clone();
 
-        loop {
-            // Cooperative pause — UI freezes; resume clears the flag.
-            while pause_flag.load(std::sync::atomic::Ordering::SeqCst) {
+    let stage_result = tokio::task::spawn_blocking(move || {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        use std::time::Instant;
+
+        let (cancel_flag, pause_flag) = peer_http::register_stage_controls(&file_id_bg);
+        let result = (|| {
+            let mut file = std::fs::File::open(&src).map_err(explain_io)?;
+            let mut hasher = Sha256::new();
+            let mut buf = vec![0u8; PLAIN_CHUNK_BYTES];
+            let mut index: u32 = 0;
+            let mut bytes_written: u64 = 0;
+            let mut last_emit = Instant::now();
+
+            loop {
+                // Cooperative pause — worker parks; WebView stays responsive.
+                while pause_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err("aborted".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
                 if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
                     return Err("aborted".into());
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err("aborted".into());
-            }
 
-            let mut filled = 0usize;
-            while filled < PLAIN_CHUNK_BYTES {
-                let n = file.read(&mut buf[filled..]).map_err(explain_io)?;
-                if n == 0 {
+                let mut filled = 0usize;
+                while filled < PLAIN_CHUNK_BYTES {
+                    let n = file.read(&mut buf[filled..]).map_err(explain_io)?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                if filled == 0 {
                     break;
                 }
-                filled += n;
+                let plain = &buf[..filled];
+                hasher.update(plain);
+                let (nonce_b64, ciphertext) =
+                    peer_http::encrypt_file_chunk(&content_key, plain, Some(index))?;
+                if ciphertext.len() > MAX_CHUNK_BYTES {
+                    return Err(format!("encrypted chunk exceeds {MAX_CHUNK_BYTES} bytes"));
+                }
+                std::fs::write(dir.join(format!("{index}.chunk")), &ciphertext).map_err(explain_io)?;
+                std::fs::write(dir.join(format!("{index}.nonce")), nonce_b64.as_bytes())
+                    .map_err(explain_io)?;
+                bytes_written += filled as u64;
+                index += 1;
+                // Throttle UI events (~4 Hz) so large files don't flood the WebView.
+                let last_chunk = filled < PLAIN_CHUNK_BYTES || index == expected_chunks;
+                if last_chunk
+                    || index == 1
+                    || last_emit.elapsed() >= std::time::Duration::from_millis(250)
+                {
+                    last_emit = Instant::now();
+                    let _ = app_progress.emit(
+                        "file-stage-progress",
+                        json!({
+                            "file_id": file_id_bg,
+                            "done": index,
+                            "total": expected_chunks,
+                            "bytes_done": bytes_written,
+                        }),
+                    );
+                }
+                if filled < PLAIN_CHUNK_BYTES {
+                    break;
+                }
             }
-            if filled == 0 {
-                break;
-            }
-            let plain = &buf[..filled];
-            hasher.update(plain);
-            let (nonce_b64, ciphertext) =
-                peer_http::encrypt_file_chunk(&content_key, plain, Some(index))?;
-            if ciphertext.len() > MAX_CHUNK_BYTES {
-                return Err(format!("encrypted chunk exceeds {MAX_CHUNK_BYTES} bytes"));
-            }
-            std::fs::write(dir.join(format!("{index}.chunk")), &ciphertext).map_err(explain_io)?;
-            std::fs::write(dir.join(format!("{index}.nonce")), nonce_b64.as_bytes())
-                .map_err(explain_io)?;
-            bytes_written += filled as u64;
-            index += 1;
-            let _ = app.emit(
-                "file-stage-progress",
-                json!({
-                    "file_id": file_id,
-                    "done": index,
-                    "total": expected_chunks,
-                    "bytes_done": bytes_written,
-                }),
-            );
-            if filled < PLAIN_CHUNK_BYTES {
-                break;
-            }
-        }
 
-        if index == 0 {
-            return Err("empty file after read".into());
-        }
-        if index != expected_chunks {
-            return Err(format!(
-                "staged {index} chunks but expected {expected_chunks}"
-            ));
-        }
+            if index == 0 {
+                return Err("empty file after read".into());
+            }
+            if index != expected_chunks {
+                return Err(format!(
+                    "staged {index} chunks but expected {expected_chunks}"
+                ));
+            }
 
-        let digest = hex::encode(hasher.finalize());
-        {
-            let conn = state.db.lock();
-            db::set_file_content_hash(&conn, &file_id, &digest)?;
-            db::set_file_local_path(&conn, &file_id, &path)?;
-        }
+            let digest = hex::encode(hasher.finalize());
+            {
+                let conn = db.lock();
+                db::set_file_content_hash(&conn, &file_id_bg, &digest)?;
+                db::set_file_local_path(&conn, &file_id_bg, &path_bg)?;
+            }
 
-        Ok(StageOutgoingResult {
-            content_sha256: digest,
-            bytes_written,
-            chunk_count: index,
-        })
-    })();
-    peer_http::clear_stage_controls(&file_id);
+            Ok(StageOutgoingResult {
+                content_sha256: digest,
+                bytes_written,
+                chunk_count: index,
+            })
+        })();
+        peer_http::clear_stage_controls(&file_id_bg);
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
     stage_result
 }
 
@@ -1353,9 +1375,17 @@ fn defender_output_looks_like_threat(stdout: &str, stderr: &str) -> bool {
 /// Scan a file path with the system AV (Windows Defender on Windows).
 /// Returns {clean, engine, detail, skipped}. Never returns Err — on failure
 /// the result is skipped=true so the caller can decide how to proceed.
+/// Offloaded so multi‑GB Defender scans cannot freeze the WebView.
 #[tauri::command]
-pub fn scan_file(path: String) -> ScanResult {
-    scan_file_inner(&path)
+pub async fn scan_file(path: String) -> ScanResult {
+    tokio::task::spawn_blocking(move || scan_file_inner(&path))
+        .await
+        .unwrap_or_else(|e| ScanResult {
+            clean: true,
+            engine: "none".to_string(),
+            detail: format!("Scan task failed: {e}"),
+            skipped: true,
+        })
 }
 
 pub fn scan_file_inner(path: &str) -> ScanResult {

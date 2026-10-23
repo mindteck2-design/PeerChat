@@ -17,21 +17,21 @@ function emitNow(next: Snap) {
   listeners.forEach((l) => l());
 }
 
-/** Throttle UI progress updates (~8 Hz) while applying final states immediately. */
+/** Throttle UI progress updates (~8 Hz) while applying final/cleared states immediately. */
 export function publishTransferProgress(partial: Partial<Snap>, force = false) {
   const next: Snap = {
     incoming: partial.incoming !== undefined ? partial.incoming : snap.incoming,
     outgoing: partial.outgoing !== undefined ? partial.outgoing : snap.outgoing,
   };
-  const doneish =
+  // Only force when this update clears/finishes a side — do NOT treat
+  // "the other side is idle" as force (that used to defeat upload throttling).
+  const terminal =
     force ||
-    next.incoming?.cancelled ||
-    next.outgoing?.cancelled ||
-    next.incoming?.paused ||
-    next.outgoing?.paused ||
-    !next.incoming ||
-    !next.outgoing;
-  if (doneish) {
+    (partial.incoming !== undefined &&
+      (!partial.incoming || !!partial.incoming.cancelled || !!partial.incoming.paused)) ||
+    (partial.outgoing !== undefined &&
+      (!partial.outgoing || !!partial.outgoing.cancelled || !!partial.outgoing.paused));
+  if (terminal) {
     if (timer) {
       clearTimeout(timer);
       timer = null;
