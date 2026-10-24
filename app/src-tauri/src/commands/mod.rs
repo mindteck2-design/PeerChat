@@ -7,6 +7,7 @@ pub mod files;
 pub mod transfers;
 pub mod settings;
 pub mod screenshot;
+pub mod calendar;
 
 pub use profile::*;
 pub use peers::*;
@@ -17,3 +18,4 @@ pub use files::*;
 pub use transfers::*;
 pub use settings::*;
 pub use screenshot::*;
+pub use calendar::*;

@@ -2,7 +2,7 @@ import { Box, IconButton, Tooltip } from "@mui/material";
 import ChatIcon from "@mui/icons-material/ForumRounded";
 import PeopleAltIcon from "@mui/icons-material/PeopleAltRounded";
 import CampaignIcon from "@mui/icons-material/CampaignRounded";
-import DownloadingIcon from "@mui/icons-material/DownloadingRounded";
+import CalendarMonthIcon from "@mui/icons-material/CalendarMonthRounded";
 import SportsEsportsIcon from "@mui/icons-material/SportsEsportsRounded";
 import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorderRounded";
 import SettingsIcon from "@mui/icons-material/SettingsRounded";
@@ -12,7 +12,7 @@ import type { Conversation } from "../../peer";
 export type ShellNav =
   | "people"
   | "chats"
-  | "transfers"
+  | "calendar"
   | "games"
   | "saved"
   | "announcements"
@@ -59,7 +59,7 @@ export function NavRail(props: {
           ["chats", "Chats", <ChatIcon key="c" />],
           ["people", "People", <PeopleAltIcon key="p" />],
           ["announcements", "Announcements", <CampaignIcon key="a" />],
-          ["transfers", "Transfers", <DownloadingIcon key="t" />],
+          ["calendar", "Calendar", <CalendarMonthIcon key="cal" />],
           ...(FEATURE_GAMES && gamesOn
             ? [["games", "Games", <SportsEsportsIcon key="s" />] as const]
             : []),

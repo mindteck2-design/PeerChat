@@ -288,6 +288,7 @@ fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
     let body = match kind {
         "file_notice" => "Sent a file",
         "system" | "group_event" => "Group update",
+        "calendar_share" => "Shared a calendar item",
         _ => "New message",
     };
     let mut builder = app
@@ -365,7 +366,8 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
             let has_inbox = payload.get("message").is_some()
                 || payload.get("file").is_some()
                 || payload.get("files").is_some()
-                || payload.get("group_event").is_some();
+                || payload.get("group_event").is_some()
+                || payload.get("calendar_share").is_some();
             let mut fresh_message = false;
             let conn = db.lock();
             if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
@@ -661,6 +663,34 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     }
                 }
             }
+            if let Some(share) = payload.get("calendar_share") {
+                let op = share.get("op").and_then(|v| v.as_str()).unwrap_or("upsert");
+                if let Some(item) = share.get("item") {
+                    if op == "delete" {
+                        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                            let _ = db::delete_calendar_item(&conn, id);
+                        }
+                    } else {
+                        let mut row = item.clone();
+                        // Ensure recipient is listed among participants so they keep the share.
+                        let mut parts: Vec<String> = row
+                            .get("participant_ids")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !my_id.is_empty() && !parts.iter().any(|p| p == my_id) {
+                            parts.push(my_id.to_string());
+                        }
+                        row["participant_ids"] = json!(parts);
+                        row["shared"] = json!(true);
+                        let _ = db::upsert_calendar_item(&conn, &row);
+                    }
+                }
+            }
             if conn.execute_batch("COMMIT").is_err() {
                 let _ = conn.execute_batch("ROLLBACK");
                 return http_ok(http_json(500, json!({"error":"commit failed"})), None);
@@ -677,6 +707,8 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                         "file_notice"
                     } else if payload.get("group_event").is_some() {
                         "group_event"
+                    } else if payload.get("calendar_share").is_some() {
+                        "calendar_share"
                     } else {
                         "text"
                     });
@@ -688,16 +720,27 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                 let message_id = msg
                     .and_then(|m| m.get("id"))
                     .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        payload
+                            .pointer("/calendar_share/item/id")
+                            .and_then(|v| v.as_str())
+                    })
                     .unwrap_or("");
                 // Only toast for newly inserted message rows — never force-fresh on
                 // group_event / file-meta redelivery (that caused double OS toasts).
+                // Calendar shares always toast once (deduped by item id).
+                let fresh = if kind == "calendar_share" {
+                    true
+                } else {
+                    fresh_message
+                };
                 Some(json!({
                     "conversation_id": cid,
                     "from_name": from.and_then(|p| p.get("display_name")).and_then(|v| v.as_str()).unwrap_or("Peer"),
                     "from_id": from.and_then(|p| p.get("user_id")).and_then(|v| v.as_str()).unwrap_or(""),
                     "kind": kind,
                     "message_id": message_id,
-                    "fresh": fresh_message,
+                    "fresh": fresh,
                 }))
             } else {
                 None
