@@ -2,80 +2,61 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Box,
   Button,
-  Checkbox,
   Chip,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  FormControlLabel,
   IconButton,
   List,
   ListItemButton,
-  ListItemIcon,
   ListItemText,
-  MenuItem,
   Stack,
-  TextField,
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/AddRounded";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeftRounded";
 import ChevronRightIcon from "@mui/icons-material/ChevronRightRounded";
-import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import EventIcon from "@mui/icons-material/EventRounded";
 import { listen } from "@tauri-apps/api/event";
-import { peerApi, type CalendarItem, type CalendarKind, type Peer } from "../../peer";
+import { peerApi, type CalendarItem, type Peer } from "../../peer";
+import { CalendarItemEditor } from "./CalendarItemEditor";
+import {
+  dayKey,
+  daysInMonth,
+  isPastDay,
+  monthLabel,
+  parseDay,
+  pad2,
+} from "./calendarRules";
+import {
+  emptyDraft,
+  newChecklistOption,
+  parseAcks,
+  parseChecklist,
+  type CalendarDraft,
+} from "./calendarTypes";
 
-function pad2(n: number) {
-  return String(n).padStart(2, "0");
-}
-
-function dayKey(d: Date) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
-
-function parseDay(s: string) {
-  const [y, m, d] = s.split("-").map(Number);
-  return new Date(y, m - 1, d);
-}
-
-function monthLabel(y: number, m: number) {
-  return new Date(y, m, 1).toLocaleString(undefined, { month: "long", year: "numeric" });
-}
-
-function daysInMonth(y: number, m: number) {
-  return new Date(y, m + 1, 0).getDate();
-}
-
-const KINDS: { value: CalendarKind; label: string }[] = [
-  { value: "note", label: "Note" },
-  { value: "reminder", label: "Reminder" },
-  { value: "meeting", label: "Meeting" },
-  { value: "todo", label: "To-do" },
-];
-
-type Draft = {
-  id?: string;
-  title: string;
-  body: string;
-  kind: CalendarKind;
-  day: string;
-  time: string;
-  participant_ids: string[];
-  done: boolean;
-};
-
-function emptyDraft(day: string): Draft {
+function itemToDraft(it: CalendarItem, myId: string): CalendarDraft {
+  const checklist = parseChecklist(it.checklist);
   return {
-    title: "",
-    body: "",
-    kind: "note",
-    day,
-    time: "",
-    participant_ids: [],
-    done: false,
+    id: it.id,
+    title: it.title,
+    body: it.body || "",
+    kind: it.kind,
+    day: it.day,
+    time: it.time || "",
+    participant_ids: [...(it.participant_ids || [])].filter((id) => id !== myId),
+    created_by: it.created_by,
+    done: !!it.done,
+    checklist:
+      it.kind === "todo" && checklist.length === 0 ? [newChecklistOption("")] : checklist,
+    acks: parseAcks(it.acks),
+    shared: !!it.shared,
   };
+}
+
+function checklistSummary(it: CalendarItem): string {
+  const opts = parseChecklist(it.checklist);
+  if (!opts.length) return it.done ? "Done" : "To-do";
+  const done = opts.filter((o) => o.checked_by.length > 0).length;
+  return `${done}/${opts.length} checked`;
 }
 
 export function CalendarScreen({
@@ -96,7 +77,7 @@ export function CalendarScreen({
   });
   const [selectedDay, setSelectedDay] = useState(today);
   const [items, setItems] = useState<CalendarItem[]>([]);
-  const [editor, setEditor] = useState<Draft | null>(null);
+  const [editor, setEditor] = useState<CalendarDraft | null>(null);
   const [busy, setBusy] = useState(false);
 
   const others = useMemo(
@@ -115,10 +96,15 @@ export function CalendarScreen({
     try {
       const rows = await peerApi.listCalendarItems(range.from, range.to);
       setItems(rows);
+      setEditor((prev) => {
+        if (!prev?.id) return prev;
+        const updated = rows.find((r) => r.id === prev.id);
+        return updated ? itemToDraft(updated, myId) : prev;
+      });
     } catch (err: any) {
       onStatus?.(err?.message || String(err));
     }
-  }, [onStatus, range.from, range.to]);
+  }, [myId, onStatus, range.from, range.to]);
 
   useEffect(() => {
     void refresh();
@@ -134,7 +120,6 @@ export function CalendarScreen({
     return () => un?.();
   }, [refresh]);
 
-  // Due-soon desktop notifications (local reminders/meetings).
   useEffect(() => {
     const tick = () => {
       void peerApi.pollCalendarDue().catch(() => {});
@@ -155,10 +140,11 @@ export function CalendarScreen({
   }, [items]);
 
   const dayItems = byDay.get(selectedDay) || [];
+  const pastSelected = isPastDay(selectedDay, today);
 
   const grid = useMemo(() => {
     const first = new Date(cursor.y, cursor.m, 1);
-    const startPad = first.getDay(); // 0 = Sun
+    const startPad = first.getDay();
     const total = daysInMonth(cursor.y, cursor.m);
     const cells: Array<{ day: number | null; key: string }> = [];
     for (let i = 0; i < startPad; i++) cells.push({ day: null, key: `e-${i}` });
@@ -177,12 +163,20 @@ export function CalendarScreen({
       onStatus?.("Add a title first");
       return;
     }
+    if (editor.kind === "todo") {
+      const opts = editor.checklist.map((o) => ({ ...o, label: o.label.trim() })).filter((o) => o.label);
+      if (!opts.length) {
+        onStatus?.("Add at least one option");
+        return;
+      }
+      editor.checklist = opts;
+    }
     setBusy(true);
     try {
       await peerApi.upsertCalendarItem({
         id: editor.id,
         title: editor.title.trim(),
-        body: editor.body.trim(),
+        body: editor.kind === "todo" ? "" : editor.body.trim(),
         kind: editor.kind,
         day: editor.day,
         time: editor.time.trim() || null,
@@ -190,6 +184,8 @@ export function CalendarScreen({
         done: editor.done,
         shared: editor.participant_ids.length > 0,
         created_by: myId,
+        checklist: editor.kind === "todo" ? editor.checklist : [],
+        acks: editor.acks || {},
       });
       setEditor(null);
       await refresh();
@@ -218,27 +214,33 @@ export function CalendarScreen({
     }
   }
 
-  async function toggleTodo(it: CalendarItem) {
-    if (it.kind !== "todo") return;
+  async function toggleOption(optionId: string, checked: boolean) {
+    if (!editor?.id) return;
     try {
-      await peerApi.setCalendarTodoDone(it.id, !it.done);
+      await peerApi.toggleCalendarChecklistOption(editor.id, optionId, checked);
       await refresh();
     } catch (err: any) {
       onStatus?.(err?.message || String(err));
     }
   }
 
-  function openEdit(it: CalendarItem) {
-    setEditor({
-      id: it.id,
-      title: it.title,
-      body: it.body || "",
-      kind: it.kind,
-      day: it.day,
-      time: it.time || "",
-      participant_ids: [...(it.participant_ids || [])].filter((id) => id !== myId),
-      done: !!it.done,
-    });
+  async function ackItem() {
+    if (!editor?.id) return;
+    try {
+      await peerApi.ackCalendarItem(editor.id);
+      await refresh();
+    } catch (err: any) {
+      onStatus?.(err?.message || String(err));
+    }
+  }
+
+  function openNew() {
+    const d = emptyDraft(selectedDay);
+    if (pastSelected) {
+      d.kind = "note";
+    }
+    if (d.kind === "todo") d.checklist = [newChecklistOption("")];
+    setEditor(d);
   }
 
   const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -408,49 +410,30 @@ export function CalendarScreen({
                 day: "numeric",
               })}
             </Typography>
-            <Button
-              size="small"
-              variant="contained"
-              startIcon={<AddIcon />}
-              onClick={() => setEditor(emptyDraft(selectedDay))}
-            >
-              Add
+            <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={openNew}>
+              Add{pastSelected ? " note" : ""}
             </Button>
           </Stack>
 
           <Box sx={{ flex: 1, overflow: "auto", minHeight: 0 }}>
             {!dayItems.length ? (
               <Typography color="text.secondary" variant="body2" sx={{ mt: 2 }}>
-                Nothing on this day. Add a note, reminder, meeting, or to-do.
+                {pastSelected
+                  ? "Nothing on this day. You can still add a note."
+                  : "Nothing on this day. Add a note, reminder, meeting, or to-do."}
               </Typography>
             ) : (
               <List dense disablePadding>
                 {dayItems.map((it) => (
                   <ListItemButton
                     key={it.id}
-                    onClick={() => openEdit(it)}
+                    onClick={() => setEditor(itemToDraft(it, myId))}
                     sx={{ borderRadius: 2, mb: 0.5, alignItems: "flex-start" }}
                   >
-                    {it.kind === "todo" && (
-                      <ListItemIcon sx={{ minWidth: 36, mt: 0.5 }}>
-                        <Checkbox
-                          edge="start"
-                          checked={!!it.done}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void toggleTodo(it);
-                          }}
-                          size="small"
-                        />
-                      </ListItemIcon>
-                    )}
                     <ListItemText
                       primary={
                         <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap">
-                          <Typography
-                            fontWeight={600}
-                            sx={{ textDecoration: it.done ? "line-through" : "none" }}
-                          >
+                          <Typography fontWeight={600}>
                             {it.time ? `${it.time} · ` : ""}
                             {it.title}
                           </Typography>
@@ -467,13 +450,15 @@ export function CalendarScreen({
                         </Stack>
                       }
                       secondary={
-                        it.body?.trim()
-                          ? it.body
-                          : it.shared
-                            ? `${(it.participant_ids || []).length} people`
-                            : it.created_by === myId
-                              ? "Personal"
-                              : "From a peer"
+                        it.kind === "todo"
+                          ? checklistSummary(it)
+                          : it.body?.trim()
+                            ? it.body
+                            : it.shared
+                              ? `${(it.participant_ids || []).length} people`
+                              : it.created_by === myId
+                                ? "Personal"
+                                : "From a peer"
                       }
                       secondaryTypographyProps={{ noWrap: true }}
                     />
@@ -485,128 +470,21 @@ export function CalendarScreen({
         </Box>
       </Box>
 
-      <Dialog open={!!editor} onClose={() => !busy && setEditor(null)} fullWidth maxWidth="sm">
-        <DialogTitle>{editor?.id ? "Edit item" : "New calendar item"}</DialogTitle>
-        <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 1.5, pt: 1 }}>
-          {editor && (
-            <>
-              <TextField
-                label="Title"
-                value={editor.title}
-                onChange={(e) => setEditor({ ...editor, title: e.target.value })}
-                fullWidth
-                autoFocus
-              />
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                <TextField
-                  select
-                  label="Type"
-                  value={editor.kind}
-                  onChange={(e) =>
-                    setEditor({ ...editor, kind: e.target.value as CalendarKind })
-                  }
-                  sx={{ minWidth: 140 }}
-                >
-                  {KINDS.map((k) => (
-                    <MenuItem key={k.value} value={k.value}>
-                      {k.label}
-                    </MenuItem>
-                  ))}
-                </TextField>
-                <TextField
-                  label="Date"
-                  type="date"
-                  value={editor.day}
-                  onChange={(e) => setEditor({ ...editor, day: e.target.value })}
-                  InputLabelProps={{ shrink: true }}
-                  sx={{ flex: 1 }}
-                />
-                <TextField
-                  label="Time"
-                  type="time"
-                  value={editor.time}
-                  onChange={(e) => setEditor({ ...editor, time: e.target.value })}
-                  InputLabelProps={{ shrink: true }}
-                  helperText="Optional"
-                  sx={{ flex: 1 }}
-                />
-              </Stack>
-              <TextField
-                label="Details"
-                value={editor.body}
-                onChange={(e) => setEditor({ ...editor, body: e.target.value })}
-                fullWidth
-                multiline
-                minRows={2}
-                placeholder='e.g. Meeting at conference hall, 2 PM'
-              />
-              <Box>
-                <Typography variant="subtitle2" fontWeight={700} mb={0.5}>
-                  Include people on this LAN
-                </Typography>
-                <Typography variant="caption" color="text.secondary" display="block" mb={1}>
-                  Selected peers get this item on their calendar too ({myName} stays owner).
-                </Typography>
-                {!others.length ? (
-                  <Typography variant="body2" color="text.secondary">
-                    No online peers discovered yet.
-                  </Typography>
-                ) : (
-                  <Box sx={{ maxHeight: 160, overflow: "auto" }}>
-                    {others.map((p) => {
-                      const checked = editor.participant_ids.includes(p.user_id);
-                      return (
-                        <FormControlLabel
-                          key={p.user_id}
-                          control={
-                            <Checkbox
-                              size="small"
-                              checked={checked}
-                              onChange={() => {
-                                setEditor({
-                                  ...editor,
-                                  participant_ids: checked
-                                    ? editor.participant_ids.filter((id) => id !== p.user_id)
-                                    : [...editor.participant_ids, p.user_id],
-                                });
-                              }}
-                            />
-                          }
-                          label={
-                            <Typography fontSize={14}>
-                              {p.display_name}
-                              {p.online ? "" : " (offline)"}
-                            </Typography>
-                          }
-                        />
-                      );
-                    })}
-                  </Box>
-                )}
-              </Box>
-            </>
-          )}
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          {editor?.id && (
-            <Button
-              color="error"
-              startIcon={<DeleteOutlineIcon />}
-              disabled={busy}
-              onClick={() => editor.id && void removeItem(editor.id)}
-              sx={{ mr: "auto" }}
-            >
-              Delete
-            </Button>
-          )}
-          <Button disabled={busy} onClick={() => setEditor(null)}>
-            Cancel
-          </Button>
-          <Button variant="contained" disabled={busy} onClick={() => void saveDraft()}>
-            Save
-          </Button>
-        </DialogActions>
-      </Dialog>
+      <CalendarItemEditor
+        open={!!editor}
+        draft={editor}
+        setDraft={setEditor}
+        busy={busy}
+        peers={others}
+        myId={myId}
+        myName={myName}
+        today={today}
+        onClose={() => setEditor(null)}
+        onSave={() => void saveDraft()}
+        onDelete={() => editor?.id && void removeItem(editor.id)}
+        onToggleOption={(optionId, checked) => void toggleOption(optionId, checked)}
+        onAck={() => void ackItem()}
+      />
     </Box>
   );
 }

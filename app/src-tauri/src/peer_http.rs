@@ -665,7 +665,28 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
             }
             if let Some(share) = payload.get("calendar_share") {
                 let op = share.get("op").and_then(|v| v.as_str()).unwrap_or("upsert");
-                if let Some(item) = share.get("item") {
+                if op == "checklist_toggle" {
+                    let item_id = share.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let option_id = share.get("option_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let user_id = share.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let checked = share.get("checked").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let updated_at = share
+                        .get("updated_at")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !item_id.is_empty() && !option_id.is_empty() && !user_id.is_empty() {
+                        let _ = db::apply_checklist_toggle(
+                            &conn, item_id, option_id, user_id, checked, updated_at,
+                        );
+                    }
+                } else if op == "ack" {
+                    let item_id = share.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let user_id = share.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let at = share.get("at").and_then(|v| v.as_str()).unwrap_or("");
+                    if !item_id.is_empty() && !user_id.is_empty() {
+                        let _ = db::apply_calendar_ack(&conn, item_id, user_id, at);
+                    }
+                } else if let Some(item) = share.get("item") {
                     if op == "delete" {
                         if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
                             let _ = db::delete_calendar_item(&conn, id);
@@ -700,6 +721,10 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
             let notify = if has_inbox {
                 let from = payload.get("from_peer");
                 let msg = payload.get("message");
+                let cal_op = payload
+                    .pointer("/calendar_share/op")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("upsert");
                 let kind = msg
                     .and_then(|m| m.get("kind"))
                     .and_then(|v| v.as_str())
@@ -725,12 +750,15 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                             .pointer("/calendar_share/item/id")
                             .and_then(|v| v.as_str())
                     })
+                    .or_else(|| {
+                        payload
+                            .pointer("/calendar_share/item_id")
+                            .and_then(|v| v.as_str())
+                    })
                     .unwrap_or("");
-                // Only toast for newly inserted message rows — never force-fresh on
-                // group_event / file-meta redelivery (that caused double OS toasts).
-                // Calendar shares always toast once (deduped by item id).
+                // Upsert/delete calendar shares toast; checklist/ack only refresh UI.
                 let fresh = if kind == "calendar_share" {
-                    true
+                    matches!(cal_op, "upsert" | "delete")
                 } else {
                     fresh_message
                 };

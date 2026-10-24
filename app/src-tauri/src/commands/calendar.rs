@@ -25,19 +25,46 @@ fn enqueue_calendar_share(
     conn: &rusqlite::Connection,
     from_peer: &Value,
     recipient_id: &str,
-    op: &str,
-    item: &Value,
+    share: &Value,
 ) -> Result<(), String> {
     let oid = format!("cal-{}:{}", Uuid::new_v4(), recipient_id);
     let payload = json!({
         "from_peer": from_peer,
         "conversation_id": CAL_CONV,
-        "calendar_share": {
-            "op": op,
-            "item": item,
-        },
+        "calendar_share": share,
     });
     db::enqueue_outbox(conn, &oid, recipient_id, CAL_CONV, &payload.to_string())
+}
+
+fn fanout_to_participants(
+    state: &AppState,
+    me: &str,
+    from_peer: &Value,
+    recipients: &[String],
+    share: &Value,
+) -> Result<(), String> {
+    if recipients.is_empty() {
+        return Ok(());
+    }
+    {
+        let conn = state.db.lock();
+        for rid in recipients {
+            if rid == me {
+                continue;
+            }
+            enqueue_calendar_share(&conn, from_peer, rid, share)?;
+        }
+    }
+    kick_flush(state);
+    Ok(())
+}
+
+fn reject_past_restricted(kind: &str, day: &str) -> Result<(), String> {
+    let today = db::local_today();
+    if day < today.as_str() && matches!(kind, "reminder" | "todo" | "meeting") {
+        return Err("cannot create or edit reminders, to-dos, or meetings on past days".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -71,20 +98,57 @@ pub async fn upsert_calendar_item(
             .map(|s| s.to_string())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         row["id"] = json!(id);
-        if row.get("created_by").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if row
+            .get("created_by")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
             row["created_by"] = json!(me);
         }
         let stamp = now();
-        if row.get("created_at").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if row
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
             row["created_at"] = json!(stamp);
         }
         row["updated_at"] = json!(stamp);
+        let kind = row["kind"].as_str().unwrap_or("note").to_string();
+        let day = row["day"].as_str().unwrap_or("").to_string();
+        reject_past_restricted(&kind, &day)?;
+        if kind == "todo" {
+            let checklist = row.get("checklist").cloned().unwrap_or_else(|| json!([]));
+            let opts = checklist.as_array().cloned().unwrap_or_default();
+            let labeled: Vec<_> = opts
+                .into_iter()
+                .filter(|o| {
+                    o.get("label")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false)
+                })
+                .collect();
+            if labeled.is_empty() {
+                return Err("Add at least one option".into());
+            }
+            row["checklist"] = json!(labeled);
+            row["body"] = json!("");
+        }
         let mut parts = participant_id_list(&row["participant_ids"]);
         parts.retain(|p| p != &me);
         parts.sort();
         parts.dedup();
         row["participant_ids"] = json!(parts);
         row["shared"] = json!(!parts.is_empty());
+        // Preserve existing acks on upsert unless client sent them.
+        if row.get("acks").is_none() {
+            if let Some(existing) = db::get_calendar_item(&conn, &id)? {
+                row["acks"] = existing.get("acks").cloned().unwrap_or_else(|| json!({}));
+            }
+        }
         db::upsert_calendar_item(&conn, &row)?;
         let saved = db::get_calendar_item(&conn, row["id"].as_str().unwrap_or(""))?
             .ok_or("failed to read calendar item")?;
@@ -93,25 +157,19 @@ pub async fn upsert_calendar_item(
 
     let recipients = participant_id_list(&row["participant_ids"]);
     if !recipients.is_empty() {
-        {
-            let conn = state.db.lock();
-            for rid in &recipients {
-                if rid == &me {
-                    continue;
-                }
-                enqueue_calendar_share(&conn, &from_peer, rid, "upsert", &row)?;
-            }
-        }
-        kick_flush(&state);
+        fanout_to_participants(
+            &state,
+            &me,
+            &from_peer,
+            &recipients,
+            &json!({ "op": "upsert", "item": row }),
+        )?;
     }
     Ok(row)
 }
 
 #[tauri::command]
-pub async fn delete_calendar_item(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
+pub async fn delete_calendar_item(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let (me, from_peer, recipients, tombstone) = {
         let conn = state.db.lock();
         let profile = db::get_profile(&conn)?.ok_or("no profile")?;
@@ -129,16 +187,13 @@ pub async fn delete_calendar_item(
         (me, from_peer, recipients, tombstone)
     };
     if !recipients.is_empty() {
-        {
-            let conn = state.db.lock();
-            for rid in &recipients {
-                if rid == &me {
-                    continue;
-                }
-                enqueue_calendar_share(&conn, &from_peer, rid, "delete", &tombstone)?;
-            }
-        }
-        kick_flush(&state);
+        fanout_to_participants(
+            &state,
+            &me,
+            &from_peer,
+            &recipients,
+            &json!({ "op": "delete", "item": tombstone }),
+        )?;
     }
     Ok(())
 }
@@ -152,6 +207,78 @@ pub fn set_calendar_todo_done(
     let conn = state.db.lock();
     db::set_calendar_todo_done(&conn, &id, done)?;
     db::get_calendar_item(&conn, &id)?.ok_or_else(|| "calendar item not found".into())
+}
+
+#[tauri::command]
+pub async fn toggle_calendar_checklist_option(
+    state: State<'_, AppState>,
+    id: String,
+    option_id: String,
+    checked: bool,
+) -> Result<Value, String> {
+    let stamp = now();
+    let (me, from_peer, recipients, saved) = {
+        let conn = state.db.lock();
+        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let me = profile["id"].as_str().unwrap_or("").to_string();
+        let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+        let saved = db::apply_checklist_toggle(&conn, &id, &option_id, &me, checked, &stamp)?;
+        let mut recipients = participant_id_list(&saved["participant_ids"]);
+        let owner = saved["created_by"].as_str().unwrap_or("");
+        if !owner.is_empty() && owner != me && !recipients.iter().any(|r| r == owner) {
+            recipients.push(owner.to_string());
+        }
+        (me, from_peer, recipients, saved)
+    };
+    fanout_to_participants(
+        &state,
+        &me,
+        &from_peer,
+        &recipients,
+        &json!({
+            "op": "checklist_toggle",
+            "item_id": id,
+            "option_id": option_id,
+            "user_id": me,
+            "checked": checked,
+            "updated_at": stamp,
+        }),
+    )?;
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn ack_calendar_item(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Value, String> {
+    let stamp = now();
+    let (me, from_peer, recipients, saved) = {
+        let conn = state.db.lock();
+        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let me = profile["id"].as_str().unwrap_or("").to_string();
+        let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+        let saved = db::apply_calendar_ack(&conn, &id, &me, &stamp)?;
+        let mut recipients = participant_id_list(&saved["participant_ids"]);
+        let owner = saved["created_by"].as_str().unwrap_or("");
+        if !owner.is_empty() && owner != me && !recipients.iter().any(|r| r == owner) {
+            recipients.push(owner.to_string());
+        }
+        (me, from_peer, recipients, saved)
+    };
+    fanout_to_participants(
+        &state,
+        &me,
+        &from_peer,
+        &recipients,
+        &json!({
+            "op": "ack",
+            "item_id": id,
+            "user_id": me,
+            "at": stamp,
+        }),
+    )?;
+    Ok(saved)
 }
 
 /// Check due reminders/meetings and fire desktop toasts once each.

@@ -455,6 +455,18 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
+    if version < 14 {
+        conn.execute_batch(
+            r#"
+            ALTER TABLE calendar_items ADD COLUMN checklist_json TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE calendar_items ADD COLUMN acks_json TEXT NOT NULL DEFAULT '{}';
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "user_version", 14)
+            .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 
