@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -59,16 +59,37 @@ function checklistSummary(it: CalendarItem): string {
   return `${done}/${opts.length} checked`;
 }
 
+export type CalendarFocusRequest = {
+  itemId: string;
+  day?: string;
+};
+
+export type CalendarShareNotify = {
+  itemId: string;
+  title: string;
+  kind: CalendarItem["kind"];
+  day: string;
+  time?: string | null;
+};
+
 export function CalendarScreen({
   peers,
   myId,
   myName,
   onStatus,
+  focusRequest,
+  onFocusConsumed,
+  onNotifyShare,
 }: {
   peers: Peer[];
   myId: string;
   myName: string;
   onStatus?: (s: string) => void;
+  /** Deep-link from chat "View" — jump to day and open the item. */
+  focusRequest?: CalendarFocusRequest | null;
+  onFocusConsumed?: () => void;
+  /** Send a chat card to newly added participants (games-invite style). */
+  onNotifyShare?: (peerId: string, share: CalendarShareNotify) => Promise<void>;
 }) {
   const today = useMemo(() => dayKey(new Date()), []);
   const [cursor, setCursor] = useState(() => {
@@ -79,6 +100,7 @@ export function CalendarScreen({
   const [items, setItems] = useState<CalendarItem[]>([]);
   const [editor, setEditor] = useState<CalendarDraft | null>(null);
   const [busy, setBusy] = useState(false);
+  const focusTries = useRef(0);
 
   const others = useMemo(
     () => peers.filter((p) => p.user_id !== myId && !p.blocked),
@@ -119,6 +141,42 @@ export function CalendarScreen({
     });
     return () => un?.();
   }, [refresh]);
+
+  // Deep-link from chat View button — move month/day then open detail.
+  useEffect(() => {
+    if (!focusRequest?.itemId) {
+      focusTries.current = 0;
+      return;
+    }
+    if (focusRequest.day && /^\d{4}-\d{2}-\d{2}$/.test(focusRequest.day)) {
+      const [y, m] = focusRequest.day.split("-").map(Number);
+      setCursor({ y, m: m - 1 });
+      setSelectedDay(focusRequest.day);
+    }
+  }, [focusRequest?.itemId, focusRequest?.day]);
+
+  useEffect(() => {
+    if (!focusRequest?.itemId) return;
+    const hit = items.find((it) => it.id === focusRequest.itemId);
+    if (hit) {
+      setSelectedDay(hit.day);
+      setEditor(itemToDraft(hit, myId));
+      focusTries.current = 0;
+      onFocusConsumed?.();
+      return;
+    }
+    if (focusTries.current >= 8) {
+      onStatus?.("Calendar item not available yet — try again in a moment.");
+      focusTries.current = 0;
+      onFocusConsumed?.();
+      return;
+    }
+    focusTries.current += 1;
+    const t = window.setTimeout(() => {
+      void refresh();
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [focusRequest, items, myId, onFocusConsumed, onStatus, refresh]);
 
   useEffect(() => {
     const tick = () => {
@@ -171,9 +229,13 @@ export function CalendarScreen({
       }
       editor.checklist = opts;
     }
+    const wasNew = !editor.id;
+    const prevParts = wasNew
+      ? []
+      : [...(items.find((it) => it.id === editor.id)?.participant_ids || [])];
     setBusy(true);
     try {
-      await peerApi.upsertCalendarItem({
+      const saved = await peerApi.upsertCalendarItem({
         id: editor.id,
         title: editor.title.trim(),
         body: editor.kind === "todo" ? "" : editor.body.trim(),
@@ -187,6 +249,22 @@ export function CalendarScreen({
         checklist: editor.kind === "todo" ? editor.checklist : [],
         acks: editor.acks || {},
       });
+      const notifyIds = editor.participant_ids.filter((id) => !prevParts.includes(id));
+      if (onNotifyShare && notifyIds.length && saved?.id) {
+        for (const peerId of notifyIds) {
+          try {
+            await onNotifyShare(peerId, {
+              itemId: saved.id,
+              title: saved.title || editor.title.trim(),
+              kind: saved.kind || editor.kind,
+              day: saved.day || editor.day,
+              time: saved.time ?? (editor.time.trim() || null),
+            });
+          } catch (err: any) {
+            onStatus?.(err?.message || String(err));
+          }
+        }
+      }
       setEditor(null);
       await refresh();
       onStatus?.(
@@ -482,6 +560,11 @@ export function CalendarScreen({
         onClose={() => setEditor(null)}
         onSave={() => void saveDraft()}
         onDelete={() => editor?.id && void removeItem(editor.id)}
+        onCancelEdit={() => {
+          if (!editor?.id) return;
+          const it = items.find((r) => r.id === editor.id);
+          if (it) setEditor(itemToDraft(it, myId));
+        }}
         onToggleOption={(optionId, checked) => void toggleOption(optionId, checked)}
         onAck={() => void ackItem()}
       />

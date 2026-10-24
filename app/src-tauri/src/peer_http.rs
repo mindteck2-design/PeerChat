@@ -721,10 +721,6 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
             let notify = if has_inbox {
                 let from = payload.get("from_peer");
                 let msg = payload.get("message");
-                let cal_op = payload
-                    .pointer("/calendar_share/op")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("upsert");
                 let kind = msg
                     .and_then(|m| m.get("kind"))
                     .and_then(|v| v.as_str())
@@ -756,9 +752,11 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                             .and_then(|v| v.as_str())
                     })
                     .unwrap_or("");
-                // Upsert/delete calendar shares toast; checklist/ack only refresh UI.
-                let fresh = if kind == "calendar_share" {
-                    matches!(cal_op, "upsert" | "delete")
+                // Item sync (calendar_share payload, no chat message) stays silent —
+                // the DM calendar_share card carries the user-facing toast.
+                // Checklist/ack also silent. Chat messages use normal fresh_message.
+                let fresh = if payload.get("calendar_share").is_some() && msg.is_none() {
+                    false
                 } else {
                     fresh_message
                 };

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   Box,
   Button,
@@ -11,10 +12,17 @@ import {
   Typography,
 } from "@mui/material";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
+import EditIcon from "@mui/icons-material/EditRounded";
 import type { Peer } from "../../peer";
 import { AckBar } from "./AckBar";
 import { CALENDAR_KINDS, type CalendarDraft } from "./calendarTypes";
-import { canCreateKind, canEditItem, canMutateLiveState, isPastDay } from "./calendarRules";
+import {
+  canCreateKind,
+  canEditItem,
+  canMutateLiveState,
+  isOwner,
+  isPastDay,
+} from "./calendarRules";
 import { PeerPicker } from "./PeerPicker";
 import { TimeSelect } from "./TimeSelect";
 import { TodoChecklist } from "./TodoChecklist";
@@ -48,6 +56,7 @@ export function CalendarItemEditor({
   onClose,
   onSave,
   onDelete,
+  onCancelEdit,
   onToggleOption,
   onAck,
 }: {
@@ -62,18 +71,32 @@ export function CalendarItemEditor({
   onClose: () => void;
   onSave: () => void;
   onDelete: () => void;
+  /** Restore draft after canceling edit mode. */
+  onCancelEdit?: () => void;
   onToggleOption: (optionId: string, checked: boolean) => void;
   onAck: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
+
+  // Existing items always open in view mode; new items start in edit.
+  useEffect(() => {
+    if (!open || !draft) {
+      setEditing(false);
+      return;
+    }
+    setEditing(!draft.id);
+  }, [open, draft?.id]);
+
   if (!draft) return null;
 
   const isNew = !draft.id;
   const past = isPastDay(draft.day, today);
-  const editable = isNew
-    ? canCreateKind(draft.kind, draft.day, today)
-    : canEditItem(draft.kind, draft.day, today);
+  const owner = isNew || isOwner(draft.created_by ?? myId, myId);
+  const mayEditContent =
+    isNew || canEditItem(draft.kind, draft.day, draft.created_by ?? myId, myId, today);
   const liveOk = canMutateLiveState(draft.day, today);
-  const readOnly = !editable;
+  const inEdit = isNew || (editing && mayEditContent);
+  const fieldsLocked = !inEdit || busy;
   const shared =
     !!draft.shared ||
     draft.participant_ids.length > 0 ||
@@ -97,6 +120,14 @@ export function CalendarItemEditor({
     )
   );
 
+  const titleText = isNew
+    ? "New calendar item"
+    : inEdit
+      ? "Edit item"
+      : owner
+        ? "View item"
+        : "Shared with you";
+
   return (
     <Dialog
       open={open}
@@ -113,10 +144,15 @@ export function CalendarItemEditor({
       }}
     >
       <DialogTitle sx={{ pb: 0.5, pt: 2, px: 2.5, fontSize: "1.1rem", fontWeight: 700 }}>
-        {isNew ? "New calendar item" : readOnly ? "View item" : "Edit item"}
+        {titleText}
         {past && draft.kind !== "note" && (
           <Typography variant="caption" color="text.secondary" display="block" fontWeight={400}>
             Past day — view only
+          </Typography>
+        )}
+        {!isNew && !owner && (
+          <Typography variant="caption" color="text.secondary" display="block" fontWeight={400}>
+            You can acknowledge or check items — only the owner can edit.
           </Typography>
         )}
       </DialogTitle>
@@ -126,7 +162,6 @@ export function CalendarItemEditor({
           flexDirection: "column",
           gap: 2.5,
           px: 2.5,
-          // MUI collapses DialogContent padding-top after DialogTitle, which clips shrink labels.
           pt: "20px !important",
           pb: 2,
           overflow: "auto",
@@ -141,8 +176,8 @@ export function CalendarItemEditor({
           value={draft.title}
           onChange={(e) => setDraft({ ...draft, title: e.target.value })}
           fullWidth
-          autoFocus={!readOnly}
-          disabled={readOnly || busy}
+          autoFocus={inEdit && isNew}
+          disabled={fieldsLocked}
           InputLabelProps={{ shrink: true, sx: labelSx }}
         />
 
@@ -152,7 +187,7 @@ export function CalendarItemEditor({
             select
             label="Type"
             value={draft.kind}
-            disabled={readOnly || busy || !isNew}
+            disabled={fieldsLocked || !isNew}
             onChange={(e) => {
               const kind = e.target.value as CalendarDraft["kind"];
               setDraft({
@@ -178,7 +213,7 @@ export function CalendarItemEditor({
             label="Date"
             type="date"
             value={draft.day}
-            disabled={readOnly || busy}
+            disabled={fieldsLocked}
             onChange={(e) => setDraft({ ...draft, day: e.target.value })}
             InputLabelProps={{ shrink: true, sx: labelSx }}
             sx={{
@@ -193,7 +228,7 @@ export function CalendarItemEditor({
           />
           <TimeSelect
             value={draft.time}
-            disabled={readOnly || busy}
+            disabled={fieldsLocked}
             onChange={(time) => setDraft({ ...draft, time })}
           />
         </Stack>
@@ -208,7 +243,7 @@ export function CalendarItemEditor({
             multiline
             minRows={2}
             maxRows={5}
-            disabled={readOnly || busy}
+            disabled={fieldsLocked}
             placeholder="Optional notes"
             InputLabelProps={{ shrink: true, sx: labelSx }}
             sx={{
@@ -225,19 +260,20 @@ export function CalendarItemEditor({
           <Box sx={{ maxHeight: 200, overflow: "auto", ...dialogScrollSx }}>
             <TodoChecklist
               options={draft.checklist}
-              authoring={isNew}
-              readOnly={readOnly || busy}
+              authoring={isNew && inEdit}
+              structureEditable={inEdit && mayEditContent}
+              checkEnabled={!isNew && !inEdit && liveOk}
               peers={peers}
               myId={myId}
               myName={myName}
               onChange={
-                editable
+                inEdit && mayEditContent
                   ? (checklist) => setDraft({ ...draft, checklist })
                   : undefined
               }
               onToggle={
-                !isNew && liveOk
-                  ? (optionId, checked) => onToggleOption(optionId, checked)
+                !isNew && !inEdit && liveOk
+                  ? (optionId) => onToggleOption(optionId, true)
                   : undefined
               }
             />
@@ -247,11 +283,11 @@ export function CalendarItemEditor({
         <PeerPicker
           peers={peers}
           selectedIds={draft.participant_ids}
-          disabled={readOnly || busy}
+          disabled={fieldsLocked}
           onChange={(participant_ids) => setDraft({ ...draft, participant_ids })}
         />
 
-        {showAck && (
+        {showAck && !inEdit && (
           <AckBar
             acks={draft.acks}
             participantIds={expectedAckIds}
@@ -274,7 +310,7 @@ export function CalendarItemEditor({
           bgcolor: "background.paper",
         }}
       >
-        {draft.id && editable && (
+        {draft.id && inEdit && mayEditContent && (
           <Button
             size="small"
             color="error"
@@ -286,10 +322,34 @@ export function CalendarItemEditor({
             Delete
           </Button>
         )}
-        <Button size="small" disabled={busy} onClick={onClose}>
-          {readOnly ? "Close" : "Cancel"}
-        </Button>
-        {!readOnly && (
+        {!isNew && !inEdit && mayEditContent && (
+          <Button
+            size="small"
+            startIcon={<EditIcon />}
+            disabled={busy}
+            onClick={() => setEditing(true)}
+            sx={{ mr: "auto" }}
+          >
+            Edit
+          </Button>
+        )}
+        {inEdit && !isNew ? (
+          <Button
+            size="small"
+            disabled={busy}
+            onClick={() => {
+              onCancelEdit?.();
+              setEditing(false);
+            }}
+          >
+            Cancel
+          </Button>
+        ) : (
+          <Button size="small" disabled={busy} onClick={onClose}>
+            {inEdit ? "Cancel" : "Close"}
+          </Button>
+        )}
+        {inEdit && (
           <Button size="small" variant="contained" disabled={busy} onClick={onSave}>
             Save
           </Button>

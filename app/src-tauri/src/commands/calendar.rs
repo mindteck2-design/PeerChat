@@ -67,6 +67,50 @@ fn reject_past_restricted(kind: &str, day: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Keep check state from previous options when the owner renames/reorders the checklist.
+fn merge_checklist_preserve_checks(incoming: &Value, previous: &Value) -> Value {
+    let prev_map: std::collections::HashMap<String, Value> = previous
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| {
+                    let id = o.get("id").and_then(|v| v.as_str())?.to_string();
+                    Some((id, o.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(arr) = incoming.as_array() else {
+        return previous.clone();
+    };
+    let merged: Vec<Value> = arr
+        .iter()
+        .filter_map(|o| {
+            let id = o.get("id").and_then(|v| v.as_str())?;
+            let label = o.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if label.trim().is_empty() {
+                return None;
+            }
+            if let Some(old) = prev_map.get(id) {
+                Some(json!({
+                    "id": id,
+                    "label": label,
+                    "checked_by": old.get("checked_by").cloned().unwrap_or_else(|| json!([])),
+                    "check_at": old.get("check_at").cloned().unwrap_or_else(|| json!({})),
+                }))
+            } else {
+                Some(json!({
+                    "id": id,
+                    "label": label,
+                    "checked_by": [],
+                    "check_at": {},
+                }))
+            }
+        })
+        .collect();
+    json!(merged)
+}
+
 #[tauri::command]
 pub fn list_calendar_items(
     state: State<'_, AppState>,
@@ -98,7 +142,29 @@ pub async fn upsert_calendar_item(
             .map(|s| s.to_string())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         row["id"] = json!(id);
-        if row
+        if let Some(existing) = db::get_calendar_item(&conn, &id)? {
+            let owner = existing["created_by"].as_str().unwrap_or("");
+            if owner != me {
+                return Err("only the owner can edit this calendar item".into());
+            }
+            // Keep original owner.
+            row["created_by"] = json!(owner);
+            // Preserve live checklist checks / acks unless explicitly replaced for structure edits.
+            if row.get("acks").is_none() {
+                row["acks"] = existing.get("acks").cloned().unwrap_or_else(|| json!({}));
+            }
+            if row.get("checklist").is_none() {
+                row["checklist"] = existing
+                    .get("checklist")
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+            } else if existing["kind"].as_str() == Some("todo") {
+                // Merge: keep checked_by / check_at from existing options with same id.
+                let incoming = row.get("checklist").cloned().unwrap_or_else(|| json!([]));
+                let prev = existing.get("checklist").cloned().unwrap_or_else(|| json!([]));
+                row["checklist"] = merge_checklist_preserve_checks(&incoming, &prev);
+            }
+        } else if row
             .get("created_by")
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -143,12 +209,6 @@ pub async fn upsert_calendar_item(
         parts.dedup();
         row["participant_ids"] = json!(parts);
         row["shared"] = json!(!parts.is_empty());
-        // Preserve existing acks on upsert unless client sent them.
-        if row.get("acks").is_none() {
-            if let Some(existing) = db::get_calendar_item(&conn, &id)? {
-                row["acks"] = existing.get("acks").cloned().unwrap_or_else(|| json!({}));
-            }
-        }
         db::upsert_calendar_item(&conn, &row)?;
         let saved = db::get_calendar_item(&conn, row["id"].as_str().unwrap_or(""))?
             .ok_or("failed to read calendar item")?;
@@ -176,6 +236,10 @@ pub async fn delete_calendar_item(state: State<'_, AppState>, id: String) -> Res
         let me = profile["id"].as_str().unwrap_or("").to_string();
         let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
         let existing = db::get_calendar_item(&conn, &id)?.ok_or("calendar item not found")?;
+        let owner = existing["created_by"].as_str().unwrap_or("");
+        if owner != me {
+            return Err("only the owner can delete this calendar item".into());
+        }
         let recipients = participant_id_list(&existing["participant_ids"]);
         let tombstone = json!({
             "id": id,

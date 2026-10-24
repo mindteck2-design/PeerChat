@@ -24,17 +24,22 @@ export function TodoChecklist({
   onChange,
   onToggle,
   authoring,
-  readOnly,
+  structureEditable,
+  checkEnabled,
   peers,
   myId,
   myName,
 }: {
   options: ChecklistOption[];
   onChange?: (next: ChecklistOption[]) => void;
-  onToggle?: (optionId: string, checked: boolean) => void;
+  /** Check-only (never uncheck). Called with optionId when user checks. */
+  onToggle?: (optionId: string) => void;
   /** New item: edit option labels only (no checks yet). */
   authoring: boolean;
-  readOnly?: boolean;
+  /** Owner editing: can add/remove/rename options. */
+  structureEditable?: boolean;
+  /** Audience/owner in view mode may check unset options. */
+  checkEnabled?: boolean;
   peers: Peer[];
   myId: string;
   myName: string;
@@ -53,7 +58,6 @@ export function TodoChecklist({
                 fullWidth
                 placeholder={`Option ${idx + 1}`}
                 value={opt.label}
-                disabled={readOnly}
                 onChange={(e) => {
                   const next = options.map((o) =>
                     o.id === opt.id ? { ...o, label: e.target.value } : o
@@ -64,7 +68,7 @@ export function TodoChecklist({
               <IconButton
                 size="small"
                 aria-label="Remove option"
-                disabled={readOnly || options.length <= 1}
+                disabled={options.length <= 1}
                 onClick={() => onChange(options.filter((o) => o.id !== opt.id))}
               >
                 <DeleteOutlineIcon fontSize="small" />
@@ -75,7 +79,6 @@ export function TodoChecklist({
         <Button
           size="small"
           startIcon={<AddIcon />}
-          disabled={readOnly}
           onClick={() => onChange([...options, newChecklistOption("")])}
           sx={{ mt: 1 }}
         >
@@ -91,7 +94,7 @@ export function TodoChecklist({
         <Typography variant="subtitle2" fontWeight={700} flex={1}>
           Checklist
         </Typography>
-        {onChange && !readOnly && (
+        {structureEditable && onChange && (
           <Button
             size="small"
             startIcon={<AddIcon />}
@@ -108,19 +111,23 @@ export function TodoChecklist({
       ) : (
         <Stack spacing={0.75}>
           {options.map((opt) => {
+            const locked = opt.checked_by.length > 0;
             const mine = opt.checked_by.includes(myId);
+            const canCheck = !!checkEnabled && !!onToggle && !locked;
             return (
               <Box key={opt.id}>
                 <Stack direction="row" alignItems="flex-start" spacing={0.5}>
                   <Checkbox
                     size="small"
-                    checked={mine}
-                    disabled={readOnly || !onToggle}
-                    onChange={(_, checked) => onToggle?.(opt.id, checked)}
+                    checked={locked}
+                    disabled={!canCheck}
+                    onChange={(_, checked) => {
+                      if (checked && canCheck) onToggle(opt.id);
+                    }}
                     sx={{ pt: 0.25 }}
                   />
                   <Box flex={1} minWidth={0}>
-                    {onChange && !readOnly ? (
+                    {structureEditable && onChange ? (
                       <TextField
                         size="small"
                         fullWidth
@@ -135,7 +142,12 @@ export function TodoChecklist({
                         InputLabelProps={{ shrink: true }}
                       />
                     ) : (
-                      <Typography fontSize={14}>{opt.label || "(untitled)"}</Typography>
+                      <Typography
+                        fontSize={14}
+                        sx={{ textDecoration: locked ? "line-through" : "none", opacity: locked ? 0.85 : 1 }}
+                      >
+                        {opt.label || "(untitled)"}
+                      </Typography>
                     )}
                     {opt.checked_by.length > 0 && (
                       <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap mt={0.5}>
@@ -144,17 +156,18 @@ export function TodoChecklist({
                             key={uid}
                             size="small"
                             label={nameFor(uid, peers, myId, myName)}
+                            color={uid === myId || mine ? "primary" : "default"}
                             sx={{ height: 20, fontSize: 11 }}
                           />
                         ))}
                       </Stack>
                     )}
                   </Box>
-                  {onChange && !readOnly && (
+                  {structureEditable && onChange && (
                     <IconButton
                       size="small"
                       aria-label="Remove option"
-                      disabled={options.length <= 1}
+                      disabled={options.length <= 1 || locked}
                       onClick={() => onChange(options.filter((o) => o.id !== opt.id))}
                     >
                       <DeleteOutlineIcon fontSize="small" />

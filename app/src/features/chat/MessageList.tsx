@@ -19,6 +19,10 @@ import { LinkifiedText } from "../../panels";
 import { RichCard } from "./RichCard";
 import { GameInviteCard, matchIdOf, parseGameMsg, resolveGameCardStatus } from "../../games/GameInviteCard";
 import type { GameMsg, PendingGameInvite } from "../../games/games";
+import {
+  CalendarShareCard,
+  parseCalendarShare,
+} from "../calendar/CalendarShareCard";
 import { emojiOnlyCount, emojiOnlyFontSize } from "../../emoji";
 import { FEATURE_GAMES } from "../../features";
 import { messageAttachmentIds } from "../../shared/messageMeta";
@@ -154,6 +158,7 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
     setHighlightMsgId,
     setMsgMenu,
     setNav,
+    setPendingCalendarFocus,
     setPendingGameInvite,
     setStatus,
     status,
@@ -216,6 +221,68 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
                             },
                           }}
                         />
+                      </Box>
+                    </Grow>
+                  );
+                }
+                if (m.kind === "calendar_share") {
+                  const share = parseCalendarShare(plain[m.id] || "");
+                  if (!share) return null;
+                  const peerName =
+                    active?.kind === "dm"
+                      ? active.peer_name ||
+                        peers.find((p) => p.user_id === active.peer_id)?.display_name ||
+                        "Peer"
+                      : senderLabel(m.sender_id);
+                  return (
+                    <Grow in key={m.id} timeout={280}>
+                      <Box
+                        display="flex"
+                        justifyContent={mine ? "flex-end" : "flex-start"}
+                        px={1}
+                        py={0.35}
+                      >
+                        <Paper
+                          elevation={0}
+                          sx={{
+                            px: 1.25,
+                            py: 1,
+                            maxWidth: "78%",
+                            bgcolor: mine ? "primary.dark" : "background.paper",
+                            color: mine ? "primary.contrastText" : "text.primary",
+                            border: "1px solid",
+                            borderColor: mine ? "transparent" : "divider",
+                            borderRadius: 2.5,
+                          }}
+                        >
+                          <CalendarShareCard
+                            payload={share}
+                            mine={mine}
+                            peerName={peerName}
+                            onOpen={() => {
+                              if (typeof setPendingCalendarFocus === "function") {
+                                setPendingCalendarFocus({
+                                  itemId: share.itemId,
+                                  day: share.day,
+                                });
+                              }
+                              setNav("calendar");
+                            }}
+                          />
+                          <Typography
+                            variant="caption"
+                            color={mine ? "primary.contrastText" : "text.secondary"}
+                            sx={{
+                              display: "block",
+                              textAlign: "right",
+                              fontSize: 10.5,
+                              mt: 0.5,
+                              opacity: 0.8,
+                            }}
+                          >
+                            {formatClock(m.created_at)}
+                          </Typography>
+                        </Paper>
                       </Box>
                     </Grow>
                   );

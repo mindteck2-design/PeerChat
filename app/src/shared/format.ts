@@ -98,6 +98,18 @@ export function conversationPreviewLine(
       senderId === myId ? "You: " : isGroup && senderLabel ? `${senderLabel}: ` : "";
     return truncate(prefix + body, 80);
   }
+  if (kind === "calendar_share") {
+    try {
+      const j = JSON.parse(decrypted) as { title?: string; kind?: string };
+      const title = (j.title || "Calendar item").trim();
+      body = senderId === myId ? `Shared: ${title}` : `Calendar: ${title}`;
+    } catch {
+      body = "Calendar share";
+    }
+    const prefix =
+      senderId === myId ? "You: " : isGroup && senderLabel ? `${senderLabel}: ` : "";
+    return truncate(prefix + body, 80);
+  }
   if (kind === "announcement" || kind === "poll" || kind === "snippet") {
     try {
       const j = JSON.parse(decrypted);

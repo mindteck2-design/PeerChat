@@ -248,7 +248,7 @@ pub fn set_calendar_todo_done(conn: &Connection, id: &str, done: bool) -> Result
     Ok(())
 }
 
-/// Apply a checklist toggle with per-user last-write-wins on `check_at`.
+/// Apply a one-way checklist check (no uncheck / recheck once anyone has checked).
 pub fn apply_checklist_toggle(
     conn: &Connection,
     item_id: &str,
@@ -257,6 +257,9 @@ pub fn apply_checklist_toggle(
     checked: bool,
     updated_at: &str,
 ) -> Result<Value, String> {
+    if !checked {
+        return Err("checklist items cannot be unchecked".into());
+    }
     let mut item = get_calendar_item(conn, item_id)?.ok_or("calendar item not found")?;
     let day = item["day"].as_str().unwrap_or("");
     let today = local_today();
@@ -273,22 +276,6 @@ pub fn apply_checklist_toggle(
             continue;
         }
         found = true;
-        let prev_at = opt
-            .pointer(&format!("/check_at/{user_id}"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !prev_at.is_empty() && updated_at <= prev_at {
-            // Stale — return current item unchanged.
-            return Ok(item);
-        }
-        let mut check_at = opt
-            .get("check_at")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-        check_at.insert(user_id.to_string(), json!(updated_at));
-        opt["check_at"] = Value::Object(check_at);
-
         let mut checked_by: Vec<String> = opt
             .get("checked_by")
             .and_then(|v| v.as_array())
@@ -298,13 +285,25 @@ pub fn apply_checklist_toggle(
                     .collect()
             })
             .unwrap_or_default();
-        if checked {
-            if !checked_by.iter().any(|u| u == user_id) {
-                checked_by.push(user_id.to_string());
-            }
-        } else {
-            checked_by.retain(|u| u != user_id);
+        // Once anyone has checked this option, it is locked.
+        if !checked_by.is_empty() {
+            return Ok(item);
         }
+        let prev_at = opt
+            .pointer(&format!("/check_at/{user_id}"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !prev_at.is_empty() && updated_at <= prev_at {
+            return Ok(item);
+        }
+        let mut check_at = opt
+            .get("check_at")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        check_at.insert(user_id.to_string(), json!(updated_at));
+        opt["check_at"] = Value::Object(check_at);
+        checked_by.push(user_id.to_string());
         opt["checked_by"] = json!(checked_by);
         break;
     }

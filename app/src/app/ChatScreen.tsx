@@ -155,7 +155,11 @@ import CampaignIcon from "@mui/icons-material/CampaignRounded";
 import type { SavedItem, ScanResult, TransferLog } from "../peer";
 import { ThemeMode } from "../theme";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
-import { CalendarScreen } from "../features/calendar/CalendarScreen";
+import {
+  CalendarScreen,
+  type CalendarFocusRequest,
+  type CalendarShareNotify,
+} from "../features/calendar/CalendarScreen";
 import { FEATURE_GAMES } from "../features";
 import {
   GamesHub,
@@ -426,6 +430,8 @@ export function ChatScreen({
   const gameDispatchRef = useRef<GameDispatchFn | null>(null);
   const [pendingGameInvite, setPendingGameInvite] = useState<PendingGameInvite | null>(null);
   const [gameInviteBusy, setGameInviteBusy] = useState(false);
+  const [pendingCalendarFocus, setPendingCalendarFocus] =
+    useState<CalendarFocusRequest | null>(null);
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLInputElement | null>(null);
@@ -1895,6 +1901,35 @@ export function ChatScreen({
     await peerApi.sendMessage(
       conv.id,
       { kind: "game_move", sender_id: profile.id, ...enc },
+      [peerId]
+    );
+  }
+
+  /** Chat card for a shared calendar item (same DM encrypt path as game invites). */
+  async function sendCalendarShareMsg(
+    peerId: string,
+    share: CalendarShareNotify
+  ): Promise<void> {
+    const peer = peers.find((p) => p.user_id === peerId);
+    if (!peer) throw new Error("Peer not found");
+    const conv = await peerApi.openDm(peerId);
+    const pubs: Record<string, string> = {
+      [peer.user_id]: peer.x25519_public,
+      [profile.id]: exportPublic(identity).x25519_public,
+    };
+    const body = JSON.stringify({
+      type: "invite",
+      itemId: share.itemId,
+      title: share.title,
+      kind: share.kind,
+      day: share.day,
+      time: share.time ?? null,
+      fromName: profile.display_name,
+    });
+    const enc = await encryptMessage(body, conv.id, profile.id, identity, pubs);
+    await peerApi.sendMessage(
+      conv.id,
+      { kind: "calendar_share", sender_id: profile.id, ...enc },
       [peerId]
     );
   }
@@ -3804,6 +3839,7 @@ export function ChatScreen({
     setMessages,
     setMsgMenu,
     setNav,
+    setPendingCalendarFocus,
     setPendingGameInvite,
     setReplyTo,
     setSlashIndex,
@@ -3901,6 +3937,9 @@ export function ChatScreen({
             myId={profile.id}
             myName={profile.display_name}
             onStatus={setStatus}
+            focusRequest={pendingCalendarFocus}
+            onFocusConsumed={() => setPendingCalendarFocus(null)}
+            onNotifyShare={sendCalendarShareMsg}
           />
         )}
         {FEATURE_GAMES && nav === "games" && (gamesOn || pendingGameInvite ? (
