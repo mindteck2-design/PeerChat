@@ -112,7 +112,7 @@ export function CalendarItemEditor({
         },
       }}
     >
-      <DialogTitle sx={{ pb: 1, pt: 2, px: 2.5, fontSize: "1.1rem", fontWeight: 700 }}>
+      <DialogTitle sx={{ pb: 0.5, pt: 2, px: 2.5, fontSize: "1.1rem", fontWeight: 700 }}>
         {isNew ? "New calendar item" : readOnly ? "View item" : "Edit item"}
         {past && draft.kind !== "note" && (
           <Typography variant="caption" color="text.secondary" display="block" fontWeight={400}>
@@ -124,10 +124,11 @@ export function CalendarItemEditor({
         sx={{
           display: "flex",
           flexDirection: "column",
-          gap: 1.25,
+          gap: 2.5,
           px: 2.5,
-          pt: 0.5,
-          pb: 1,
+          // MUI collapses DialogContent padding-top after DialogTitle, which clips shrink labels.
+          pt: "20px !important",
+          pb: 2,
           overflow: "auto",
           flex: 1,
           minHeight: 0,
@@ -145,7 +146,7 @@ export function CalendarItemEditor({
           InputLabelProps={{ shrink: true, sx: labelSx }}
         />
 
-        <Stack direction="row" spacing={1} alignItems="flex-start">
+        <Stack direction="row" spacing={1.5} alignItems="flex-start">
           <TextField
             size="small"
             select
