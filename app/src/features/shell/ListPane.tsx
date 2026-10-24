@@ -45,7 +45,6 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
     sidebarMsgSearchBusy,
     tab,
     text,
-    transfers,
     version
   } = vm;
   const searchingChats = tab === 1 && !!chatSearch.trim();
@@ -59,7 +58,7 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
           borderRight: "1px solid",
           borderColor: "divider",
           bgcolor: "background.paper",
-          display: nav === "transfers" || nav === "games" || nav === "saved" || nav === "settings" ? "none" : "flex",
+          display: nav === "calendar" || nav === "games" || nav === "saved" || nav === "settings" ? "none" : "flex",
         }}
       >
         <Box sx={{ px: 2, pt: 1.75, pb: 1, display: "flex", alignItems: "center", gap: 1 }}>

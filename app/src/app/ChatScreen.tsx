@@ -148,7 +148,6 @@ import {
   SavedPanel,
   SearchDialog,
   SnippetDialog,
-  TransfersPanel,
   URL_RE,
   type BundleItem,
 } from "../panels";
@@ -156,6 +155,7 @@ import CampaignIcon from "@mui/icons-material/CampaignRounded";
 import type { SavedItem, ScanResult, TransferLog } from "../peer";
 import { ThemeMode } from "../theme";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
+import { CalendarScreen } from "../features/calendar/CalendarScreen";
 import { FEATURE_GAMES } from "../features";
 import {
   GamesHub,
@@ -795,7 +795,12 @@ export function ChatScreen({
         }
 
         // Surface first contact from an untrusted peer so inbound DMs are obvious.
-        if (fromId && kind !== "system" && kind !== "group_event") {
+        if (
+          fromId &&
+          kind !== "system" &&
+          kind !== "group_event" &&
+          kind !== "calendar_share"
+        ) {
           try {
             const peerList = await peerApi.listPeers();
             const peer = peerList.find((x) => x.user_id === fromId);
@@ -815,6 +820,16 @@ export function ChatScreen({
     });
     return () => unlisten?.();
   }, [profile.id, identity]);
+
+  // Calendar due-soon toasts (works even when Calendar nav is not open).
+  useEffect(() => {
+    const tick = () => {
+      void peerApi.pollCalendarDue().catch(() => {});
+    };
+    tick();
+    const id = window.setInterval(tick, 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Toast click: Rust tray toasts + onAction when a listener is registered.
   useEffect(() => {
@@ -3572,8 +3587,8 @@ export function ChatScreen({
       void pickAndStageFiles();
     } else if (name === "/bundle") {
       setBundleOpen(true);
-    } else if (name === "/transfers") {
-      setNav("transfers");
+    } else if (name === "/calendar") {
+      setNav("calendar");
     } else if (name === "/peers") {
       setNav("people");
       setTab(0);
@@ -3880,40 +3895,12 @@ export function ChatScreen({
         height="100%"
         overflow="hidden"
       >
-        {nav === "transfers" && (
-          <TransfersPanel
-            rows={transfers}
-            onClose={() => {
-              setNav("chats");
-              setTab(1);
-            }}
-            onRetry={(row) => {
-              if (row.direction === "recv" && row.file_id) {
-                const msg = messages.find((m) =>
-                  messageAttachmentIds(m).includes(row.file_id!)
-                );
-                void openAttachment(row.file_id, msg?.sender_id || profile.id);
-              } else {
-                setStatus("Open the conversation and send the file again to retry an upload.");
-              }
-            }}
-            onRemove={async (row) => {
-              try {
-                await peerApi.deleteTransfer(row.id);
-                setTransfers(await peerApi.listTransfers());
-              } catch (err: any) {
-                setStatus(err?.message || String(err));
-              }
-            }}
-            onClearHistory={async () => {
-              try {
-                await peerApi.clearTransferHistory();
-                setTransfers(await peerApi.listTransfers());
-                setStatus("Transfer history cleared");
-              } catch (err: any) {
-                setStatus(err?.message || String(err));
-              }
-            }}
+        {nav === "calendar" && (
+          <CalendarScreen
+            peers={peers}
+            myId={profile.id}
+            myName={profile.display_name}
+            onStatus={setStatus}
           />
         )}
         {FEATURE_GAMES && nav === "games" && (gamesOn || pendingGameInvite ? (

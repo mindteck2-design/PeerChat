@@ -358,6 +358,17 @@ export const peerApi = {
   saveItem: (row: Record<string, unknown>) => inv<void>("save_item", { row }),
   deleteSavedItem: (id: string) => inv<void>("delete_saved_item", { id }),
   listSavedItems: () => inv<SavedItem[]>("list_saved_items"),
+  listCalendarItems: (fromDay: string, toDay: string) =>
+    inv<CalendarItem[]>("list_calendar_items", { fromDay, toDay }),
+  upsertCalendarItem: (item: Partial<CalendarItem> & { title: string; day: string; kind: CalendarKind }) =>
+    inv<CalendarItem>("upsert_calendar_item", { item }),
+  deleteCalendarItem: (id: string) => inv<void>("delete_calendar_item", { id }),
+  setCalendarTodoDone: (id: string, done: boolean) =>
+    inv<CalendarItem>("set_calendar_todo_done", { id, done }),
+  toggleCalendarChecklistOption: (id: string, optionId: string, checked: boolean) =>
+    inv<CalendarItem>("toggle_calendar_checklist_option", { id, optionId, checked }),
+  ackCalendarItem: (id: string) => inv<CalendarItem>("ack_calendar_item", { id }),
+  pollCalendarDue: () => inv<number>("poll_calendar_due"),
   peerDeliveryError: (userId: string) =>
     inv<{ last_error?: string | null; attempts?: number; created_at?: string } | null>(
       "peer_delivery_error",
@@ -449,4 +460,31 @@ export type SavedItem = {
   kind: string;
   preview: string;
   created_at: string;
+};
+
+export type CalendarKind = "note" | "reminder" | "meeting" | "todo";
+
+export type CalendarChecklistOption = {
+  id: string;
+  label: string;
+  checked_by: string[];
+  check_at?: Record<string, string>;
+};
+
+export type CalendarItem = {
+  id: string;
+  title: string;
+  body: string;
+  kind: CalendarKind;
+  day: string;
+  time?: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  done: boolean;
+  shared: boolean;
+  participant_ids: string[];
+  notified_at?: string | null;
+  checklist?: CalendarChecklistOption[];
+  acks?: Record<string, string>;
 };

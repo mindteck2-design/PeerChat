@@ -11,6 +11,7 @@ mod members;
 mod transfers;
 mod settings;
 mod saved;
+mod calendar;
 
 pub use profile::*;
 pub use peers::*;
@@ -22,6 +23,7 @@ pub use members::*;
 pub use transfers::*;
 pub use settings::*;
 pub use saved::*;
+pub use calendar::*;
 
 pub fn open(path: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
@@ -423,6 +425,45 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
         conn.pragma_update(None, "user_version", 12)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if version < 13 {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS calendar_items (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL CHECK (kind IN ('note','reminder','meeting','todo')),
+                day TEXT NOT NULL,
+                time TEXT,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                done INTEGER NOT NULL DEFAULT 0,
+                shared INTEGER NOT NULL DEFAULT 0,
+                participant_ids TEXT NOT NULL DEFAULT '[]',
+                notified_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_calendar_items_day
+              ON calendar_items(day, time);
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "user_version", 13)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if version < 14 {
+        conn.execute_batch(
+            r#"
+            ALTER TABLE calendar_items ADD COLUMN checklist_json TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE calendar_items ADD COLUMN acks_json TEXT NOT NULL DEFAULT '{}';
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "user_version", 14)
             .map_err(|e| e.to_string())?;
     }
 
