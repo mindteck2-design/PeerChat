@@ -51,7 +51,7 @@ export function TodoChecklist({
               <TextField
                 size="small"
                 fullWidth
-                label={`Option ${idx + 1}`}
+                placeholder={`Option ${idx + 1}`}
                 value={opt.label}
                 disabled={readOnly}
                 onChange={(e) => {
@@ -60,7 +60,6 @@ export function TodoChecklist({
                   );
                   onChange(next);
                 }}
-                InputLabelProps={{ shrink: true }}
               />
               <IconButton
                 size="small"

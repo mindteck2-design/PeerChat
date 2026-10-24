@@ -10,7 +10,6 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import CalendarMonthIcon from "@mui/icons-material/CalendarMonthRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import type { Peer } from "../../peer";
 import { AckBar } from "./AckBar";
@@ -22,6 +21,20 @@ import { TodoChecklist } from "./TodoChecklist";
 import { newChecklistOption } from "./calendarTypes";
 
 const labelSx = { color: "text.secondary" };
+
+const dialogScrollSx = {
+  scrollbarWidth: "thin" as const,
+  scrollbarColor: "rgba(255,255,255,0.22) transparent",
+  "&::-webkit-scrollbar": { width: 6, height: 6 },
+  "&::-webkit-scrollbar-track": { background: "transparent" },
+  "&::-webkit-scrollbar-thumb": {
+    backgroundColor: "rgba(255,255,255,0.22)",
+    borderRadius: 8,
+  },
+  "&::-webkit-scrollbar-thumb:hover": {
+    backgroundColor: "rgba(255,255,255,0.35)",
+  },
+};
 
 export function CalendarItemEditor({
   open,
@@ -94,14 +107,15 @@ export function CalendarItemEditor({
         sx: {
           display: "flex",
           flexDirection: "column",
-          maxHeight: "90vh",
+          maxHeight: "88vh",
+          ...dialogScrollSx,
         },
       }}
     >
-      <DialogTitle>
+      <DialogTitle sx={{ pb: 1, pt: 2, px: 2.5, fontSize: "1.1rem", fontWeight: 700 }}>
         {isNew ? "New calendar item" : readOnly ? "View item" : "Edit item"}
         {past && draft.kind !== "note" && (
-          <Typography variant="caption" color="text.secondary" display="block">
+          <Typography variant="caption" color="text.secondary" display="block" fontWeight={400}>
             Past day — view only
           </Typography>
         )}
@@ -110,14 +124,18 @@ export function CalendarItemEditor({
         sx={{
           display: "flex",
           flexDirection: "column",
-          gap: 1.5,
-          pt: 1,
-          overflow: "hidden",
+          gap: 1.25,
+          px: 2.5,
+          pt: 0.5,
+          pb: 1,
+          overflow: "auto",
           flex: 1,
           minHeight: 0,
+          ...dialogScrollSx,
         }}
       >
         <TextField
+          size="small"
           label="Title"
           value={draft.title}
           onChange={(e) => setDraft({ ...draft, title: e.target.value })}
@@ -126,8 +144,10 @@ export function CalendarItemEditor({
           disabled={readOnly || busy}
           InputLabelProps={{ shrink: true, sx: labelSx }}
         />
-        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems="flex-start">
+
+        <Stack direction="row" spacing={1} alignItems="flex-start">
           <TextField
+            size="small"
             select
             label="Type"
             value={draft.kind}
@@ -144,31 +164,28 @@ export function CalendarItemEditor({
               });
             }}
             InputLabelProps={{ shrink: true, sx: labelSx }}
-            sx={{ minWidth: 140 }}
+            sx={{ width: 118, flexShrink: 0 }}
           >
             {kindChoices.map((k) => (
-              <MenuItem key={k.value} value={k.value}>
+              <MenuItem key={k.value} value={k.value} dense>
                 {k.label}
               </MenuItem>
             ))}
           </TextField>
           <TextField
+            size="small"
             label="Date"
             type="date"
             value={draft.day}
             disabled={readOnly || busy}
             onChange={(e) => setDraft({ ...draft, day: e.target.value })}
             InputLabelProps={{ shrink: true, sx: labelSx }}
-            InputProps={{
-              endAdornment: (
-                <CalendarMonthIcon sx={{ color: "action.active", fontSize: 20, ml: 0.5 }} />
-              ),
-            }}
             sx={{
               flex: 1,
+              minWidth: 0,
               "& input::-webkit-calendar-picker-indicator": {
-                opacity: 0.55,
                 cursor: "pointer",
+                opacity: 0.7,
                 filter: "invert(0.85)",
               },
             }}
@@ -182,51 +199,56 @@ export function CalendarItemEditor({
 
         {showDetails && (
           <TextField
+            size="small"
             label="Details"
             value={draft.body}
             onChange={(e) => setDraft({ ...draft, body: e.target.value })}
             fullWidth
             multiline
             minRows={2}
+            maxRows={5}
             disabled={readOnly || busy}
-            placeholder="e.g. Meeting at conference hall, 2 PM"
+            placeholder="Optional notes"
             InputLabelProps={{ shrink: true, sx: labelSx }}
             sx={{
-              "& .MuiInputBase-root": { maxHeight: 160, overflow: "auto" },
+              "& .MuiInputBase-root": {
+                maxHeight: 140,
+                overflow: "auto",
+                ...dialogScrollSx,
+              },
             }}
           />
         )}
 
         {showChecklist && (
-          <TodoChecklist
-            options={draft.checklist}
-            authoring={isNew}
-            readOnly={readOnly || busy}
-            peers={peers}
-            myId={myId}
-            myName={myName}
-            onChange={
-              editable
-                ? (checklist) => setDraft({ ...draft, checklist })
-                : undefined
-            }
-            onToggle={
-              !isNew && liveOk
-                ? (optionId, checked) => onToggleOption(optionId, checked)
-                : undefined
-            }
-          />
+          <Box sx={{ maxHeight: 200, overflow: "auto", ...dialogScrollSx }}>
+            <TodoChecklist
+              options={draft.checklist}
+              authoring={isNew}
+              readOnly={readOnly || busy}
+              peers={peers}
+              myId={myId}
+              myName={myName}
+              onChange={
+                editable
+                  ? (checklist) => setDraft({ ...draft, checklist })
+                  : undefined
+              }
+              onToggle={
+                !isNew && liveOk
+                  ? (optionId, checked) => onToggleOption(optionId, checked)
+                  : undefined
+              }
+            />
+          </Box>
         )}
 
-        <Box sx={{ overflow: "auto", maxHeight: 200 }}>
-          <PeerPicker
-            peers={peers}
-            selectedIds={draft.participant_ids}
-            disabled={readOnly || busy}
-            ownerName={myName}
-            onChange={(participant_ids) => setDraft({ ...draft, participant_ids })}
-          />
-        </Box>
+        <PeerPicker
+          peers={peers}
+          selectedIds={draft.participant_ids}
+          disabled={readOnly || busy}
+          onChange={(participant_ids) => setDraft({ ...draft, participant_ids })}
+        />
 
         {showAck && (
           <AckBar
@@ -243,19 +265,17 @@ export function CalendarItemEditor({
       </DialogContent>
       <DialogActions
         sx={{
-          px: 3,
-          pb: 2,
-          pt: 1.5,
+          px: 2.5,
+          py: 1.5,
           borderTop: "1px solid",
           borderColor: "divider",
           flexShrink: 0,
-          position: "sticky",
-          bottom: 0,
           bgcolor: "background.paper",
         }}
       >
         {draft.id && editable && (
           <Button
+            size="small"
             color="error"
             startIcon={<DeleteOutlineIcon />}
             disabled={busy}
@@ -265,11 +285,11 @@ export function CalendarItemEditor({
             Delete
           </Button>
         )}
-        <Button disabled={busy} onClick={onClose}>
+        <Button size="small" disabled={busy} onClick={onClose}>
           {readOnly ? "Close" : "Cancel"}
         </Button>
         {!readOnly && (
-          <Button variant="contained" disabled={busy} onClick={onSave}>
+          <Button size="small" variant="contained" disabled={busy} onClick={onSave}>
             Save
           </Button>
         )}
