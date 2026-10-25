@@ -4392,14 +4392,20 @@ export function ChatScreen({
                       setChatInfoOpen(true);
                     }}
                     sx={{
-                      width: 40,
-                      height: 40,
+                      width: 42,
+                      height: 42,
                       bgcolor: avatarColor(activeTitle),
-                      fontSize: 16,
+                      color: "#FFFFFF",
+                      fontSize: active.kind === "group" ? 22 : 18,
+                      fontWeight: 700,
                       cursor: "pointer",
                     }}
                   >
-                    {activeTitle.slice(0, 1).toUpperCase()}
+                    {active.kind === "group" ? (
+                      <GroupsIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
+                    ) : (
+                      activeTitle.slice(0, 1).toUpperCase()
+                    )}
                   </Avatar>
                 )}
                 <Box
@@ -5238,15 +5244,16 @@ export function ChatScreen({
                     <ListItemAvatar sx={{ minWidth: 44 }}>
                       <Avatar
                         sx={{
-                          width: 36,
-                          height: 36,
+                          width: 38,
+                          height: 38,
                           bgcolor: avatarColor(label),
-                          fontSize: 14,
+                          color: "#FFFFFF",
+                          fontSize: c.kind === "group" ? 20 : 16,
                           fontWeight: 700,
                         }}
                       >
                         {c.kind === "group" ? (
-                          <GroupIcon sx={{ fontSize: 18 }} />
+                          <GroupIcon sx={{ fontSize: 20, color: "#FFFFFF" }} />
                         ) : (
                           label.slice(0, 1).toUpperCase()
                         )}

@@ -112,6 +112,14 @@ export function buildTheme(mode: PaletteMode) {
       button: { textTransform: "none", fontWeight: 600 },
     },
     components: {
+      MuiAvatar: {
+        styleOverrides: {
+          root: {
+            color: "#FFFFFF",
+            fontWeight: 700,
+          },
+        },
+      },
       MuiButton: {
         styleOverrides: { root: { borderRadius: 999, paddingInline: 16 } },
       },

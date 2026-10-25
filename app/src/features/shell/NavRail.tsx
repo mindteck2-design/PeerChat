@@ -118,12 +118,12 @@ export function NavRail(props: {
           >
             <Avatar
               sx={{
-                width: 32,
-                height: 32,
-                fontSize: 13,
+                width: 34,
+                height: 34,
+                fontSize: 15,
                 fontWeight: 700,
                 bgcolor: "primary.main",
-                color: "primary.contrastText",
+                color: "#FFFFFF",
               }}
             >
               {profile.display_name.slice(0, 1).toUpperCase()}

@@ -182,12 +182,13 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                   <ListItemButton key={p.user_id} onClick={() => openDm(p)} sx={{ py: 0.85 }}>
                     <Avatar
                       sx={{
-                        width: 32,
-                        height: 32,
+                        width: 36,
+                        height: 36,
                         mr: 1.1,
                         bgcolor: avatarColor(p.display_name),
-                        fontSize: 14,
-                        fontWeight: 800,
+                        color: "#FFFFFF",
+                        fontSize: 16,
+                        fontWeight: 700,
                       }}
                     >
                       {p.display_name.slice(0, 1).toUpperCase()}
@@ -330,15 +331,16 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                     <Box sx={{ position: "relative", flexShrink: 0 }}>
                       <Avatar
                         sx={{
-                          width: 40,
-                          height: 40,
+                          width: 42,
+                          height: 42,
                           bgcolor: avatarColor(title),
-                          fontSize: c.kind === "group" ? 18 : 15,
+                          color: "#FFFFFF",
+                          fontSize: c.kind === "group" ? 22 : 18,
                           fontWeight: 700,
                         }}
                       >
                         {c.kind === "group" ? (
-                          <GroupsIcon sx={{ fontSize: 20 }} />
+                          <GroupsIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
                         ) : (
                           title.slice(0, 1).toUpperCase()
                         )}

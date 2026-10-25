@@ -53,8 +53,8 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
       >
         <DialogTitle sx={{ pr: 6, pb: 1 }}>
           <Stack direction="row" spacing={1.25} alignItems="center">
-            <Avatar sx={{ bgcolor: "primary.main", width: 40, height: 40 }}>
-              <GroupsIcon />
+            <Avatar sx={{ bgcolor: "primary.main", color: "#FFFFFF", width: 42, height: 42 }}>
+              <GroupsIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
             </Avatar>
             <Typography fontWeight={800} fontSize={20} noWrap>
               {active?.title || "Group"}
@@ -164,10 +164,11 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                       <ListItemAvatar sx={{ minWidth: 44 }}>
                         <Avatar
                           sx={{
-                            width: 36,
-                            height: 36,
+                            width: 38,
+                            height: 38,
                             bgcolor: avatarColor(m.display_name),
-                            fontSize: 14,
+                            color: "#FFFFFF",
+                            fontSize: 16,
                             fontWeight: 700,
                           }}
                         >
@@ -258,10 +259,11 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                         <ListItemAvatar sx={{ minWidth: 44 }}>
                           <Avatar
                             sx={{
-                              width: 36,
-                              height: 36,
+                              width: 38,
+                              height: 38,
                               bgcolor: avatarColor(p.display_name),
-                              fontSize: 14,
+                              color: "#FFFFFF",
+                              fontSize: 16,
                               fontWeight: 700,
                             }}
                           >
