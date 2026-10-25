@@ -5,12 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:intranet": "vite --mode intranet",
     "build": "tsc --noEmit && vite build",
+    "build:intranet": "tsc --noEmit && vite build --mode intranet",
     "test": "tsx --test tests/*.test.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:build:intranet": "npm run build:intranet && tauri build"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

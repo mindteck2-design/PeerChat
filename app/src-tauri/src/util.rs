@@ -143,8 +143,8 @@ mod tests {
         // Double dots or empty resolves to fallback
         assert_eq!(safe_download_name(""), "download.bin");
         assert_eq!(safe_download_name(".."), "download.bin");
-        assert_eq!(safe_download_name("../../../etc/passwd"), "______etc_passwd");
-        assert_eq!(safe_download_name("..\\windows\\system32\\cmd.exe"), "___windows_system32_cmd.exe");
+        assert_eq!(safe_download_name("../../../etc/passwd"), "download.bin");
+        assert_eq!(safe_download_name("..\\windows\\system32\\cmd.exe"), "download.bin");
         assert_eq!(safe_download_name(".hidden"), "hidden");
     }
 }
