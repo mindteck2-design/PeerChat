@@ -119,17 +119,21 @@ pub fn apply_message_edit(conn: &Connection, msg: &Value) -> Result<(), String> 
     if id.is_empty() {
         return Err("missing message id".into());
     }
-    let kind: Option<String> = conn
-        .query_row("SELECT kind FROM messages WHERE id=?1", params![id], |r| r.get(0))
+    let row: Option<(String, String)> = conn
+        .query_row("SELECT kind, sender_id FROM messages WHERE id=?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some(kind) = kind else {
+    let Some((kind, original_sender)) = row else {
         // Original never arrived — insert as normal.
         insert_message(conn, msg)?;
         return Ok(());
     };
     if kind == "deleted" || kind != "text" {
         return Ok(());
+    }
+    let incoming_sender = msg["sender_id"].as_str().unwrap_or("");
+    if !incoming_sender.is_empty() && incoming_sender != original_sender {
+        return Err("unauthorized: cannot edit message from another sender".into());
     }
     let edited_at = msg
         .get("edited_at")

@@ -126,3 +126,25 @@ pub(crate) fn from_peer_json(profile: &Value, fingerprint: &str) -> Value {
     })
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_safe_download_name_basic() {
+        assert_eq!(safe_download_name("report.pdf"), "report.pdf");
+        assert_eq!(safe_download_name("My File (2026).txt"), "My File _2026_.txt");
+    }
+
+    #[test]
+    fn test_safe_download_name_prevents_traversal() {
+        // Double dots or empty resolves to fallback
+        assert_eq!(safe_download_name(""), "download.bin");
+        assert_eq!(safe_download_name(".."), "download.bin");
+        assert_eq!(safe_download_name("../../../etc/passwd"), "______etc_passwd");
+        assert_eq!(safe_download_name("..\\windows\\system32\\cmd.exe"), "___windows_system32_cmd.exe");
+        assert_eq!(safe_download_name(".hidden"), "hidden");
+    }
+}

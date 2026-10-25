@@ -438,3 +438,217 @@ pub fn mark_calendar_notified(conn: &Connection, id: &str) -> Result<(), String>
     .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrate(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_calendar_crud() {
+        let conn = mem();
+        let item = json!({
+            "id": "cal-1",
+            "title": "Design Review",
+            "body": "Discuss architecture",
+            "kind": "meeting",
+            "day": "2026-11-01",
+            "time": "14:00",
+            "created_by": "alice",
+            "participant_ids": ["bob"],
+            "shared": true,
+        });
+
+        upsert_calendar_item(&conn, &item).unwrap();
+
+        let fetched = get_calendar_item(&conn, "cal-1").unwrap().expect("item should exist");
+        assert_eq!(fetched["title"], "Design Review");
+        assert_eq!(fetched["body"], "Discuss architecture");
+        assert_eq!(fetched["kind"], "meeting");
+        assert_eq!(fetched["day"], "2026-11-01");
+        assert_eq!(fetched["time"], "14:00");
+        assert_eq!(fetched["created_by"], "alice");
+        assert_eq!(fetched["shared"], true);
+        assert_eq!(fetched["done"], false);
+
+        // Query by date range
+        let list = list_calendar_items(&conn, "2026-11-01", "2026-11-30").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["id"], "cal-1");
+
+        // Update title
+        let mut updated = item.clone();
+        updated["title"] = json!("Updated Design Review");
+        upsert_calendar_item(&conn, &updated).unwrap();
+        let fetched_updated = get_calendar_item(&conn, "cal-1").unwrap().unwrap();
+        assert_eq!(fetched_updated["title"], "Updated Design Review");
+
+        // Delete
+        delete_calendar_item(&conn, "cal-1").unwrap();
+        assert!(get_calendar_item(&conn, "cal-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_calendar_todo_done() {
+        let conn = mem();
+        let item = json!({
+            "id": "todo-1",
+            "title": "Ship v1.0.1",
+            "kind": "todo",
+            "day": "2026-12-01",
+            "created_by": "alice",
+        });
+        upsert_calendar_item(&conn, &item).unwrap();
+
+        set_calendar_todo_done(&conn, "todo-1", true).unwrap();
+        let fetched = get_calendar_item(&conn, "todo-1").unwrap().unwrap();
+        assert_eq!(fetched["done"], true);
+
+        set_calendar_todo_done(&conn, "todo-1", false).unwrap();
+        let fetched2 = get_calendar_item(&conn, "todo-1").unwrap().unwrap();
+        assert_eq!(fetched2["done"], false);
+    }
+
+    #[test]
+    fn test_checklist_one_way_toggle() {
+        let conn = mem();
+        let today = local_today();
+        let item = json!({
+            "id": "todo-check-1",
+            "title": "Launch Checklist",
+            "kind": "todo",
+            "day": today,
+            "created_by": "alice",
+            "checklist": [
+                {
+                    "id": "opt-1",
+                    "label": "Run tests",
+                    "checked_by": [],
+                    "check_at": {}
+                }
+            ]
+        });
+        upsert_calendar_item(&conn, &item).unwrap();
+
+        // Unchecking is strictly rejected
+        let err = apply_checklist_toggle(&conn, "todo-check-1", "opt-1", "alice", false, "2026-10-24T12:00:00Z");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("cannot be unchecked"));
+
+        // Checking succeeds
+        let res = apply_checklist_toggle(&conn, "todo-check-1", "opt-1", "alice", true, "2026-10-24T12:00:00Z").unwrap();
+        let opts = res["checklist"].as_array().unwrap();
+        let checked_by = opts[0]["checked_by"].as_array().unwrap();
+        assert_eq!(checked_by.len(), 1);
+        assert_eq!(checked_by[0], "alice");
+
+        // Second user trying to check locked option returns without modification
+        let res2 = apply_checklist_toggle(&conn, "todo-check-1", "opt-1", "bob", true, "2026-10-24T12:05:00Z").unwrap();
+        let opts2 = res2["checklist"].as_array().unwrap();
+        let checked_by2 = opts2[0]["checked_by"].as_array().unwrap();
+        assert_eq!(checked_by2.len(), 1);
+        assert_eq!(checked_by2[0], "alice");
+    }
+
+    #[test]
+    fn test_checklist_all_done_derivation() {
+        let conn = mem();
+        let today = local_today();
+        let item = json!({
+            "id": "todo-all-done",
+            "title": "Two tasks",
+            "kind": "todo",
+            "day": today,
+            "created_by": "alice",
+            "checklist": [
+                { "id": "o1", "label": "Task 1", "checked_by": [], "check_at": {} },
+                { "id": "o2", "label": "Task 2", "checked_by": [], "check_at": {} }
+            ]
+        });
+        upsert_calendar_item(&conn, &item).unwrap();
+
+        // Check first task: done remains false
+        let s1 = apply_checklist_toggle(&conn, "todo-all-done", "o1", "alice", true, "2026-10-24T12:00:00Z").unwrap();
+        assert_eq!(s1["done"], false);
+
+        // Check second task: done automatically becomes true
+        let s2 = apply_checklist_toggle(&conn, "todo-all-done", "o2", "bob", true, "2026-10-24T12:01:00Z").unwrap();
+        assert_eq!(s2["done"], true);
+    }
+
+    #[test]
+    fn test_calendar_ack_lww() {
+        let conn = mem();
+        let today = local_today();
+        let item = json!({
+            "id": "meet-ack",
+            "title": "Sprint Planning",
+            "kind": "meeting",
+            "day": today,
+            "created_by": "alice",
+            "participant_ids": ["bob"],
+            "shared": true,
+        });
+        upsert_calendar_item(&conn, &item).unwrap();
+
+        // Initial ack
+        let a1 = apply_calendar_ack(&conn, "meet-ack", "bob", "2026-10-24T10:00:00Z").unwrap();
+        assert_eq!(a1["acks"]["bob"], "2026-10-24T10:00:00Z");
+
+        // Older timestamp ignored (LWW)
+        let a2 = apply_calendar_ack(&conn, "meet-ack", "bob", "2026-10-24T09:00:00Z").unwrap();
+        assert_eq!(a2["acks"]["bob"], "2026-10-24T10:00:00Z");
+
+        // Newer timestamp updates
+        let a3 = apply_calendar_ack(&conn, "meet-ack", "bob", "2026-10-24T11:00:00Z").unwrap();
+        assert_eq!(a3["acks"]["bob"], "2026-10-24T11:00:00Z");
+    }
+
+    #[test]
+    fn test_due_calendar_items() {
+        let conn = mem();
+        let today = "2026-11-15";
+        let m1 = json!({
+            "id": "due-1",
+            "title": "Morning Standup",
+            "kind": "meeting",
+            "day": today,
+            "time": "09:30",
+            "created_by": "alice",
+        });
+        let m2 = json!({
+            "id": "due-2",
+            "title": "Afternoon Review",
+            "kind": "meeting",
+            "day": today,
+            "time": "15:00",
+            "created_by": "alice",
+        });
+        upsert_calendar_item(&conn, &m1).unwrap();
+        upsert_calendar_item(&conn, &m2).unwrap();
+
+        // At 10:00, only the 09:30 meeting is due
+        let due = due_calendar_items(&conn, "2026-11-15T10:00").unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0]["id"], "due-1");
+
+        // Mark notified
+        mark_calendar_notified(&conn, "due-1").unwrap();
+
+        // Query again: due-1 is filtered out
+        let due_after = due_calendar_items(&conn, "2026-11-15T10:00").unwrap();
+        assert_eq!(due_after.len(), 0);
+
+        // At 16:00, due-2 is returned
+        let due_afternoon = due_calendar_items(&conn, "2026-11-15T16:00").unwrap();
+        assert_eq!(due_afternoon.len(), 1);
+        assert_eq!(due_afternoon[0]["id"], "due-2");
+    }
+}

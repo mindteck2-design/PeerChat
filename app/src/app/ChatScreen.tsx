@@ -686,13 +686,18 @@ export function ChatScreen({
                 }
                 let textBody = "";
                 try {
+                  const senderPub =
+                    m.sender_id === profile.id
+                      ? exportPublic(identity).ed25519_public
+                      : peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
                   textBody =
                     c.kind === "group"
                       ? await decryptGroupMessageText(m)
                       : await decryptMessage(
                           { ...m, wrapped_keys: m.wrapped_keys || {} },
                           profile.id,
-                          identity
+                          identity,
+                          senderPub
                         );
                 } catch {
                   continue;
@@ -768,10 +773,15 @@ export function ChatScreen({
             const parsed: GameMsg[] = [];
             for (const row of gameRows.slice(-8)) {
               try {
+                const senderPub =
+                  row.sender_id === profile.id
+                    ? exportPublic(identity).ed25519_public
+                    : peer.ed25519_public;
                 const plaintext = await decryptMessage(
                   { ...row, wrapped_keys: row.wrapped_keys || {} },
                   profile.id,
-                  identity
+                  identity,
+                  senderPub
                 );
                 parsed.push(JSON.parse(plaintext) as GameMsg);
               } catch {
@@ -3709,10 +3719,15 @@ export function ChatScreen({
               if (c.kind === "group") {
                 textBody = await decryptGroupMessageText(m);
               } else {
+                const senderPub =
+                  m.sender_id === profile.id
+                    ? exportPublic(identity).ed25519_public
+                    : peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
                 textBody = await decryptMessage(
                   { ...m, wrapped_keys: m.wrapped_keys || {} },
                   profile.id,
-                  identity
+                  identity,
+                  senderPub
                 );
               }
             } catch {
@@ -3965,10 +3980,15 @@ export function ChatScreen({
                 for (const m of page.messages) {
                   if (m.kind !== "game_move") continue;
                   try {
+                    const senderPub =
+                      m.sender_id === profile.id
+                        ? exportPublic(identity).ed25519_public
+                        : peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
                     const plaintext = await decryptMessage(
                       { ...m, wrapped_keys: m.wrapped_keys || {} },
                       profile.id,
-                      identity
+                      identity,
+                      senderPub
                     );
                     const gm = JSON.parse(plaintext) as GameMsg;
                     if (matchIdOf(gm) === matchId) out.push(gm);

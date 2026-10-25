@@ -2,6 +2,7 @@ import { useEffect, type Dispatch, type SetStateAction } from "react";
 import {
   decryptFilename,
   decryptMessage,
+  exportPublic,
   unwrapContentKey,
   type Identity,
 } from "../../crypto";
@@ -14,7 +15,7 @@ export function useMessageDecrypt(opts: {
   messages: Message[];
   groupKeys: Record<string, Uint8Array>;
   groupKeyHistory: Record<string, Uint8Array[]>;
-  peers: { user_id: string }[];
+  peers: { user_id: string; ed25519_public?: string }[];
   profile: Profile;
   identity: Identity;
   fileNames: Record<string, string>;
@@ -66,10 +67,15 @@ export function useMessageDecrypt(opts: {
           if (active.kind === "group" && gk) {
             patch[m.id] = await decryptGroupMessageText(m);
           } else {
+            const senderPub =
+              m.sender_id === profile.id
+                ? exportPublic(identity).ed25519_public
+                : peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
             patch[m.id] = await decryptMessage(
               { ...m, wrapped_keys: m.wrapped_keys || {} },
               profile.id,
-              identity
+              identity,
+              senderPub
             );
           }
         } catch (err) {

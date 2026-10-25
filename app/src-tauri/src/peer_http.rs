@@ -373,6 +373,12 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
             if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
                 return http_ok(http_json(500, json!({"error":"db busy"})), None);
             }
+            let deliver_sender_id = payload
+                .pointer("/from_peer/user_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| payload.pointer("/message/sender_id").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .trim();
             if let Some(msg) = payload.get("message") {
                 let msg_conv = msg
                     .get("conversation_id")
@@ -419,18 +425,56 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     .unwrap_or(false)
                 {
                     if let Some(mid) = inbound.get("id").and_then(|v| v.as_str()) {
-                        let _ = db::tombstone_message(&conn, mid);
-                        let r = db::insert_message(&conn, &inbound);
-                        let _ = db::tombstone_message(&conn, mid);
-                        r
+                        let can_delete = if let Ok(Some(orig)) = conn
+                            .query_row(
+                                "SELECT sender_id, conversation_id FROM messages WHERE id=?1",
+                                rusqlite::params![mid],
+                                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                            )
+                            .optional()
+                        {
+                            let (orig_sender, cid) = orig;
+                            orig_sender == sender_id
+                                || (!sender_id.is_empty()
+                                    && db::is_group_admin(&conn, &cid, sender_id).unwrap_or(false))
+                        } else {
+                            true
+                        };
+                        if can_delete {
+                            let _ = db::tombstone_message(&conn, mid);
+                            let r = db::insert_message(&conn, &inbound);
+                            let _ = db::tombstone_message(&conn, mid);
+                            r
+                        } else {
+                            Ok(false)
+                        }
                     } else {
                         Ok(false)
                     }
                 } else if inbound.get("kind").and_then(|v| v.as_str()) == Some("deleted") {
                     if let Some(mid) = inbound.get("id").and_then(|v| v.as_str()) {
-                        let r = db::insert_message(&conn, &inbound);
-                        let _ = db::tombstone_message(&conn, mid);
-                        r
+                        let can_delete = if let Ok(Some(orig)) = conn
+                            .query_row(
+                                "SELECT sender_id, conversation_id FROM messages WHERE id=?1",
+                                rusqlite::params![mid],
+                                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                            )
+                            .optional()
+                        {
+                            let (orig_sender, cid) = orig;
+                            orig_sender == sender_id
+                                || (!sender_id.is_empty()
+                                    && db::is_group_admin(&conn, &cid, sender_id).unwrap_or(false))
+                        } else {
+                            true
+                        };
+                        if can_delete {
+                            let r = db::insert_message(&conn, &inbound);
+                            let _ = db::tombstone_message(&conn, mid);
+                            r
+                        } else {
+                            Ok(false)
+                        }
                     } else {
                         Ok(false)
                     }
@@ -598,6 +642,8 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     .or_else(|| ev.get("conversation_id").and_then(|v| v.as_str()))
                     .unwrap_or("");
                 let op = ev.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                let is_admin = !deliver_sender_id.is_empty()
+                    && db::is_group_admin(&conn, cid, deliver_sender_id).unwrap_or(false);
                 if !cid.is_empty() && (op == "sync" || op == "add") {
                     let title = payload
                         .get("group_title")
@@ -641,23 +687,23 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                         .unwrap_or("Group");
                     let _ = db::set_conversation_title(&conn, cid, title);
                 }
-                if op == "delete" && !cid.is_empty() {
+                if op == "delete" && !cid.is_empty() && is_admin {
                     let _ = db::delete_conversation_local(&conn, cid);
                 }
                 if op == "remove" && !cid.is_empty() {
                     let uid = ev.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
-                    if !uid.is_empty() {
+                    if !uid.is_empty() && (is_admin || uid == deliver_sender_id) {
                         let _ = db::delete_member(&conn, cid, uid);
                     }
                 }
-                if op == "role" && !cid.is_empty() {
+                if op == "role" && !cid.is_empty() && is_admin {
                     let uid = ev.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
                     let role = ev.get("role").and_then(|v| v.as_str()).unwrap_or("member");
                     if !uid.is_empty() {
                         let _ = db::set_member_role(&conn, cid, uid, role);
                     }
                 }
-                if op == "settings" && !cid.is_empty() {
+                if op == "settings" && !cid.is_empty() && is_admin {
                     if let Some(mca) = ev.get("members_can_add").and_then(|v| v.as_bool()) {
                         let _ = db::set_members_can_add(&conn, cid, mca);
                     }
@@ -668,7 +714,11 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                 if op == "checklist_toggle" {
                     let item_id = share.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
                     let option_id = share.get("option_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let user_id = share.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let user_id = if !deliver_sender_id.is_empty() {
+                        deliver_sender_id
+                    } else {
+                        share.get("user_id").and_then(|v| v.as_str()).unwrap_or("")
+                    };
                     let checked = share.get("checked").and_then(|v| v.as_bool()).unwrap_or(false);
                     let updated_at = share
                         .get("updated_at")
@@ -681,7 +731,11 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     }
                 } else if op == "ack" {
                     let item_id = share.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let user_id = share.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let user_id = if !deliver_sender_id.is_empty() {
+                        deliver_sender_id
+                    } else {
+                        share.get("user_id").and_then(|v| v.as_str()).unwrap_or("")
+                    };
                     let at = share.get("at").and_then(|v| v.as_str()).unwrap_or("");
                     if !item_id.is_empty() && !user_id.is_empty() {
                         let _ = db::apply_calendar_ack(&conn, item_id, user_id, at);
@@ -689,26 +743,46 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                 } else if let Some(item) = share.get("item") {
                     if op == "delete" {
                         if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                            let _ = db::delete_calendar_item(&conn, id);
+                            let mut allowed = true;
+                            if let Ok(Some(existing)) = db::get_calendar_item(&conn, id) {
+                                let owner = existing["created_by"].as_str().unwrap_or("");
+                                if !deliver_sender_id.is_empty() && !owner.is_empty() && owner != deliver_sender_id {
+                                    allowed = false;
+                                }
+                            }
+                            if allowed {
+                                let _ = db::delete_calendar_item(&conn, id);
+                            }
                         }
                     } else {
                         let mut row = item.clone();
-                        // Ensure recipient is listed among participants so they keep the share.
-                        let mut parts: Vec<String> = row
-                            .get("participant_ids")
-                            .and_then(|v| v.as_array())
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if !my_id.is_empty() && !parts.iter().any(|p| p == my_id) {
-                            parts.push(my_id.to_string());
+                        let item_id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let mut allowed = true;
+                        if !item_id.is_empty() {
+                            if let Ok(Some(existing)) = db::get_calendar_item(&conn, item_id) {
+                                let owner = existing["created_by"].as_str().unwrap_or("");
+                                if !deliver_sender_id.is_empty() && !owner.is_empty() && owner != deliver_sender_id {
+                                    allowed = false;
+                                }
+                            }
                         }
-                        row["participant_ids"] = json!(parts);
-                        row["shared"] = json!(true);
-                        let _ = db::upsert_calendar_item(&conn, &row);
+                        if allowed {
+                            let mut parts: Vec<String> = row
+                                .get("participant_ids")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if !my_id.is_empty() && !parts.iter().any(|p| p == my_id) {
+                                parts.push(my_id.to_string());
+                            }
+                            row["participant_ids"] = json!(parts);
+                            row["shared"] = json!(true);
+                            let _ = db::upsert_calendar_item(&conn, &row);
+                        }
                     }
                 }
             }

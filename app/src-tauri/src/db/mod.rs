@@ -43,7 +43,7 @@ pub fn open(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn migrate(conn: &Connection) -> Result<(), String> {
+pub fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap_or(0);

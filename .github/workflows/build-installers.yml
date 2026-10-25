@@ -2,10 +2,10 @@ name: Build PeerChat Installers (Windows & Linux)
 
 on:
   push:
-    branches: [ "main", "v1" ]
+    branches: [ "main", "v*" ]
     tags: [ "v*" ]
   pull_request:
-    branches: [ "main", "v1" ]
+    branches: [ "main", "v*" ]
   workflow_dispatch:
 
 jobs:
@@ -51,6 +51,13 @@ jobs:
         working-directory: app
         run: npm ci || npm install
 
+      - name: Run frontend unit tests
+        working-directory: app
+        run: npm test
+
+      - name: Run backend unit tests
+        run: cargo test --manifest-path app/src-tauri/Cargo.toml
+
       - name: Build Tauri .deb bundle
         working-directory: app
         run: npm run tauri:build -- --bundles deb
@@ -88,6 +95,13 @@ jobs:
       - name: Install Node dependencies
         working-directory: app
         run: npm ci || npm install
+
+      - name: Run frontend unit tests
+        working-directory: app
+        run: npm test
+
+      - name: Run backend unit tests
+        run: cargo test --manifest-path app/src-tauri/Cargo.toml
 
       - name: Build Tauri NSIS installer
         working-directory: app

@@ -101,46 +101,12 @@ pub(crate) async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
                 let _ = db::bump_outbox_error(&conn, &id, &err);
             }
             Ok(Err(e)) if e.contains("tls fingerprint mismatch") => {
-                // Peer reinstalled / cert rotated — reconnect once without a pin, adopt new cert.
-                let retry = tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    peer_http::peer_request(&ip, port as u16, "/v1/deliver", Some(payload), None),
-                )
-                .await;
-                match retry {
-                    Ok(Ok((resp, observed_fp)))
-                        if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) =>
-                    {
-                        let conn = db.lock();
-                        if !observed_fp.is_empty() {
-                            let _ = db::adopt_peer_identity(
-                                &conn,
-                                &recipient,
-                                &observed_fp,
-                                peer["x25519_public"].as_str().unwrap_or(""),
-                                peer["ed25519_public"].as_str().unwrap_or(""),
-                            );
-                        }
-                        let _ = db::mark_outbox_delivered(&conn, &id);
-                    }
-                    Ok(Ok((resp, _))) => {
-                        let err = resp
-                            .get("error")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("deliver rejected")
-                            .to_string();
-                        let conn = db.lock();
-                        let _ = db::bump_outbox_error(&conn, &id, &err);
-                    }
-                    Ok(Err(e2)) => {
-                        let conn = db.lock();
-                        let _ = db::bump_outbox_error(&conn, &id, &e2);
-                    }
-                    Err(_) => {
-                        let conn = db.lock();
-                        let _ = db::bump_outbox_error(&conn, &id, "request timed out after 10 s");
-                    }
-                }
+                let conn = db.lock();
+                let _ = db::bump_outbox_error(
+                    &conn,
+                    &id,
+                    "TLS security fingerprint mismatch — peer identity requires verification",
+                );
             }
             Ok(Err(e)) => {
                 let conn = db.lock();
