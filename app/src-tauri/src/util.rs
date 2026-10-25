@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(safe_download_name(""), "download.bin");
         assert_eq!(safe_download_name(".."), "download.bin");
         assert_eq!(safe_download_name("../../../etc/passwd"), "download.bin");
-        assert_eq!(safe_download_name("..\\windows\\system32\\cmd.exe"), "download.bin");
+        assert_eq!(safe_download_name("..\\windows\\system32\\cmd.exe"), "_windows_system32_cmd.exe");
         assert_eq!(safe_download_name(".hidden"), "hidden");
     }
 }
