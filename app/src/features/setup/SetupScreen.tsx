@@ -13,6 +13,10 @@ import { exportPublic, type Identity } from "../../crypto";
 import { peerApi, type Profile } from "../../peer";
 import { newUserId } from "../../shared/ids";
 
+function sanitizeNameOrTeam(val: string): string {
+  return val.replace(/[^a-zA-Z0-9 _-]/g, "");
+}
+
 export function SetupScreen(props: {
   identity: Identity;
   error: string;
@@ -32,6 +36,7 @@ export function SetupScreen(props: {
       props.setError("Please enter a display name");
       return;
     }
+    const teamTrimmed = team.trim();
     setBusy(true);
     try {
       const p = await peerApi.setupProfile({
@@ -39,7 +44,7 @@ export function SetupScreen(props: {
         userId: newUserId(),
         x25519Public: pubs.x25519_public,
         ed25519Public: pubs.ed25519_public,
-        team: team.trim(),
+        team: teamTrimmed,
       });
       props.onReady(p);
     } catch (e: any) {
@@ -82,7 +87,8 @@ export function SetupScreen(props: {
               label="Display name"
               fullWidth
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => setName(sanitizeNameOrTeam(e.target.value))}
+              helperText="Letters, numbers, spaces, hyphens, and underscores only"
               autoFocus
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
@@ -95,7 +101,7 @@ export function SetupScreen(props: {
               label="Team"
               fullWidth
               value={team}
-              onChange={(e) => setTeam(e.target.value)}
+              onChange={(e) => setTeam(sanitizeNameOrTeam(e.target.value))}
               placeholder="HMIS"
               helperText="Your project or team — e.g. HMIS, Shakti"
               onKeyDown={(e) => {

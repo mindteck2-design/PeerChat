@@ -77,11 +77,7 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                 ? profile.team?.trim()
                   ? `${profile.team.trim()} · team board + org updates`
                   : "Org updates — set a Team in Settings for a team board"
-                : scanning
-                  ? "Scanning LAN…"
-                  : profile.team?.trim()
-                    ? `${profile.display_name} · ${profile.team.trim()}`
-                    : profile.display_name}
+                : `${profile.display_name}${profile.team?.trim() ? ` · ${profile.team.trim()}` : ""}${scanning ? " (Scanning…)" : ""}`}
             </Typography>
           </Box>
           <IconButton
@@ -176,7 +172,10 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                 .filter((p) => {
                   const q = chatSearch.trim().toLowerCase();
                   if (!q) return true;
-                  return p.display_name.toLowerCase().includes(q);
+                  return (
+                    p.display_name.toLowerCase().includes(q) ||
+                    (p.team || "").toLowerCase().includes(q)
+                  );
                 })
                 .map((p) => (
                   <ListItemButton key={p.user_id} onClick={() => openDm(p)} sx={{ py: 0.85 }}>
@@ -193,7 +192,25 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                       {p.display_name.slice(0, 1).toUpperCase()}
                     </Avatar>
                     <ListItemText
-                      primary={p.display_name}
+                      primary={
+                        <Box component="span" sx={{ display: "flex", alignItems: "center", gap: 0.75, minWidth: 0 }}>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {p.display_name}
+                          </span>
+                          {p.team?.trim() && (
+                            <Chip
+                              label={p.team.trim()}
+                              size="small"
+                              sx={{
+                                height: 18,
+                                fontSize: "0.6875rem",
+                                fontWeight: 700,
+                                bgcolor: "action.hover",
+                              }}
+                            />
+                          )}
+                        </Box>
+                      }
                       secondary={p.last_ip?.trim() || "No IP yet"}
                       primaryTypographyProps={{ fontWeight: 600, fontSize: 14, noWrap: true }}
                       secondaryTypographyProps={{ fontSize: 12, fontFamily: "ui-monospace, monospace" }}

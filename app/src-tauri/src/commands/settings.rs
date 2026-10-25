@@ -1,6 +1,17 @@
 #![allow(unused_imports)]
 use crate::commands::files::{autostart_enabled, set_autostart};
-pub(crate) const SETTING_KEYS: &[&str] = &["theme", "games_enabled", "download_dir"];
+pub(crate) const SETTING_KEYS: &[&str] = &[
+    "theme",
+    "games_enabled",
+    "download_dir",
+    "scan_frequency",
+    "notification_sound",
+    "notification_preview",
+    "profile_designation",
+    "profile_emp_id",
+    "profile_status",
+    "profile_status_msg",
+];
 use base64::Engine;
 use rusqlite::OptionalExtension;
 use crate::tls_cert;
@@ -111,6 +122,15 @@ pub fn set_app_setting(state: State<AppState>, key: String, value: String) -> Re
             return Err("invalid destination: download directory must be an absolute path".into());
         }
         std::fs::create_dir_all(&path).map_err(explain_io)?;
+    }
+    if key == "scan_frequency" {
+        let val = value.trim();
+        if val != "30s" && val != "1m" && val != "5m" && val != "10m" && val != "manual" {
+            return Err("invalid scan_frequency value".into());
+        }
+    }
+    if (key == "notification_sound" || key == "notification_preview") && value != "0" && value != "1" {
+        return Err(format!("{key} must be 0 or 1"));
     }
     let conn = state.db.lock();
     db::set_setting(&conn, &key, value.trim())

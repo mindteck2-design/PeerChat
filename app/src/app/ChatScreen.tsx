@@ -534,11 +534,29 @@ export function ChatScreen({
     setActive,
   });
 
+  const [scanFreq, setScanFreq] = useState("1m");
+
+  useEffect(() => {
+    peerApi
+      .getAppSetting("scan_frequency")
+      .then((v) => {
+        if (v) setScanFreq(v);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     refresh().catch(console.error);
-    const t = setInterval(() => refresh().catch(() => {}), 5000);
+    let ms = 60_000;
+    if (scanFreq === "30s") ms = 30_000;
+    else if (scanFreq === "1m") ms = 60_000;
+    else if (scanFreq === "5m") ms = 300_000;
+    else if (scanFreq === "10m") ms = 600_000;
+    else if (scanFreq === "manual") return;
+
+    const t = setInterval(() => refresh().catch(() => {}), ms);
     return () => clearInterval(t);
-  }, []);
+  }, [scanFreq]);
 
   useEffect(() => {
     let cancel = false;
@@ -3971,6 +3989,7 @@ export function ChatScreen({
         ensureAnnounceBoards={ensureAnnounceBoards}
         selectConversation={selectConversation}
         listConversations={() => peerApi.listConversations()}
+        profile={profile}
       />
 
       <ListPane vm={vm} />

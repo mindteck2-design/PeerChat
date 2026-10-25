@@ -1,4 +1,4 @@
-import { Box, IconButton, Tooltip } from "@mui/material";
+import { Avatar, Box, IconButton, Tooltip, Typography } from "@mui/material";
 import ChatIcon from "@mui/icons-material/ForumRounded";
 import PeopleAltIcon from "@mui/icons-material/PeopleAltRounded";
 import CampaignIcon from "@mui/icons-material/CampaignRounded";
@@ -7,7 +7,7 @@ import SportsEsportsIcon from "@mui/icons-material/SportsEsportsRounded";
 import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorderRounded";
 import SettingsIcon from "@mui/icons-material/SettingsRounded";
 import { FEATURE_GAMES } from "../../features";
-import type { Conversation } from "../../peer";
+import type { Conversation, Profile } from "../../peer";
 
 export type ShellNav =
   | "people"
@@ -27,6 +27,7 @@ export function NavRail(props: {
   ensureAnnounceBoards: () => Promise<Conversation[]>;
   selectConversation: (c: Conversation) => void | Promise<void>;
   listConversations: () => Promise<Conversation[]>;
+  profile?: Profile;
 }) {
   const {
     nav,
@@ -37,6 +38,7 @@ export function NavRail(props: {
     ensureAnnounceBoards,
     selectConversation,
     listConversations,
+    profile,
   } = props;
 
   return (
@@ -96,6 +98,57 @@ export function NavRail(props: {
         </Tooltip>
       ))}
       <Box flex={1} />
+      {profile && (
+        <Tooltip
+          title={`${profile.display_name}${profile.team?.trim() ? ` (${profile.team.trim()})` : ""}`}
+          placement="right"
+        >
+          <Box
+            onClick={onSettings}
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              cursor: "pointer",
+              mb: 0.5,
+              p: 0.5,
+              borderRadius: 2,
+              "&:hover": { bgcolor: "action.hover" },
+            }}
+          >
+            <Avatar
+              sx={{
+                width: 32,
+                height: 32,
+                fontSize: 13,
+                fontWeight: 700,
+                bgcolor: "primary.main",
+                color: "primary.contrastText",
+              }}
+            >
+              {profile.display_name.slice(0, 1).toUpperCase()}
+            </Avatar>
+            {profile.team?.trim() && (
+              <Typography
+                variant="caption"
+                sx={{
+                  fontSize: "9px",
+                  fontWeight: 700,
+                  color: "text.secondary",
+                  maxWidth: 56,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  textAlign: "center",
+                  mt: 0.25,
+                }}
+              >
+                {profile.team.trim()}
+              </Typography>
+            )}
+          </Box>
+        </Tooltip>
+      )}
       <Tooltip title="Settings" placement="right">
         <IconButton
           color={nav === "settings" ? "primary" : "default"}
