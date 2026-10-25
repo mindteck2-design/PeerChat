@@ -81,13 +81,22 @@ function formatWhen(day: string, time?: string | null) {
   }
 }
 
+function responseOf(acks: Record<string, string> | undefined, myId: string | undefined) {
+  if (!myId || !acks) return null;
+  const raw = acks[myId];
+  if (!raw) return null;
+  if (raw.startsWith("rejected|") || raw === "rejected") return "rejected" as const;
+  return "accepted" as const;
+}
+
 export function CalendarShareCard(props: {
   payload: CalendarSharePayload;
   mine: boolean;
   peerName: string;
+  myId?: string;
   onOpen: () => void;
 }) {
-  const { payload, mine, peerName, onOpen } = props;
+  const { payload, mine, peerName, myId, onOpen } = props;
   const [liveItem, setLiveItem] = useState<CalendarItem | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -125,9 +134,13 @@ export function CalendarShareCard(props: {
     return () => un?.();
   }, [fetchLive]);
 
-  // Acknowledgement tracking
+  // Acknowledgement tracking (exclude rejects from "acknowledged" count)
   const acks = liveItem?.acks || {};
-  const ackCount = Object.keys(acks).length;
+  const myResponse = responseOf(acks, myId);
+  const ackCount = Object.keys(acks).filter((uid) => {
+    const v = acks[uid] || "";
+    return v && !v.startsWith("rejected|") && v !== "rejected";
+  }).length;
   const totalExpected = Array.from(
     new Set([liveItem?.created_by, ...(liveItem?.participant_ids || [])].filter(Boolean))
   ).length;
@@ -142,6 +155,18 @@ export function CalendarShareCard(props: {
     setBusy(true);
     try {
       await peerApi.ackCalendarItem(payload.itemId);
+      await fetchLive();
+    } catch {
+      /* ignore */
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleReject() {
+    setBusy(true);
+    try {
+      await peerApi.rejectCalendarItem(payload.itemId);
       await fetchLive();
     } catch {
       /* ignore */
@@ -319,26 +344,63 @@ export function CalendarShareCard(props: {
         borderTop="1px solid"
         borderColor="divider"
       >
-        {/* Contextual Action (Accept / Acknowledge) */}
+        {/* Contextual Action (Accept / Reject / Acknowledge) — persisted in SQLite acks */}
         <Box>
           {(kind === "meeting" || kind === "reminder") && !mine && (
-            <Button
-              size="small"
-              variant="contained"
-              color="success"
-              disabled={busy}
-              onClick={handleAck}
-              sx={{
-                borderRadius: 1.5,
-                textTransform: "none",
-                fontSize: "0.72rem",
-                py: 0.2,
-                px: 1,
-                fontWeight: 600,
-              }}
-            >
-              {kind === "meeting" ? "Accept" : "Acknowledge"}
-            </Button>
+            myResponse === "accepted" ? (
+              <Chip
+                size="small"
+                label={kind === "meeting" ? "Accepted" : "Acknowledged"}
+                color="success"
+                sx={{ height: 22, fontSize: "0.72rem", fontWeight: 600 }}
+              />
+            ) : myResponse === "rejected" ? (
+              <Chip
+                size="small"
+                label="Rejected"
+                color="default"
+                sx={{ height: 22, fontSize: "0.72rem", fontWeight: 600 }}
+              />
+            ) : (
+              <Stack direction="row" spacing={0.75}>
+                {kind === "meeting" && (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="inherit"
+                    disabled={busy}
+                    onClick={handleReject}
+                    sx={{
+                      borderRadius: 1.5,
+                      textTransform: "none",
+                      fontSize: "0.72rem",
+                      py: 0.2,
+                      px: 1,
+                      fontWeight: 600,
+                    }}
+                  >
+                    Reject
+                  </Button>
+                )}
+                <Button
+                  size="small"
+                  variant="contained"
+                  color="success"
+                  disabled={busy}
+                  onClick={handleAck}
+                  sx={{
+                    borderRadius: 1.5,
+                    textTransform: "none",
+                    fontSize: "0.72rem",
+                    py: 0.2,
+                    px: 1,
+                    fontWeight: 600,
+                  }}
+                >
+                  {kind === "meeting" ? "Accept" : "Acknowledge"}
+                </Button>
+              </Stack>
+            )
           )}
         </Box>
 

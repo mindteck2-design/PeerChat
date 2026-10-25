@@ -138,8 +138,13 @@ export function CalendarItemViewDialog({
   });
 
   // Acknowledgement tracking
-  const hasAcked = !!(item.acks && item.acks[myId]);
-  const ackCount = Object.keys(item.acks || {}).length;
+  const myAckRaw = item.acks?.[myId];
+  const hasAcked =
+    !!myAckRaw && !myAckRaw.startsWith("rejected|") && myAckRaw !== "rejected";
+  const ackCount = Object.keys(item.acks || {}).filter((uid) => {
+    const v = item.acks?.[uid] || "";
+    return v && !v.startsWith("rejected|") && v !== "rejected";
+  }).length;
   const totalExpected = allParticipantIds.length;
   const allAcked = totalExpected > 0 && ackCount >= totalExpected;
 

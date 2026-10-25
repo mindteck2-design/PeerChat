@@ -325,13 +325,29 @@ pub async fn ack_calendar_item(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Value, String> {
+    calendar_respond(state, id, "accepted").await
+}
+
+#[tauri::command]
+pub async fn reject_calendar_item(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Value, String> {
+    calendar_respond(state, id, "rejected").await
+}
+
+async fn calendar_respond(
+    state: State<'_, AppState>,
+    id: String,
+    response: &str,
+) -> Result<Value, String> {
     let stamp = now();
     let (me, from_peer, recipients, saved) = {
         let conn = state.db.lock();
         let profile = db::get_profile(&conn)?.ok_or("no profile")?;
         let me = profile["id"].as_str().unwrap_or("").to_string();
         let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
-        let saved = db::apply_calendar_ack(&conn, &id, &me, &stamp)?;
+        let saved = db::apply_calendar_response(&conn, &id, &me, response, &stamp)?;
         let mut recipients = participant_id_list(&saved["participant_ids"]);
         let owner = saved["created_by"].as_str().unwrap_or("");
         if !owner.is_empty() && owner != me && !recipients.iter().any(|r| r == owner) {
@@ -345,10 +361,11 @@ pub async fn ack_calendar_item(
         &from_peer,
         &recipients,
         &json!({
-            "op": "ack",
+            "op": if response == "rejected" { "reject" } else { "ack" },
             "item_id": id,
             "user_id": me,
             "at": stamp,
+            "response": response,
         }),
     )?;
     Ok(saved)

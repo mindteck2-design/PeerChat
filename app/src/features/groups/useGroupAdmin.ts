@@ -6,9 +6,15 @@ export function useGroupAdmin(opts: {
   active: Conversation | null;
   identity: Identity;
   peers: Peer[];
+  profile: Profile;
   addPick: string[];
   renameDraft: string;
   ensureGroupKey: (convId: string) => Promise<Uint8Array | null>;
+  sendGroupSystemNotice?: (
+    conv: Conversation,
+    body: string,
+    recipientIds?: string[]
+  ) => Promise<void>;
   askConfirm: (opts: {
     title: string;
     body: string;
@@ -26,9 +32,11 @@ export function useGroupAdmin(opts: {
     active,
     identity,
     peers,
+    profile,
     addPick,
     renameDraft,
     ensureGroupKey,
+    sendGroupSystemNotice,
     askConfirm,
     refresh,
     setAddPick,
@@ -70,13 +78,40 @@ export function useGroupAdmin(opts: {
         );
         return;
       }
+      const addedNames = addPick.map((id) => {
+        const p = allPeers.find((x) => x.user_id === id);
+        return p?.display_name || id;
+      });
       await peerApi.addGroupMembers(active.id, wrapGroupKeyForMembers(gk, identity, pubs));
+      const notice =
+        addedNames.length === 1
+          ? `${profile.display_name} added ${addedNames[0]}`
+          : `${profile.display_name} added ${addedNames.join(", ")}`;
+      if (sendGroupSystemNotice) {
+        try {
+          const memberIds = await peerApi.memberIds(active.id);
+          await sendGroupSystemNotice(active, notice, memberIds);
+        } catch (e) {
+          console.error("[GroupAdmin:addMembers:notice]", e);
+        }
+      }
       setAddPick([]);
       setMembers(await peerApi.listMembers(active.id));
     } catch (err: any) {
       setStatus(err?.message || String(err));
     }
-  }, [active, addPick, ensureGroupKey, identity, peers, setAddPick, setMembers, setStatus]);
+  }, [
+    active,
+    addPick,
+    ensureGroupKey,
+    identity,
+    peers,
+    profile.display_name,
+    sendGroupSystemNotice,
+    setAddPick,
+    setMembers,
+    setStatus,
+  ]);
 
   const handleRenameGroup = useCallback(async () => {
     if (!active || active.kind !== "group") return;

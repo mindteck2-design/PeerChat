@@ -6,8 +6,6 @@ import {
   Paper, Stack, Tooltip, Typography,
 } from "@mui/material";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
-import DoneIcon from "@mui/icons-material/DoneRounded";
-import DoneAllIcon from "@mui/icons-material/DoneAllRounded";
 import ForwardIcon from "@mui/icons-material/ForwardRounded";
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
@@ -378,23 +376,6 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
               </Box>
             </Typography>
           </Tooltip>
-        ) : m.queued || (mine && !m.delivered && m.kind !== "deleted") ? (
-          <Tooltip title="Saved on this PC — will send when their PeerChat is open on the LAN">
-            <Typography
-              component="span"
-              variant="caption"
-              sx={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 0.35,
-                fontSize: 10.5,
-                color: "inherit",
-                lineHeight: 1,
-              }}
-            >
-              {formatClock(m.created_at)} · Queued
-            </Typography>
-          </Tooltip>
         ) : (
           <Typography
             component="span"
@@ -403,24 +384,6 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           >
             {formatClock(m.created_at)}
           </Typography>
-        )}
-        {mine && m.kind !== "deleted" && !m.failed && (
-          m.read ? (
-            <DoneAllIcon
-              titleAccess="Read"
-              sx={{ fontSize: 13, color: "success.main", verticalAlign: "middle" }}
-            />
-          ) : m.delivered ? (
-            <DoneAllIcon
-              titleAccess="Received"
-              sx={{ fontSize: 13, color: "inherit", verticalAlign: "middle" }}
-            />
-          ) : (
-            <DoneIcon
-              titleAccess="Queued"
-              sx={{ fontSize: 13, color: "inherit", verticalAlign: "middle" }}
-            />
-          )
         )}
       </Box>
     );
@@ -692,6 +655,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                 <CalendarShareCard
                   payload={calendarSharePayload!}
                   mine={mine}
+                  myId={profile.id}
                   peerName={
                     active?.kind === "dm"
                       ? active.peer_name ||
@@ -728,6 +692,11 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                     }
                     setGameInviteBusy(true);
                     try {
+                      // Persist Accepted across chat switch / restart via game_move sync.
+                      await sendGameMsg(m.sender_id, {
+                        game: gameMsg!.game,
+                        payload: { type: "accept", matchId: gameMid },
+                      });
                       if (!gamesOn) {
                         setGamesOn(true);
                         await peerApi.setAppSetting("games_enabled", "1").catch(() => {});
@@ -747,6 +716,8 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                       }
                       setPendingGameInvite(invite);
                       setNav("games");
+                    } catch (err: any) {
+                      setStatus(err?.message || String(err));
                     } finally {
                       setGameInviteBusy(false);
                     }
@@ -762,8 +733,8 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                         const page = await peerApi.listMessages(active.id, { limit: 80 });
                         setMessages((prev) => {
                           const byId = new Map(prev.map((x) => [x.id, x]));
-                          for (const m of page.messages) byId.set(m.id, m);
-                          return prev.map((m) => byId.get(m.id) || m);
+                          for (const row of page.messages) byId.set(row.id, row);
+                          return prev.map((row) => byId.get(row.id) || row);
                         });
                       }
                     } catch (err: any) {

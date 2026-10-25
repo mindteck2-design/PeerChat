@@ -321,6 +321,7 @@ pub fn run() {
             set_calendar_todo_done,
             toggle_calendar_checklist_option,
             ack_calendar_item,
+            reject_calendar_item,
             poll_calendar_due,
             peer_delivery_error,
             verify_downloaded_file,

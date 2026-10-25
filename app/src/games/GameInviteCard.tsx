@@ -101,7 +101,7 @@ export function GameInviteCard(props: {
       statusColor = "success.main";
       break;
     case "declined":
-      statusLine = "Declined";
+      statusLine = "Rejected";
       statusColor = "error.main";
       break;
     case "win":
@@ -161,7 +161,7 @@ export function GameInviteCard(props: {
             disabled={props.busy}
             onClick={props.onDecline}
           >
-            Decline
+            Reject
           </Button>
           <Button
             size="small"

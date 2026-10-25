@@ -382,6 +382,7 @@ export const peerApi = {
   toggleCalendarChecklistOption: (id: string, optionId: string, checked: boolean) =>
     inv<CalendarItem>("toggle_calendar_checklist_option", { id, optionId, checked }),
   ackCalendarItem: (id: string) => inv<CalendarItem>("ack_calendar_item", { id }),
+  rejectCalendarItem: (id: string) => inv<CalendarItem>("reject_calendar_item", { id }),
   pollCalendarDue: () => inv<number>("poll_calendar_due"),
   peerDeliveryError: (userId: string) =>
     inv<{ last_error?: string | null; attempts?: number; created_at?: string } | null>(

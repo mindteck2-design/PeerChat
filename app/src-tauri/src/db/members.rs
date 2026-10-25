@@ -197,3 +197,25 @@ pub fn update_member_wraps(
     Ok(())
 }
 
+/// After ingesting an authoritative roster, drop local members that are no longer listed.
+pub fn reconcile_members(
+    conn: &Connection,
+    conversation_id: &str,
+    keep_user_ids: &[String],
+) -> Result<usize, String> {
+    if keep_user_ids.is_empty() {
+        return Ok(0);
+    }
+    let keep: std::collections::HashSet<&str> =
+        keep_user_ids.iter().map(|s| s.as_str()).collect();
+    let existing = member_ids(conn, conversation_id)?;
+    let mut removed = 0usize;
+    for uid in existing {
+        if !keep.contains(uid.as_str()) {
+            delete_member(conn, conversation_id, &uid)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+

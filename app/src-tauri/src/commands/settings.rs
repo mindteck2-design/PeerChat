@@ -12,6 +12,11 @@ pub(crate) const SETTING_KEYS: &[&str] = &[
     "profile_status",
     "profile_status_msg",
 ];
+
+/// Dynamic keys stored in app_settings (prefix match). Used for per-group crypto history.
+fn is_allowed_setting_key(key: &str) -> bool {
+    SETTING_KEYS.contains(&key) || key.starts_with("group_key_history:")
+}
 use base64::Engine;
 use rusqlite::OptionalExtension;
 use crate::tls_cert;
@@ -98,7 +103,7 @@ pub fn board_slug(team: &str) -> Option<String> {
 
 #[tauri::command]
 pub fn get_app_setting(state: State<AppState>, key: String) -> Result<Option<String>, String> {
-    if !SETTING_KEYS.contains(&key.as_str()) {
+    if !is_allowed_setting_key(&key) {
         return Err("unknown setting".into());
     }
     let conn = state.db.lock();
@@ -107,7 +112,7 @@ pub fn get_app_setting(state: State<AppState>, key: String) -> Result<Option<Str
 
 #[tauri::command]
 pub fn set_app_setting(state: State<AppState>, key: String, value: String) -> Result<(), String> {
-    if !SETTING_KEYS.contains(&key.as_str()) {
+    if !is_allowed_setting_key(&key) {
         return Err("unknown setting".into());
     }
     if key == "theme" && value != "dark" && value != "light" {

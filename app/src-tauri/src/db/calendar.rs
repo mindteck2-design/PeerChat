@@ -349,11 +349,25 @@ pub fn apply_checklist_toggle(
     Ok(item)
 }
 
-/// Record an acknowledgement with per-user last-write-wins.
+fn ack_stamp(raw: &str) -> &str {
+    raw.strip_prefix("rejected|").unwrap_or(raw)
+}
+
+/// Record accept (`at` ISO) or reject (`rejected|{at}`) with per-user last-write-wins on stamp.
 pub fn apply_calendar_ack(
     conn: &Connection,
     item_id: &str,
     user_id: &str,
+    at: &str,
+) -> Result<Value, String> {
+    apply_calendar_response(conn, item_id, user_id, "accepted", at)
+}
+
+pub fn apply_calendar_response(
+    conn: &Connection,
+    item_id: &str,
+    user_id: &str,
+    response: &str,
     at: &str,
 ) -> Result<Value, String> {
     let mut item = get_calendar_item(conn, item_id)?.ok_or("calendar item not found")?;
@@ -362,13 +376,18 @@ pub fn apply_calendar_ack(
     if day < today.as_str() {
         return Err("past calendar items are frozen".into());
     }
+    let stored = if response == "rejected" {
+        format!("rejected|{at}")
+    } else {
+        at.to_string()
+    };
     let mut acks = normalize_acks(item.get("acks").unwrap_or(&json!({})));
     let prev = acks.get(user_id).and_then(|v| v.as_str()).unwrap_or("");
-    if !prev.is_empty() && at <= prev {
+    if !prev.is_empty() && at <= ack_stamp(prev) {
         return Ok(item);
     }
     if let Some(obj) = acks.as_object_mut() {
-        obj.insert(user_id.to_string(), json!(at));
+        obj.insert(user_id.to_string(), json!(stored));
     }
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(

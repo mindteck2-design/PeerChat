@@ -223,6 +223,7 @@ import { GroupCreateDialog } from "../features/groups/GroupCreateDialog";
 import { GroupMembersDialog } from "../features/groups/GroupMembersDialog";
 import { useGroupCrypto } from "../features/groups/useGroupCrypto";
 import {
+  cachePlaintext,
   getCachedPlaintext,
   useMessageDecrypt,
 } from "../features/chat/useMessageDecrypt";
@@ -1007,7 +1008,25 @@ export function ChatScreen({
       }
       if (conv.kind === "group") {
         try {
-          const list = await peerApi.listMembers(conv.id);
+          let list = await peerApi.listMembers(conv.id);
+          // Incomplete local roster (e.g. only self) — request authoritative sync.
+          if (isInitial && list.length <= 1) {
+            appLog("info", "[GroupSync:pull:request_roster]", {
+              group_id: conv.id,
+              member_id: profile.id,
+              local_count: list.length,
+            });
+            try {
+              await peerApi.requestGroupSync(conv.id);
+              await new Promise((r) => setTimeout(r, 400));
+              list = await peerApi.listMembers(conv.id);
+            } catch (e) {
+              appLog("warn", "[GroupSync:pull:request_roster_err]", {
+                group_id: conv.id,
+                err: String(e),
+              });
+            }
+          }
           if (!cancel) {
             setMembers((prev) => {
               if (
@@ -1471,6 +1490,11 @@ export function ChatScreen({
   }, [pendingShareFiles, active?.id]);
 
   function selectConversation(c: Conversation) {
+    // Re-clicking the already-open chat must not wipe messages / re-decrypt / jump scroll.
+    if (activeRef.current?.id === c.id) {
+      setActive(c); // refresh metadata (title, unread, etc.) only
+      return;
+    }
     const prev = activeRef.current;
     if (prev && prev.id !== c.id) {
       draftsRef.current[prev.id] = textRef.current;
@@ -1500,6 +1524,12 @@ export function ChatScreen({
       });
       void ensureGroupKey(c.id).catch(() => {});
     }
+  }
+
+  function rememberPlain(messageId: string | undefined, body: string) {
+    if (!messageId || !body) return;
+    cachePlaintext(messageId, body);
+    setPlain((prev) => ({ ...prev, [messageId]: body }));
   }
 
   /** Open a chat from sidebar message search and scroll to the matching message. */
@@ -1992,11 +2022,15 @@ export function ChatScreen({
     }
     const enc = await encryptWithGroupKey(body, conv.id, profile.id, gk, identity);
     const members = recipientIds ?? (await peerApi.memberIds(conv.id));
-    await peerApi.sendMessage(
+    const saved = await peerApi.sendMessage(
       conv.id,
       { kind: "system", sender_id: profile.id, ...enc },
       members.filter((id) => id !== profile.id)
     );
+    rememberPlain(saved?.id, body);
+    if (activeRef.current?.id === conv.id) {
+      await refreshNewestMessages(conv.id);
+    }
   }
 
   async function sendEncrypted(
@@ -2047,11 +2081,14 @@ export function ChatScreen({
       };
     }
     const memberIds = await resolveMemberIds(active);
-    await peerApi.sendMessage(
+    const saved = await peerApi.sendMessage(
       active.id,
       message,
       memberIds.filter((id) => id !== profile.id)
     );
+    if (kind === "text" || kind === "system" || kind === "forwarded") {
+      rememberPlain(saved?.id, body.trim());
+    }
     await refreshNewestMessages(active.id);
   }
 
@@ -2178,12 +2215,13 @@ export function ChatScreen({
       message.created_at = editing.created_at;
     }
     const memberIds = await resolveMemberIds(active);
-    await peerApi.sendMessage(
+    const saved = await peerApi.sendMessage(
       active.id,
       message,
       memberIds.filter((id) => id !== profile.id),
       !!editing
     );
+    rememberPlain(saved?.id || message.id, body.trim());
     setEditingMessage(null);
     await refreshNewestMessages(active.id);
   }
@@ -3771,9 +3809,11 @@ export function ChatScreen({
     active,
     identity,
     peers,
+    profile,
     addPick,
     renameDraft,
     ensureGroupKey,
+    sendGroupSystemNotice,
     askConfirm,
     refresh,
     setAddPick,

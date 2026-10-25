@@ -29,10 +29,14 @@ export function AckBar({
   readOnly?: boolean;
 }) {
   const expected = Array.from(new Set(participantIds.filter(Boolean)));
-  const ackIds = Object.keys(acks);
-  const count = expected.filter((id) => !!acks[id]).length;
+  const isAccepted = (v: string | undefined) =>
+    !!v && !v.startsWith("rejected|") && v !== "rejected";
+  const ackIds = Object.keys(acks).filter((id) => isAccepted(acks[id]));
+  const count = expected.filter((id) => isAccepted(acks[id])).length;
   const total = expected.length || ackIds.length;
-  const iAcked = !!acks[myId];
+  const iAcked = isAccepted(acks[myId]);
+  const iRejected =
+    !!acks[myId] && (acks[myId]!.startsWith("rejected|") || acks[myId] === "rejected");
 
   return (
     <Stack spacing={1}>
@@ -60,7 +64,7 @@ export function AckBar({
           ))}
         </Stack>
       )}
-      {!readOnly && !iAcked && (
+      {!readOnly && !iAcked && !iRejected && (
         <Button
           size="small"
           variant="outlined"
@@ -73,8 +77,13 @@ export function AckBar({
         </Button>
       )}
       {!readOnly && iAcked && (
-        <Typography variant="caption" color="text.secondary">
-          You acknowledged this.
+        <Typography variant="caption" color="success.main" fontWeight={600}>
+          Accepted
+        </Typography>
+      )}
+      {!readOnly && iRejected && (
+        <Typography variant="caption" color="text.secondary" fontWeight={600}>
+          Rejected
         </Typography>
       )}
     </Stack>

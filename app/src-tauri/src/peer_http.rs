@@ -661,11 +661,13 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     .and_then(|v| v.as_array());
                 if let Some(arr) = inbound_members {
                     let mut upserted_count = 0;
+                    let mut keep_ids: Vec<String> = Vec::new();
                     for m in arr {
                         let uid = m.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
                         if uid.is_empty() {
                             continue;
                         }
+                        keep_ids.push(uid.to_string());
                         let name = m.get("display_name").and_then(|v| v.as_str());
                         let _ = db::upsert_member(&conn, group_cid, uid, None, name);
                         if let Some(role) = m.get("role").and_then(|v| v.as_str()) {
@@ -673,7 +675,28 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                         }
                         upserted_count += 1;
                     }
-                    println!("[GroupSync:deliver:roster] group_id={} ingested {} members from payload", group_cid, upserted_count);
+                    // Authoritative roster: drop stale local members so peers converge.
+                    if keep_ids.len() >= 2 {
+                        match db::reconcile_members(&conn, group_cid, &keep_ids) {
+                            Ok(removed) if removed > 0 => {
+                                println!(
+                                    "[GroupSync:deliver:roster] group_id={} reconciled removed_stale={}",
+                                    group_cid, removed
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[GroupSync:deliver:roster:reconcile_err] group_id={} err={}",
+                                    group_cid, e
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    println!(
+                        "[GroupSync:deliver:roster] group_id={} ingested {} members from payload",
+                        group_cid, upserted_count
+                    );
                 }
 
                 // Ingest sender identity as a member of this group
@@ -824,7 +847,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                             &conn, item_id, option_id, user_id, checked, updated_at,
                         );
                     }
-                } else if op == "ack" {
+                } else if op == "ack" || op == "reject" {
                     let item_id = share.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
                     let user_id = if !deliver_sender_id.is_empty() {
                         deliver_sender_id
@@ -832,8 +855,12 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                         share.get("user_id").and_then(|v| v.as_str()).unwrap_or("")
                     };
                     let at = share.get("at").and_then(|v| v.as_str()).unwrap_or("");
+                    let response = share
+                        .get("response")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(if op == "reject" { "rejected" } else { "accepted" });
                     if !item_id.is_empty() && !user_id.is_empty() {
-                        let _ = db::apply_calendar_ack(&conn, item_id, user_id, at);
+                        let _ = db::apply_calendar_response(&conn, item_id, user_id, response, at);
                     }
                 } else if let Some(item) = share.get("item") {
                     if op == "delete" {
