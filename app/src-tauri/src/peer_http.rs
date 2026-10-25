@@ -714,7 +714,10 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     }
                 }
                 if op == "request_sync" && !cid.is_empty() && !deliver_sender_id.is_empty() {
-                    let title = db::conversation_title(&conn, cid).unwrap_or_else(|| "Group".into());
+                    let title = db::conversation_title(&conn, cid)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "Group".to_string());
                     let roster = Value::Array(db::list_members(&conn, cid).unwrap_or_default());
                     let wrap = db::get_wrapped_group_key(&conn, cid, deliver_sender_id).ok().flatten();
                     let profile_opt = db::get_profile(&conn).ok().flatten();

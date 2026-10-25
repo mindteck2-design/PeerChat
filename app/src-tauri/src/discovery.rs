@@ -585,9 +585,9 @@ pub async fn scan(discovery_port: u16, self_id: &str) -> Result<Vec<PeerBeacon>,
                 }
                 found.insert(peer.user_id.clone(), peer);
             }
-            Ok(Err(e)) => {
+            Ok(Err(_e)) => {
                 #[cfg(windows)]
-                if e.raw_os_error() == Some(10054) {
+                if _e.raw_os_error() == Some(10054) {
                     continue;
                 }
                 break;
