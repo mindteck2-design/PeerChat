@@ -228,6 +228,18 @@ pub fn send_message(
                 )
                 .ok()
                 .flatten();
+            let is_group = conn
+                .query_row(
+                    "SELECT kind FROM conversations WHERE id=?1",
+                    rusqlite::params![conversation_id.as_str()],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("group")
+                || conversation_id.starts_with("group:");
             for rid in &recipient_ids {
                 if rid == me {
                     continue;
@@ -288,6 +300,20 @@ pub fn send_message(
                 }
                 if let Some(ref t) = title {
                     payload["group_title"] = json!(t);
+                }
+                if is_group {
+                    if let Ok(roster) = db::list_members(&conn, conversation_id.as_str()) {
+                        payload["members"] = json!(roster);
+                    }
+                    println!(
+                        "[GroupSync:send_message] group_id={} msg_id={} sender={} recipient={} has_wrap={} roster_len={}",
+                        conversation_id,
+                        out_id,
+                        me,
+                        rid,
+                        payload.get("wrapped_group_key").is_some(),
+                        payload.get("members").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
+                    );
                 }
                 db::enqueue_outbox(
                     &conn,

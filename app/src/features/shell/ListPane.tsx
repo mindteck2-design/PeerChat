@@ -308,12 +308,12 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                       setConvMenu({ anchor: e.currentTarget as HTMLElement, conv: c });
                     }}
                     sx={{
-                      minHeight: 82,
-                      py: 1.5,
-                      px: 2,
+                      minHeight: 62,
+                      py: 1,
+                      px: 1.75,
                       alignItems: "center",
-                      gap: 1.75,
-                      borderRadius: 1.5,
+                      gap: 1.5,
+                      borderRadius: 1.25,
                       mx: 0.5,
                       width: "auto",
                       "& .chat-row-actions": {
@@ -330,15 +330,15 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                     <Box sx={{ position: "relative", flexShrink: 0 }}>
                       <Avatar
                         sx={{
-                          width: 50,
-                          height: 50,
+                          width: 40,
+                          height: 40,
                           bgcolor: avatarColor(title),
-                          fontSize: c.kind === "group" ? 22 : 18,
+                          fontSize: c.kind === "group" ? 18 : 15,
                           fontWeight: 700,
                         }}
                       >
                         {c.kind === "group" ? (
-                          <GroupsIcon sx={{ fontSize: 24 }} />
+                          <GroupsIcon sx={{ fontSize: 20 }} />
                         ) : (
                           title.slice(0, 1).toUpperCase()
                         )}
@@ -347,25 +347,25 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                         <Box
                           sx={{
                             position: "absolute",
-                            bottom: 1,
-                            right: 1,
-                            width: 12,
-                            height: 12,
+                            bottom: 0,
+                            right: 0,
+                            width: 10,
+                            height: 10,
                             borderRadius: "50%",
-                            border: "2.5px solid",
+                            border: "2px solid",
                             borderColor: "background.paper",
                             bgcolor: peerOnline ? "success.main" : "grey.500",
                           }}
                         />
                       )}
                     </Box>
-                    <Box flex={1} minWidth={0} display="flex" flexDirection="column" justifyContent="center" gap={0.6}>
+                    <Box flex={1} minWidth={0} display="flex" flexDirection="column" justifyContent="center" gap={0.35}>
                       <Box display="flex" alignItems="center" justifyContent="space-between" gap={1}>
                         <Box display="flex" alignItems="center" gap={0.75} minWidth={0} flex={1}>
                           <Typography
                             component="span"
                             fontWeight={unread ? 700 : 600}
-                            fontSize={15.5}
+                            fontSize={14.5}
                             noWrap
                           >
                             {title}
@@ -374,7 +374,7 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                             <Chip
                               size="small"
                               label="Blocked"
-                              sx={{ height: 18, fontSize: 10, fontWeight: 700, flexShrink: 0 }}
+                              sx={{ height: 16, fontSize: 9.5, fontWeight: 700, flexShrink: 0 }}
                             />
                           )}
                           {needsTrust && (
@@ -382,7 +382,7 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                               size="small"
                               label="New"
                               color="warning"
-                              sx={{ height: 18, fontSize: 10, fontWeight: 700, flexShrink: 0 }}
+                              sx={{ height: 16, fontSize: 9.5, fontWeight: 700, flexShrink: 0 }}
                             />
                           )}
                         </Box>
@@ -390,7 +390,7 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                           component="span"
                           variant="caption"
                           color={unread ? "primary.main" : "text.secondary"}
-                          sx={{ flexShrink: 0, fontSize: 12, fontWeight: unread ? 700 : 400 }}
+                          sx={{ flexShrink: 0, fontSize: 11.5, fontWeight: unread ? 700 : 400 }}
                         >
                           {timeLabel}
                         </Typography>
@@ -402,28 +402,28 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                           noWrap
                           flex={1}
                           minWidth={0}
-                          sx={{ fontSize: 13.5, lineHeight: 1.35 }}
+                          sx={{ fontSize: 13, lineHeight: 1.3 }}
                         >
                           {preview || (needsTrust ? "First message — tap to open" : "\u00a0")}
                         </Typography>
-                        <Box display="inline-flex" alignItems="center" gap={0.6} flexShrink={0} sx={{ ml: 0.5 }}>
+                        <Box display="inline-flex" alignItems="center" gap={0.5} flexShrink={0} sx={{ ml: 0.5 }}>
                           {c.muted && (
-                            <VolumeOffIcon sx={{ fontSize: 15, color: "text.disabled", flexShrink: 0 }} />
+                            <VolumeOffIcon sx={{ fontSize: 14, color: "text.disabled", flexShrink: 0 }} />
                           )}
                           {c.pinned_at && (
-                            <PushPinIcon sx={{ fontSize: 14, color: "text.disabled", flexShrink: 0 }} />
+                            <PushPinIcon sx={{ fontSize: 13, color: "text.disabled", flexShrink: 0 }} />
                           )}
                           {unread && (
                             <Box
                               sx={{
                                 flexShrink: 0,
-                                minWidth: 20,
-                                height: 20,
-                                px: 0.6,
-                                borderRadius: 10,
+                                minWidth: 18,
+                                height: 18,
+                                px: 0.5,
+                                borderRadius: 9,
                                 bgcolor: "primary.main",
                                 color: "primary.contrastText",
-                                fontSize: 11,
+                                fontSize: 10.5,
                                 fontWeight: 700,
                                 display: "flex",
                                 alignItems: "center",
@@ -443,7 +443,7 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                               setConvMenu({ anchor: e.currentTarget, conv: c });
                             }}
                             sx={{
-                              p: 0.25,
+                              p: 0.2,
                               color: "text.secondary",
                               "&:hover": {
                                 color: "text.primary",
@@ -451,7 +451,7 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                               },
                             }}
                           >
-                            <KeyboardArrowDownIcon sx={{ fontSize: 18 }} />
+                            <KeyboardArrowDownIcon sx={{ fontSize: 17 }} />
                           </IconButton>
                         </Box>
                       </Box>

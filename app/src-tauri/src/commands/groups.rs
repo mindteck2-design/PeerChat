@@ -31,12 +31,11 @@ pub fn create_group(
     wrapped_group_keys: Value,
 ) -> Result<Value, String> {
     let conn = state.db.lock();
-    let me = db::get_profile(&conn)?
-        .ok_or("no profile")?
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    if me.is_empty() {
+        return Err("no profile".into());
+    }
     let id = uuid::Uuid::new_v4().to_string();
     let mut members = vec![(
         me.clone(),
@@ -46,6 +45,9 @@ pub fn create_group(
             .map(|s| s.to_string()),
     )];
     for mid in &member_ids {
+        if mid == &me {
+            continue;
+        }
         members.push((
             mid.clone(),
             wrapped_group_keys
@@ -55,12 +57,134 @@ pub fn create_group(
         ));
     }
     db::create_group(&conn, &id, &title, &me, &members)?;
+    let roster = Value::Array(db::list_members(&conn, &id)?);
+    let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+    let mut notified_count = 0;
+    for mid in &member_ids {
+        if mid == &me {
+            continue;
+        }
+        let wrap = db::get_wrapped_group_key(&conn, &id, mid)?;
+        let has_wrap = wrap.is_some();
+        if let Err(e) = enqueue_group_event(
+            &conn,
+            &from_peer,
+            &id,
+            mid,
+            &title,
+            wrap,
+            &roster,
+            "sync",
+            None,
+        ) {
+            eprintln!("[GroupSync:create_group:err] failed to enqueue sync for mid={mid} group_id={id}: {e}");
+        } else {
+            notified_count += 1;
+            println!(
+                "[GroupSync:create_group] enqueued sync event: group_id={} creator={} recipient={} has_wrap={} roster_len={}",
+                id,
+                me,
+                mid,
+                has_wrap,
+                roster.as_array().map(|a| a.len()).unwrap_or(0)
+            );
+        }
+    }
+    drop(conn);
+    kick_flush(&state);
+    println!(
+        "[GroupSync:create_group:done] created group_id={} title=\"{}\" creator={} total_members={} notified_peers={}",
+        id,
+        title,
+        me,
+        members.len(),
+        notified_count
+    );
     Ok(json!({
         "id": id,
         "kind": "group",
         "title": title,
         "created_at": now(),
     }))
+}
+
+#[tauri::command]
+pub fn request_group_sync(
+    state: State<AppState>,
+    conversation_id: String,
+) -> Result<(), String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    if me.is_empty() {
+        return Err("no profile".into());
+    }
+    // Find admins or other members of this group to request sync from.
+    let members = db::list_members(&conn, &conversation_id)?;
+    let mut target_peer_id: Option<String> = None;
+    for m in &members {
+        let uid = m["user_id"].as_str().unwrap_or("");
+        if uid.is_empty() || uid == me {
+            continue;
+        }
+        if m["role"].as_str() == Some("admin") {
+            target_peer_id = Some(uid.to_string());
+            break;
+        }
+    }
+    if target_peer_id.is_none() {
+        for m in &members {
+            let uid = m["user_id"].as_str().unwrap_or("");
+            if !uid.is_empty() && uid != me {
+                target_peer_id = Some(uid.to_string());
+                break;
+            }
+        }
+    }
+    if target_peer_id.is_none() {
+        let last_sender: Option<String> = conn
+            .query_row(
+                "SELECT sender_id FROM messages WHERE conversation_id=?1 AND sender_id!=?2 ORDER BY sort_at DESC, id DESC LIMIT 1",
+                rusqlite::params![conversation_id, me],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        target_peer_id = last_sender;
+    }
+    let Some(target_uid) = target_peer_id else {
+        return Err("No peer found to request group sync from".into());
+    };
+    let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+    let title = db::conversation_title(&conn, &conversation_id)?.unwrap_or_else(|| "Group".into());
+    let oid = format!("gsync-req-{}:{}", uuid::Uuid::new_v4(), target_uid);
+    let payload = json!({
+        "from_peer": from_peer,
+        "conversation_id": conversation_id,
+        "group_title": title,
+        "group_event": {
+            "op": "request_sync",
+            "conversation_id": conversation_id,
+            "user_id": me,
+        }
+    });
+    db::enqueue_outbox(
+        &conn,
+        &oid,
+        &target_uid,
+        &conversation_id,
+        &payload.to_string(),
+    )?;
+    println!(
+        "[GroupSync:request_sync] requested group sync: group_id={} from={} to={}",
+        conversation_id,
+        me,
+        target_uid
+    );
+    drop(conn);
+    kick_flush(&state);
+    Ok(())
 }
 
 #[tauri::command]

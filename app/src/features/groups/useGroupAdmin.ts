@@ -8,7 +8,7 @@ export function useGroupAdmin(opts: {
   peers: Peer[];
   addPick: string[];
   renameDraft: string;
-  ensureGroupKey: (convId: string) => Promise<Uint8Array>;
+  ensureGroupKey: (convId: string) => Promise<Uint8Array | null>;
   askConfirm: (opts: {
     title: string;
     body: string;
@@ -42,10 +42,22 @@ export function useGroupAdmin(opts: {
     if (!active || !addPick.length) return;
     try {
       const gk = await ensureGroupKey(active.id);
+      if (!gk) {
+        setStatus("Group key not available to add members");
+        return;
+      }
+      let allPeers = peers;
+      if (addPick.some((id) => !allPeers.find((p) => p.user_id === id && p.x25519_public))) {
+        try {
+          allPeers = await peerApi.listPeers();
+        } catch {
+          /* ignore */
+        }
+      }
       const pubs: Record<string, string> = {};
       for (const id of addPick) {
-        const p = peers.find((x) => x.user_id === id);
-        if (p) pubs[id] = p.x25519_public;
+        const p = allPeers.find((x) => x.user_id === id);
+        if (p?.x25519_public) pubs[id] = p.x25519_public;
       }
       if (!Object.keys(pubs).length) {
         setStatus("None of the selected people have been discovered yet");

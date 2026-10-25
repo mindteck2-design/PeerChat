@@ -24,7 +24,7 @@ export function useMessageDecrypt(opts: {
   fileNames: Record<string, string>;
   fileSizes: Record<string, number>;
   decryptGroupMessageText: (m: Message) => Promise<string>;
-  ensureGroupKey?: (convId: string) => Promise<Uint8Array>;
+  ensureGroupKey?: (convId: string) => Promise<Uint8Array | null>;
   setPlain: Dispatch<SetStateAction<Record<string, string>>>;
   setFileNames: Dispatch<SetStateAction<Record<string, string>>>;
   setFileSizes: Dispatch<SetStateAction<Record<string, number>>>;
@@ -71,12 +71,16 @@ export function useMessageDecrypt(opts: {
       let gk = active.kind === "group" ? groupKeys[active.id] : undefined;
       if (active.kind === "group" && !gk && ensureGroupKey) {
         try {
-          gk = await ensureGroupKey(active.id);
+          const loaded = await ensureGroupKey(active.id);
+          if (loaded) gk = loaded;
         } catch {
           /* ignore */
         }
       }
-      if (active.kind === "group" && !gk) return;
+      if (active.kind === "group" && !gk) {
+        console.log(`[GroupCrypto:decrypt] waiting for group key for conv=${active.id}`);
+        return;
+      }
 
       const toDecrypt = messages.filter(
         (m) =>

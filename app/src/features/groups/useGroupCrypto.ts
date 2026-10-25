@@ -78,25 +78,66 @@ export function useGroupCrypto(opts: {
   const decryptGroupMessageText = useCallback(
     async (m: Message): Promise<string> => {
       const convId = m.conversation_id;
-      const current = groupKeysRef.current[convId];
+      let current = groupKeysRef.current[convId];
+      if (!current) {
+        try {
+          const wrap = await peerApi.getGroupKey(convId);
+          if (wrap) {
+            current = unwrapGroupKey(wrap, identity);
+            groupKeysRef.current = { ...groupKeysRef.current, [convId]: current };
+            setGroupKeys((g) => ({ ...g, [convId]: current! }));
+            console.log(`[GroupCrypto:decrypt:on_demand_unwrap] group_id=${convId} member_id=${profile.id}`);
+          }
+        } catch (e) {
+          console.warn(`[GroupCrypto:decrypt:on_demand_err] group_id=${convId}`, e);
+        }
+      }
       const hist = groupKeyHistoryRef.current[convId] || [];
       const candidates: Uint8Array[] = [];
       if (current) candidates.push(current);
       for (const k of hist) {
         if (!current || !groupKeysEqual(k, current)) candidates.push(k);
       }
-      const sender = peers.find((p) => p.user_id === m.sender_id);
-      const edPub = sender?.ed25519_public;
-      for (const gk of candidates) {
+      if (!candidates.length) {
+        console.warn(
+          `[GroupCrypto:decrypt:no_candidates] group_id=${convId} msg_id=${m.id} sender_id=${m.sender_id}`
+        );
+        throw new Error("unable to decrypt: no group key available");
+      }
+      let edPub =
+        m.sender_id === profile.id
+          ? exportPublic(identity).ed25519_public
+          : peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
+      if (!edPub && m.sender_id !== profile.id) {
         try {
-          return await decryptWithGroupKey(m, gk, edPub);
+          const all = await peerApi.listPeers();
+          const found = all.find((p) => p.user_id === m.sender_id);
+          if (found?.ed25519_public) {
+            edPub = found.ed25519_public;
+          }
         } catch {
-          /* try older key */
+          /* ignore */
         }
       }
-      throw new Error("unable to decrypt");
+      let lastErr: any = null;
+      for (let i = 0; i < candidates.length; i++) {
+        const gk = candidates[i]!;
+        try {
+          const text = await decryptWithGroupKey(m, gk, edPub);
+          console.log(
+            `[GroupCrypto:decrypt:success] group_id=${convId} msg_id=${m.id} sender_id=${m.sender_id} key_idx=${i}`
+          );
+          return text;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      console.warn(
+        `[GroupCrypto:decrypt:failed] group_id=${convId} msg_id=${m.id} sender_id=${m.sender_id} candidates=${candidates.length} reason=${lastErr?.message || String(lastErr)}`
+      );
+      throw new Error(`unable to decrypt: ${lastErr?.message || "invalid key"}`);
     },
-    [groupKeyHistoryRef, groupKeysRef, peers]
+    [groupKeyHistoryRef, groupKeysRef, identity, peers, profile.id, setGroupKeys]
   );
 
   const persistMyGroupWrap = useCallback(
@@ -114,21 +155,7 @@ export function useGroupCrypto(opts: {
       const wrap = await peerApi.getGroupKey(convId);
       const current = groupKeysRef.current[convId];
       if (!wrap) {
-        if (current) {
-          try {
-            await persistMyGroupWrap(convId, current);
-          } catch (e) {
-            console.error(e);
-          }
-          return;
-        }
-        const gk = createGroupKey();
-        await persistMyGroupWrap(convId, gk);
-        const hist = await loadPersistedKeyHistory(convId);
-        groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
-        setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
-        groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
-        setGroupKeys((g) => ({ ...g, [convId]: gk }));
+        console.log(`[GroupCrypto:syncGroupKeyIfRotated] no wrap in DB for group_id=${convId}`);
         return;
       }
       try {
@@ -139,28 +166,15 @@ export function useGroupCrypto(opts: {
           setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
           groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
           setGroupKeys((g) => ({ ...g, [convId]: gk }));
+          console.log(`[GroupCrypto:syncGroupKeyIfRotated] loaded initial key for group_id=${convId}`);
           return;
         }
         if (!groupKeysEqual(current, gk)) {
+          console.log(`[GroupCrypto:syncGroupKeyIfRotated] adopting rotated key for group_id=${convId}`);
           await adoptGroupKey(convId, gk);
         }
       } catch (err) {
-        if (current) {
-          try {
-            await persistMyGroupWrap(convId, current);
-          } catch (e) {
-            console.error(e);
-          }
-          return;
-        }
-        const gk = createGroupKey();
-        await persistMyGroupWrap(convId, gk);
-        const hist = await loadPersistedKeyHistory(convId);
-        groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
-        setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
-        groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
-        setGroupKeys((g) => ({ ...g, [convId]: gk }));
-        console.warn("Repaired group key after unwrap failure", err);
+        console.warn(`[GroupCrypto:syncGroupKeyIfRotated:unwrap_err] group_id=${convId}`, err);
       }
     },
     [
@@ -169,14 +183,13 @@ export function useGroupCrypto(opts: {
       groupKeysRef,
       identity,
       loadPersistedKeyHistory,
-      persistMyGroupWrap,
       setGroupKeyHistory,
       setGroupKeys,
     ]
   );
 
   const ensureGroupKey = useCallback(
-    async (convId: string) => {
+    async (convId: string): Promise<Uint8Array | null> => {
       const existing = groupKeysRef.current[convId];
       if (existing) return existing;
       const wrap = await peerApi.getGroupKey(convId);
@@ -188,26 +201,33 @@ export function useGroupCrypto(opts: {
           setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
           groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
           setGroupKeys((g) => ({ ...g, [convId]: gk }));
+          console.log(`[GroupCrypto:ensureGroupKey] unwrapped key for group_id=${convId} member_id=${profile.id}`);
           return gk;
         } catch (err) {
-          console.error(err);
+          console.error(
+            `[GroupCrypto:ensureGroupKey:unwrap_failed] group_id=${convId} member_id=${profile.id}`,
+            err
+          );
         }
       }
-      const gk = createGroupKey();
-      await persistMyGroupWrap(convId, gk);
-      const hist = await loadPersistedKeyHistory(convId);
-      groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
-      setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
-      groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
-      setGroupKeys((g) => ({ ...g, [convId]: gk }));
-      return gk;
+      // If wrap is not present or failed to unwrap, do not generate a rogue key!
+      // Request group sync from group peers instead.
+      console.warn(
+        `[GroupCrypto:ensureGroupKey:missing_key] group_id=${convId} member_id=${profile.id} wrap_found=${!!wrap}`
+      );
+      try {
+        await peerApi.requestGroupSync(convId);
+      } catch (e) {
+        console.warn(`[GroupCrypto:ensureGroupKey:request_sync_err] group_id=${convId}`, e);
+      }
+      return null;
     },
     [
       groupKeyHistoryRef,
       groupKeysRef,
       identity,
       loadPersistedKeyHistory,
-      persistMyGroupWrap,
+      profile.id,
       setGroupKeyHistory,
       setGroupKeys,
     ]

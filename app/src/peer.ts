@@ -191,6 +191,8 @@ export const peerApi = {
     inv<string | null>("get_group_key", { conversationId }),
   setMyGroupKey: (conversationId: string, wrappedGroupKey: string) =>
     inv<void>("set_my_group_key", { conversationId, wrappedGroupKey }),
+  requestGroupSync: (conversationId: string) =>
+    inv<void>("request_group_sync", { conversationId }),
   memberIds: (conversationId: string) => inv<string[]>("member_ids", { conversationId }),
   listMembers: (conversationId: string) =>
     inv<Member[]>("list_group_members", { conversationId }),

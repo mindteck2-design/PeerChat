@@ -1,5 +1,7 @@
 use crate::db;
+use crate::runtime::group_events::enqueue_group_event;
 use crate::tls_cert::{self, LocalCert};
+use crate::util::from_peer_json;
 use base64::Engine;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension};
@@ -607,55 +609,102 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     let _ = db::update_peer_display_name_everywhere(&conn, &uid, &dn);
                 }
             }
-            // group wrap optional
-            if let (Some(cid), Some(wrap)) = (
-                payload.get("conversation_id").and_then(|v| v.as_str()),
-                payload.get("wrapped_group_key").and_then(|v| v.as_str()),
-            ) {
+            // Group membership and key synchronization:
+            // Check if this payload is related to a group (via wrapped_group_key, group_event, conversation_id, or message kind)
+            let group_cid = payload
+                .get("conversation_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| payload.pointer("/message/conversation_id").and_then(|v| v.as_str()))
+                .or_else(|| payload.pointer("/group_event/conversation_id").and_then(|v| v.as_str()))
+                .unwrap_or("");
+
+            let is_group_payload = !group_cid.is_empty() && (
+                payload.get("wrapped_group_key").is_some()
+                || payload.get("group_event").is_some()
+                || group_cid.starts_with("group:")
+                || conn
+                    .query_row(
+                        "SELECT kind FROM conversations WHERE id=?1",
+                        rusqlite::params![group_cid],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some("group")
+            );
+
+            if is_group_payload && !group_cid.is_empty() {
+                let title = payload
+                    .get("group_title")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| payload.pointer("/group_event/title").and_then(|v| v.as_str()))
+                    .unwrap_or("Group");
+
+                // Ensure group conversation exists
                 let _ = conn.execute(
-                    "UPDATE conversation_members SET wrapped_group_key=?3 WHERE conversation_id=?1 AND user_id=?2",
-                    rusqlite::params![cid, my_id, wrap],
+                    "INSERT OR IGNORE INTO conversations(id, kind, title, created_at) VALUES (?1,'group',?2,?3)",
+                    rusqlite::params![group_cid, title, chrono::Utc::now().to_rfc3339()],
                 );
-                // ensure conversation exists
-                if db::list_conversations(&conn)
-                    .unwrap_or_default()
-                    .iter()
-                    .all(|c| c["id"].as_str() != Some(cid))
-                {
-                    let title = payload
-                        .get("group_title")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Group");
-                    let _ = conn.execute(
-                        "INSERT OR IGNORE INTO conversations(id, kind, title, created_at) VALUES (?1,'group',?2,?3)",
-                        rusqlite::params![cid, title, chrono::Utc::now().to_rfc3339()],
-                    );
-                    let _ = conn.execute(
-                        "INSERT OR IGNORE INTO conversation_members(conversation_id, user_id, wrapped_group_key) VALUES (?1,?2,?3)",
-                        rusqlite::params![cid, my_id, wrap],
-                    );
+                if title != "Group" {
+                    let _ = db::set_conversation_title(&conn, group_cid, title);
+                }
+
+                // Ingest full members roster if attached to message or event
+                let inbound_members = payload
+                    .get("members")
+                    .or_else(|| payload.pointer("/group_event/members"))
+                    .and_then(|v| v.as_array());
+                if let Some(arr) = inbound_members {
+                    let mut upserted_count = 0;
+                    for m in arr {
+                        let uid = m.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                        if uid.is_empty() {
+                            continue;
+                        }
+                        let name = m.get("display_name").and_then(|v| v.as_str());
+                        let _ = db::upsert_member(&conn, group_cid, uid, None, name);
+                        if let Some(role) = m.get("role").and_then(|v| v.as_str()) {
+                            let _ = db::set_member_role(&conn, group_cid, uid, role);
+                        }
+                        upserted_count += 1;
+                    }
+                    println!("[GroupSync:deliver:roster] group_id={} ingested {} members from payload", group_cid, upserted_count);
+                }
+
+                // Ingest sender identity as a member of this group
+                if !deliver_sender_id.is_empty() {
+                    let sender_name = payload.pointer("/from_peer/display_name").and_then(|v| v.as_str());
+                    let _ = db::upsert_member(&conn, group_cid, deliver_sender_id, None, sender_name);
+                }
+
+                // Ingest my_id as a member of this group
+                if !my_id.is_empty() {
+                    let _ = db::upsert_member(&conn, group_cid, my_id, None, None);
+                }
+
+                // Update my wrapped_group_key if provided
+                let inbound_wrap = payload
+                    .get("wrapped_group_key")
+                    .or_else(|| payload.pointer("/group_event/wrapped_group_key"))
+                    .and_then(|v| v.as_str());
+                if let Some(wrap) = inbound_wrap {
+                    let _ = db::upsert_member(&conn, group_cid, my_id, Some(wrap), None);
+                    println!("[GroupSync:deliver:wrap] updated wrapped_group_key for my_id={} in group_id={}", my_id, group_cid);
                 }
             }
+
             if let Some(ev) = payload.get("group_event") {
                 let cid = payload
                     .get("conversation_id")
                     .and_then(|v| v.as_str())
                     .or_else(|| ev.get("conversation_id").and_then(|v| v.as_str()))
-                    .unwrap_or("");
+                    .unwrap_or(group_cid);
                 let op = ev.get("op").and_then(|v| v.as_str()).unwrap_or("");
                 let is_admin = !deliver_sender_id.is_empty()
                     && db::is_group_admin(&conn, cid, deliver_sender_id).unwrap_or(false);
                 if !cid.is_empty() && (op == "sync" || op == "add") {
-                    let title = payload
-                        .get("group_title")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| ev.get("title").and_then(|v| v.as_str()))
-                        .unwrap_or("Group");
-                    let _ = conn.execute(
-                        "INSERT OR IGNORE INTO conversations(id, kind, title, created_at) VALUES (?1,'group',?2,?3)",
-                        rusqlite::params![cid, title, chrono::Utc::now().to_rfc3339()],
-                    );
-                    let _ = db::set_conversation_title(&conn, cid, title);
                     if let Some(mca) = ev
                         .get("members_can_add")
                         .and_then(|v| v.as_bool())
@@ -663,21 +712,33 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     {
                         let _ = db::set_members_can_add(&conn, cid, mca);
                     }
-                    if let Some(arr) = payload.get("members").and_then(|v| v.as_array()) {
-                        for m in arr {
-                            let uid = m.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
-                            if uid.is_empty() {
-                                continue;
-                            }
-                            let name = m.get("display_name").and_then(|v| v.as_str());
-                            let _ = db::upsert_member(&conn, cid, uid, None, name);
-                            if let Some(role) = m.get("role").and_then(|v| v.as_str()) {
-                                let _ = db::set_member_role(&conn, cid, uid, role);
-                            }
-                        }
-                    }
-                    if let Some(wrap) = payload.get("wrapped_group_key").and_then(|v| v.as_str()) {
-                        let _ = db::upsert_member(&conn, cid, my_id, Some(wrap), None);
+                }
+                if op == "request_sync" && !cid.is_empty() && !deliver_sender_id.is_empty() {
+                    let title = db::conversation_title(&conn, cid).unwrap_or_else(|| "Group".into());
+                    let roster = Value::Array(db::list_members(&conn, cid).unwrap_or_default());
+                    let wrap = db::get_wrapped_group_key(&conn, cid, deliver_sender_id).ok().flatten();
+                    let profile_opt = db::get_profile(&conn).ok().flatten();
+                    if let Some(profile) = profile_opt {
+                        let state = app.state::<crate::state::AppState>();
+                        let fingerprint = state.fingerprint.lock().clone();
+                        let from_peer = from_peer_json(&profile, &fingerprint);
+                        println!(
+                            "[GroupSync:handle_request_sync] received request_sync from sender={} group_id={} has_wrap={}",
+                            deliver_sender_id,
+                            cid,
+                            wrap.is_some()
+                        );
+                        let _ = enqueue_group_event(
+                            &conn,
+                            &from_peer,
+                            cid,
+                            deliver_sender_id,
+                            &title,
+                            wrap,
+                            &roster,
+                            "sync",
+                            None,
+                        );
                     }
                 }
                 if op == "rename" && !cid.is_empty() {

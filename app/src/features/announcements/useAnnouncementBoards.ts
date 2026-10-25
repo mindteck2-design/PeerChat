@@ -10,7 +10,7 @@ export function useAnnouncementBoards(opts: {
   profile: Profile;
   identity: Identity;
   peers: Peer[];
-  ensureGroupKey: (convId: string) => Promise<Uint8Array>;
+  ensureGroupKey: (convId: string) => Promise<Uint8Array | null>;
   setAnnounceBoards: Dispatch<SetStateAction<Conversation[]>>;
   setStatus: Dispatch<SetStateAction<string>>;
 }) {
@@ -24,6 +24,7 @@ export function useAnnouncementBoards(opts: {
       for (const board of boards) {
         try {
           const gk = await ensureGroupKey(board.id);
+          if (!gk) continue;
           const pubs: Record<string, string> = {};
           for (const p of peers) {
             if (p.user_id === profile.id) continue;

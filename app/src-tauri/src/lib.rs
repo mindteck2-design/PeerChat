@@ -250,6 +250,7 @@ pub fn run() {
             list_conversations,
             open_dm,
             create_group,
+            request_group_sync,
             list_messages,
             retry_message,
             delete_message_for_me,

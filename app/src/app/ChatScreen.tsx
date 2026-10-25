@@ -572,6 +572,7 @@ export function ChatScreen({
         }
       }
       if (!cancel && Object.keys(gkNext).length) {
+        groupKeysRef.current = { ...groupKeysRef.current, ...gkNext };
         setGroupKeys((g) => ({ ...g, ...gkNext }));
       }
 
@@ -1775,6 +1776,10 @@ export function ChatScreen({
           );
         } else {
           const gk = await ensureGroupKey(target.id);
+          if (!gk) {
+            setStatus(`Waiting for group encryption key for ${target.title || "group"}...`);
+            continue;
+          }
           const enc = await encryptWithGroupKey(body, target.id, profile.id, gk, identity);
           const memberIds = await peerApi.memberIds(target.id);
           await peerApi.sendMessage(
@@ -1860,6 +1865,10 @@ export function ChatScreen({
     recipientIds?: string[]
   ) {
     const gk = await ensureGroupKey(conv.id);
+    if (!gk) {
+      console.warn(`[GroupCrypto:sendGroupSystemNotice] no group key for conv=${conv.id}`);
+      return;
+    }
     const enc = await encryptWithGroupKey(body, conv.id, profile.id, gk, identity);
     const members = recipientIds ?? (await peerApi.memberIds(conv.id));
     await peerApi.sendMessage(
@@ -1902,6 +1911,10 @@ export function ChatScreen({
       };
     } else {
       const gk = await ensureGroupKey(active.id);
+      if (!gk) {
+        setStatus("Waiting for group encryption key...");
+        return;
+      }
       const enc = await encryptWithGroupKey(body.trim(), active.id, profile.id, gk, identity);
       message = {
         kind,
@@ -2027,6 +2040,10 @@ export function ChatScreen({
       };
     } else {
       const gk = await ensureGroupKey(active.id);
+      if (!gk) {
+        setStatus("Waiting for group encryption key...");
+        return;
+      }
       const enc = await encryptWithGroupKey(body.trim(), active.id, profile.id, gk, identity);
       message = {
         kind: "text",
@@ -3652,9 +3669,21 @@ export function ChatScreen({
       const pubs: Record<string, string> = {
         [profile.id]: exportPublic(identity).x25519_public,
       };
+      let allPeers = peers;
+      if (groupPick.some((id) => !allPeers.find((p) => p.user_id === id && p.x25519_public))) {
+        try {
+          allPeers = await peerApi.listPeers();
+        } catch {
+          /* ignore */
+        }
+      }
       for (const id of groupPick) {
-        const u = peers.find((x) => x.user_id === id);
-        if (u) pubs[id] = u.x25519_public;
+        const u = allPeers.find((x) => x.user_id === id);
+        if (u?.x25519_public) {
+          pubs[id] = u.x25519_public;
+        } else {
+          console.warn(`[GroupCrypto:createGroup] member_id=${id} missing x25519_public in peers`);
+        }
       }
       const wraps = wrapGroupKeyForMembers(gk, identity, pubs);
       const conversation = await peerApi.createGroup(groupTitle.trim(), groupPick, wraps);
