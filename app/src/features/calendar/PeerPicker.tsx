@@ -13,6 +13,7 @@ import {
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMoreRounded";
 import SearchIcon from "@mui/icons-material/SearchRounded";
+import GroupsIcon from "@mui/icons-material/GroupsRounded";
 import type { Peer } from "../../peer";
 
 const scrollSx = {
@@ -59,17 +60,12 @@ export function PeerPicker({
     });
   }, [peers, q]);
 
-  const summary =
-    selectedIds.length > 0
-      ? `Include other people… (${selectedIds.length})`
-      : "Include other people…";
-
   return (
     <Accordion
       disableGutters
       elevation={0}
       expanded={expanded}
-      onChange={(_, next) => setExpanded(next)}
+      onChange={(_, next) => !disabled && setExpanded(next)}
       sx={{
         bgcolor: "transparent",
         border: "1px solid",
@@ -80,21 +76,35 @@ export function PeerPicker({
       }}
     >
       <AccordionSummary
-        expandIcon={<ExpandMoreIcon sx={{ color: "action.active" }} />}
+        expandIcon={<ExpandMoreIcon sx={{ color: "text.secondary", fontSize: 20 }} />}
         sx={{
-          minHeight: 40,
-          px: 1.25,
-          "& .MuiAccordionSummary-content": { my: 0.75, alignItems: "center", gap: 1 },
+          minHeight: 44,
+          px: 1.5,
+          bgcolor: "action.hover",
+          borderRadius: expanded ? "10px 10px 0 0" : "10px",
+          "& .MuiAccordionSummary-content": {
+            my: 0.5,
+            alignItems: "center",
+            justifyContent: "space-between",
+            width: "100%",
+          },
         }}
       >
-        <Typography variant="body2" color="text.secondary" fontWeight={600}>
-          {summary}
+        <Stack direction="row" spacing={1.25} alignItems="center">
+          <GroupsIcon sx={{ fontSize: 20, color: "primary.main" }} />
+          <Typography variant="body2" fontWeight={600} color="text.primary">
+            Share with people
+          </Typography>
+        </Stack>
+        <Typography variant="caption" color="text.secondary" fontWeight={600} sx={{ mr: 0.5 }}>
+          {selectedIds.length > 0
+            ? selectedIds.length === 1
+              ? "1 peer"
+              : `${selectedIds.length} peers`
+            : "Private"}
         </Typography>
-        {selectedIds.length > 0 && (
-          <Chip size="small" label={`${selectedIds.length}`} color="primary" sx={{ height: 20 }} />
-        )}
       </AccordionSummary>
-      <AccordionDetails sx={{ px: 1.25, pt: 0, pb: 1.25 }}>
+      <AccordionDetails sx={{ px: 1.5, pt: 1, pb: 1.25 }}>
         <TextField
           size="small"
           fullWidth

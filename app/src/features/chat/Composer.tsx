@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { parseCalendarShare } from "../calendar/CalendarShareCard";
 import { useLayoutEffect, useState } from "react";
 import {
   Box, Button, IconButton, List, ListItemButton, ListItemText, Paper,
@@ -486,7 +487,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                         ]
                           .filter(Boolean)
                           .join(" · ")
-                      : replyTo.kind === "file_notice"
+                      : replyTo.kind === "calendar_share" ? (() => { const s = parseCalendarShare(plain[replyTo.id] || ""); return s ? `📅 ${s.title}` : "📅 Calendar item"; })() : replyTo.kind === "file_notice"
                         ? "📎 File"
                         : truncate(plain[replyTo.id] || "…", 90)}
                   </Typography>

@@ -428,17 +428,17 @@ export function CalendarScreen({
         {/* Section 2: Month View (Left / Main Grid) */}
         <Box
           sx={{
-            flex: { xs: "0 0 auto", md: "1 1 54%" },
-            p: 2.5,
+            flex: { xs: "0 0 auto", md: "0 0 380px", lg: "0 0 420px" },
+            p: { xs: 1.5, md: 2 },
             borderRight: { md: "1px solid" },
             borderColor: "divider",
-            overflow: "auto",
+            overflow: "hidden",
             display: "flex",
             flexDirection: "column",
           }}
         >
           {/* Month Navigation Row */}
-          <Stack direction="row" alignItems="center" justifyContent="space-between" mb={2}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1.5}>
             <Stack direction="row" alignItems="center" spacing={0.5}>
               <IconButton
                 size="small"
@@ -452,7 +452,7 @@ export function CalendarScreen({
               >
                 <ChevronLeftIcon />
               </IconButton>
-              <Typography fontWeight={700} fontSize="1.05rem" sx={{ px: 0.5, minWidth: 150 }}>
+              <Typography fontWeight={700} fontSize="1.05rem" sx={{ px: 0.5, minWidth: 140 }}>
                 {monthLabel(cursor.y, cursor.m)}
               </Typography>
               <IconButton
@@ -489,9 +489,10 @@ export function CalendarScreen({
           <Box
             sx={{
               display: "grid",
-              gridTemplateColumns: "repeat(7, 1fr)",
-              gap: 0.75,
-              mb: 1,
+              gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+              gap: 0.5,
+              mb: 0.75,
+              width: "100%",
             }}
           >
             {weekdays.map((w) => (
@@ -501,7 +502,7 @@ export function CalendarScreen({
                 color="text.secondary"
                 fontWeight={600}
                 textAlign="center"
-                sx={{ textTransform: "uppercase", fontSize: "0.75rem", letterSpacing: "0.5px" }}
+                sx={{ textTransform: "uppercase", fontSize: "0.72rem", letterSpacing: "0.5px" }}
               >
                 {w}
               </Typography>
@@ -512,14 +513,14 @@ export function CalendarScreen({
           <Box
             sx={{
               display: "grid",
-              gridTemplateColumns: "repeat(7, 1fr)",
-              gap: 0.75,
-              flex: 1,
+              gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+              gap: 0.5,
+              width: "100%",
             }}
           >
             {grid.map((cell) => {
               if (cell.day == null) {
-                return <Box key={cell.key} sx={{ aspectRatio: "1", minHeight: 44 }} />;
+                return <Box key={cell.key} sx={{ height: { xs: 34, md: 38 } }} />;
               }
               const cellItems = byDay.get(cell.key) || [];
               const selected = cell.key === selectedDay;
@@ -535,15 +536,16 @@ export function CalendarScreen({
                   type="button"
                   onClick={() => setSelectedDay(cell.key)}
                   sx={{
-                    aspectRatio: "1",
-                    minHeight: 48,
+                    height: { xs: 34, md: 38 },
+                    width: "100%",
+                    minWidth: 0,
                     border: "1px solid",
                     borderColor: selected
                       ? "primary.main"
                       : isToday
                         ? "primary.light"
                         : "divider",
-                    borderRadius: 2.5,
+                    borderRadius: 2,
                     bgcolor: selected
                       ? "action.selected"
                       : isToday
@@ -555,8 +557,8 @@ export function CalendarScreen({
                     flexDirection: "column",
                     alignItems: "center",
                     justifyContent: "center",
-                    gap: 0.5,
-                    p: 0.5,
+                    gap: 0.2,
+                    p: 0.25,
                     color: "text.primary",
                     transition: "all 0.15s ease",
                     "&:hover": {
@@ -566,23 +568,24 @@ export function CalendarScreen({
                   }}
                 >
                   <Typography
-                    fontSize={14}
+                    fontSize={13}
                     fontWeight={isToday || selected ? 700 : 500}
                     color={isToday ? "primary.main" : "inherit"}
+                    lineHeight={1.1}
                   >
                     {cell.day}
                   </Typography>
 
                   {/* Clean Status Indicator Dots (Mockup Section 2) */}
-                  <Box sx={{ height: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Box sx={{ height: 5, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     {kinds.length > 0 && (
-                      <Stack direction="row" spacing={0.4} alignItems="center" justifyContent="center">
+                      <Stack direction="row" spacing={0.35} alignItems="center" justifyContent="center">
                         {kinds.slice(0, 4).map((kind) => (
                           <Box
                             key={kind}
                             sx={{
-                              width: 5,
-                              height: 5,
+                              width: 4.5,
+                              height: 4.5,
                               borderRadius: "50%",
                               bgcolor: KIND_THEMES[kind]?.color || "primary.main",
                             }}
@@ -600,11 +603,12 @@ export function CalendarScreen({
         {/* Section 3: Day View Timeline (Right Panel) */}
         <Box
           sx={{
-            flex: { xs: "1 1 auto", md: "1 1 46%" },
+            flex: 1,
+            minWidth: 0,
             display: "flex",
             flexDirection: "column",
             minHeight: 0,
-            p: 2.5,
+            p: { xs: 2, md: 2.5 },
           }}
         >
           {/* Day View Header */}

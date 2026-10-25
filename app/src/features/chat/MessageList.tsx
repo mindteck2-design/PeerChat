@@ -669,7 +669,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                         ]
                           .filter(Boolean)
                           .join(" · ")
-                      : quoted.kind === "file_notice"
+                      : quoted.kind === "calendar_share" ? (() => { const s = parseCalendarShare(plain[quoted.id] || ""); return s ? `📅 ${s.title}` : "📅 Calendar item"; })() : quoted.kind === "file_notice"
                         ? "📎 File"
                         : truncate(plain[quoted.id] || "…", 80)}
                 </Typography>

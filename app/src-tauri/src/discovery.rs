@@ -199,28 +199,41 @@ fn lan_ips_from_os(physical_only: bool) -> Vec<String> {
     }
 }
 
-/// Send UDP payload as broadcast out every usable NIC.
-/// Binding per-IP forces Windows to egress that interface (0.0.0.0 often picks Hyper-V).
-async fn broadcast_datagram(payload: &[u8], discovery_port: u16) {
+/// Derive /24 directed subnet broadcast address for an IPv4 string.
+pub(crate) fn subnet_broadcast_for(ip: &str) -> Option<String> {
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
+        Some(format!("{}.{}.{}.255", parts[0], parts[1], parts[2]))
+    } else {
+        None
+    }
+}
+
+/// Send UDP payload as broadcast from a specific active socket to global broadcast,
+/// loopback, and all detected LAN subnet broadcasts (e.g. 192.168.1.255).
+async fn broadcast_datagram_from(sock: &UdpSocket, payload: &[u8], discovery_port: u16) {
+    let _ = sock.set_broadcast(true);
+    let dest_global = format!("255.255.255.255:{discovery_port}");
+    let dest_loop = format!("127.0.0.1:{discovery_port}");
+    let _ = sock.send_to(payload, &dest_global).await;
+    let _ = sock.send_to(payload, &dest_loop).await;
+
     let mut ips = lan_ips_from_os(true);
     if ips.is_empty() {
         ips = lan_ips_from_os(false);
     }
-    if ips.is_empty() {
-        ips.push(lan_ip());
-    }
-    let dest_global = format!("255.255.255.255:{discovery_port}");
-    let dest_loop = format!("127.0.0.1:{discovery_port}");
     for ip in ips {
-        if let Ok(sock) = UdpSocket::bind(format!("{ip}:0")).await {
-            let _ = sock.set_broadcast(true);
-            let _ = sock.send_to(payload, &dest_global).await;
+        if let Some(sb) = subnet_broadcast_for(&ip) {
+            let dest_subnet = format!("{sb}:{discovery_port}");
+            let _ = sock.send_to(payload, &dest_subnet).await;
         }
     }
+}
+
+/// Send UDP payload as broadcast out every usable NIC.
+async fn broadcast_datagram(payload: &[u8], discovery_port: u16) {
     if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await {
-        let _ = sock.set_broadcast(true);
-        let _ = sock.send_to(payload, &dest_global).await;
-        let _ = sock.send_to(payload, &dest_loop).await;
+        broadcast_datagram_from(&sock, payload, discovery_port).await;
     }
 }
 
@@ -258,12 +271,14 @@ pub async fn run_beacon(
     let _ = sock.set_broadcast(true);
     let mut buf = [0u8; 4096];
     let mut ticker = tokio::time::interval(Duration::from_secs(2));
+    let mut tick_count: u64 = 0;
     loop {
         if *stop.borrow() {
             break;
         }
         tokio::select! {
             _ = ticker.tick() => {
+                tick_count = tick_count.wrapping_add(1);
                 beacon.ip = lan_ip();
                 beacon.port = listen_port;
                 beacon.display_name = live_display_name.lock().clone();
@@ -273,7 +288,7 @@ pub async fn run_beacon(
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0);
                 if let Ok(raw) = serde_json::to_vec(&beacon) {
-                    // Unicast only — global peer broadcast would leak presence to blocked peers.
+                    // Unicast to known non-blocked peers
                     let targets: Vec<String> = {
                         let conn = db.lock();
                         crate::db::list_peers(&conn)
@@ -292,10 +307,24 @@ pub async fn run_beacon(
                         unicast_datagram(&raw, &ip, discovery_port).await;
                     }
                 }
+                // Every 6 ticks (12s), or on initial tick, broadcast a who probe so other
+                // peers on the LAN reply with their beacons (recovers from sleep, Wi-Fi reconnect, or IP change).
+                if tick_count == 1 || tick_count % 6 == 0 {
+                    let who = br#"{"magic":"PEERCHAT","type":"who","v":"4"}"#;
+                    broadcast_datagram_from(&sock, who, discovery_port).await;
+                }
             }
             res = sock.recv_from(&mut buf) => {
-                if let Ok((n, addr)) = res {
-                    handle_packet(&hub, &sock, &buf[..n], addr, &beacon, &db).await;
+                match res {
+                    Ok((n, addr)) => {
+                        handle_packet(&hub, &sock, &buf[..n], addr, &beacon, &db).await;
+                    }
+                    Err(_e) => {
+                        #[cfg(windows)]
+                        if _e.raw_os_error() == Some(10054) {
+                            continue;
+                        }
+                    }
                 }
             }
         }
@@ -357,7 +386,65 @@ async fn handle_packet(
     } else if !is_usable_lan_ip(&peer.ip) {
         peer.ip = src;
     }
-    hub.upsert(peer).await;
+    hub.upsert(peer.clone()).await;
+
+    // Immediately persist peer status in SQLite so UI and outbox see the peer online right away.
+    let mut kick_flush = false;
+    {
+        let conn = db.lock();
+        if let Ok(Some(existing)) = crate::db::get_peer(&conn, &peer.user_id) {
+            let was_offline = existing.get("online").and_then(|v| v.as_bool()) == Some(false);
+            let old_ip = existing.get("last_ip").and_then(|v| v.as_str());
+            let ip_changed = old_ip != Some(peer.ip.as_str());
+            let same_fp = existing.get("tls_fingerprint").and_then(|v| v.as_str()) == Some(peer.fingerprint.as_str());
+            let same_x = existing.get("x25519_public").and_then(|v| v.as_str()) == Some(peer.x25519_public.as_str());
+            let same_e = existing.get("ed25519_public").and_then(|v| v.as_str()) == Some(peer.ed25519_public.as_str());
+            if !(same_fp && same_x && same_e) {
+                let _ = crate::db::adopt_peer_identity(
+                    &conn,
+                    &peer.user_id,
+                    &peer.fingerprint,
+                    &peer.x25519_public,
+                    &peer.ed25519_public,
+                );
+            }
+            let _ = crate::db::upsert_peer_with_team(
+                &conn,
+                &peer.user_id,
+                &peer.display_name,
+                &peer.x25519_public,
+                &peer.ed25519_public,
+                Some(&peer.ip),
+                Some(peer.port as i64),
+                Some(&peer.fingerprint),
+                true,
+                Some(peer.team.as_str()),
+            );
+            if was_offline || ip_changed {
+                let _ = crate::db::clear_peer_outbox_backoff(&conn, &peer.user_id);
+                kick_flush = true;
+            }
+        } else {
+            let _ = crate::db::upsert_peer_with_team(
+                &conn,
+                &peer.user_id,
+                &peer.display_name,
+                &peer.x25519_public,
+                &peer.ed25519_public,
+                Some(&peer.ip),
+                Some(peer.port as i64),
+                Some(&peer.fingerprint),
+                true,
+                Some(peer.team.as_str()),
+            );
+        }
+    }
+    if kick_flush {
+        let db_clone = db.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::runtime::outbox::flush_outbox(&db_clone).await;
+        });
+    }
 }
 
 /// A LAN device observed via ARP (no PeerTalk). MAC is never returned or stored.
@@ -465,14 +552,8 @@ pub async fn scan(discovery_port: u16, self_id: &str) -> Result<Vec<PeerBeacon>,
         .map_err(|e| e.to_string())?;
     sock.set_broadcast(true).map_err(|e| e.to_string())?;
     let who = br#"{"magic":"PEERCHAT","type":"who","v":"4"}"#;
-    // Ask every NIC to solicit replies — critical on PCs with Hyper-V/WSL switches.
-    broadcast_datagram(who, discovery_port).await;
-    let _ = sock
-        .send_to(who, format!("255.255.255.255:{discovery_port}"))
-        .await;
-    let _ = sock
-        .send_to(who, format!("127.0.0.1:{discovery_port}"))
-        .await;
+    // Broadcast from THIS socket to global broadcast, loopback, and all subnet broadcasts
+    broadcast_datagram_from(&sock, who, discovery_port).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut found: HashMap<String, PeerBeacon> = HashMap::new();
     let mut buf = [0u8; 4096];
@@ -503,6 +584,13 @@ pub async fn scan(discovery_port: u16, self_id: &str) -> Result<Vec<PeerBeacon>,
                     peer.ip = src;
                 }
                 found.insert(peer.user_id.clone(), peer);
+            }
+            Ok(Err(e)) => {
+                #[cfg(windows)]
+                if e.raw_os_error() == Some(10054) {
+                    continue;
+                }
+                break;
             }
             _ => break,
         }

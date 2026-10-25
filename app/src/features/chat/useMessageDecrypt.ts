@@ -9,6 +9,9 @@ import {
 import { peerApi, type Conversation, type Message, type Profile } from "../../peer";
 import { messageAttachmentIds } from "../../shared/messageMeta";
 
+/** Persistent in-memory plaintext cache across renders & conversation toggles */
+const plaintextCache = new Map<string, string>();
+
 /** Builds plaintext + filename maps for the active conversation (loaded window only). */
 export function useMessageDecrypt(opts: {
   active: Conversation | null;
@@ -21,6 +24,7 @@ export function useMessageDecrypt(opts: {
   fileNames: Record<string, string>;
   fileSizes: Record<string, number>;
   decryptGroupMessageText: (m: Message) => Promise<string>;
+  ensureGroupKey?: (convId: string) => Promise<Uint8Array>;
   setPlain: Dispatch<SetStateAction<Record<string, string>>>;
   setFileNames: Dispatch<SetStateAction<Record<string, string>>>;
   setFileSizes: Dispatch<SetStateAction<Record<string, number>>>;
@@ -39,6 +43,7 @@ export function useMessageDecrypt(opts: {
     fileNames,
     fileSizes,
     decryptGroupMessageText,
+    ensureGroupKey,
     setPlain,
     setFileNames,
     setFileSizes,
@@ -50,49 +55,83 @@ export function useMessageDecrypt(opts: {
     let cancel = false;
     (async () => {
       if (!active) return;
-      const gk = active.kind === "group" ? groupKeys[active.id] : undefined;
-      if (active.kind === "group" && !gk) return;
-      const patch: Record<string, string> = {};
-      const loadedIds = new Set<string>();
+
+      // 1. Synchronously hydrate any messages already present in plaintextCache
+      const instantPatch: Record<string, string> = {};
       for (const m of messages) {
-        if (
-          m.conversation_id !== active.id ||
-          m.kind === "file_notice" ||
-          m.kind === "deleted"
-        ) {
-          continue;
+        if (m.conversation_id === active.id && plaintextCache.has(m.id)) {
+          instantPatch[m.id] = plaintextCache.get(m.id)!;
         }
-        loadedIds.add(m.id);
-        try {
-          if (active.kind === "group" && gk) {
-            patch[m.id] = await decryptGroupMessageText(m);
-          } else {
-            const senderPub =
-              m.sender_id === profile.id
-                ? exportPublic(identity).ed25519_public
-                : peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
-            patch[m.id] = await decryptMessage(
-              { ...m, wrapped_keys: m.wrapped_keys || {} },
-              profile.id,
-              identity,
-              senderPub
-            );
-          }
-        } catch (err) {
-          console.error("decrypt", m.id, err);
-          patch[m.id] = "[unable to decrypt]";
-        }
-        if (cancel) return;
       }
-      if (!cancel) {
-        setPlain((prev) => {
-          const next: Record<string, string> = { ...patch };
-          // Keep plaintext for ids still in the loaded window that somehow weren't patched.
-          for (const [id, text] of Object.entries(prev)) {
-            if (loadedIds.has(id) && next[id] === undefined) next[id] = text;
-          }
-          return next;
-        });
+      if (Object.keys(instantPatch).length > 0) {
+        setPlain((prev) => ({ ...prev, ...instantPatch }));
+      }
+
+      // 2. Ensure group key if active conversation is a group
+      let gk = active.kind === "group" ? groupKeys[active.id] : undefined;
+      if (active.kind === "group" && !gk && ensureGroupKey) {
+        try {
+          gk = await ensureGroupKey(active.id);
+        } catch {
+          /* ignore */
+        }
+      }
+      if (active.kind === "group" && !gk) return;
+
+      const toDecrypt = messages.filter(
+        (m) =>
+          m.conversation_id === active.id &&
+          m.kind !== "file_notice" &&
+          m.kind !== "deleted" &&
+          !plaintextCache.has(m.id)
+      );
+
+      if (toDecrypt.length === 0) return;
+
+      const patch: Record<string, string> = {};
+      const batchSize = 10;
+      for (let i = 0; i < toDecrypt.length; i += batchSize) {
+        if (cancel) return;
+        const chunk = toDecrypt.slice(i, i + batchSize);
+        await Promise.all(
+          chunk.map(async (m) => {
+            try {
+              let text = "";
+              if (active.kind === "group" && gk) {
+                text = await decryptGroupMessageText(m);
+              } else {
+                let senderPub =
+                  m.sender_id === profile.id
+                    ? exportPublic(identity).ed25519_public
+                    : peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
+                if (!senderPub && m.sender_id !== profile.id) {
+                  try {
+                    const all = await peerApi.listPeers();
+                    const found = all.find((p) => p.user_id === m.sender_id);
+                    if (found?.ed25519_public) {
+                      senderPub = found.ed25519_public;
+                    }
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                text = await decryptMessage(
+                  { ...m, wrapped_keys: m.wrapped_keys || {} },
+                  profile.id,
+                  identity,
+                  senderPub
+                );
+              }
+              plaintextCache.set(m.id, text);
+              patch[m.id] = text;
+            } catch (err) {
+              console.error("decrypt", m.id, err);
+              patch[m.id] = "[unable to decrypt]";
+            }
+          })
+        );
+        if (cancel) return;
+        setPlain((prev) => ({ ...prev, ...patch }));
       }
     })();
     return () => {
@@ -106,6 +145,7 @@ export function useMessageDecrypt(opts: {
     active?.id,
     active?.kind,
     decryptGroupMessageText,
+    ensureGroupKey,
     identity,
     profile.id,
     setPlain,

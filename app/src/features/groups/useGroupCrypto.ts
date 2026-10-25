@@ -120,7 +120,15 @@ export function useGroupCrypto(opts: {
           } catch (e) {
             console.error(e);
           }
+          return;
         }
+        const gk = createGroupKey();
+        await persistMyGroupWrap(convId, gk);
+        const hist = await loadPersistedKeyHistory(convId);
+        groupKeyHistoryRef.current = { ...groupKeyHistoryRef.current, [convId]: hist };
+        setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
+        groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
+        setGroupKeys((g) => ({ ...g, [convId]: gk }));
         return;
       }
       try {

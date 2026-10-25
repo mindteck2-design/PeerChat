@@ -334,6 +334,12 @@ pub fn send_message(
     };
 
     let _ = profile;
+    {
+        let conn = state.db.lock();
+        for rid in &recipient_ids {
+            let _ = db::clear_peer_outbox_backoff(&conn, rid);
+        }
+    }
     kick_flush(&state);
     Ok(msg)
 }

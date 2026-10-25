@@ -597,6 +597,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     fp.as_deref(),
                     true,
                 );
+                let _ = db::clear_peer_outbox_backoff(&conn, &uid);
                 if payload
                     .get("profile_update")
                     .and_then(|v| v.as_bool())
@@ -845,6 +846,17 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
             } else {
                 None
             };
+            let sender_to_flush = if !deliver_sender_id.is_empty() {
+                Some(deliver_sender_id.to_string())
+            } else {
+                payload.get("from_peer").and_then(|p| p.get("user_id")).and_then(|v| v.as_str()).map(|s| s.to_string())
+            };
+            if let Some(_uid) = sender_to_flush {
+                let db_clone = db.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::runtime::outbox::flush_outbox(&db_clone).await;
+                });
+            }
             http_ok(http_json(200, json!({"ok": true})), notify)
         }
         ("POST", "/v1/typing") => {

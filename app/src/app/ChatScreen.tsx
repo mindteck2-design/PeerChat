@@ -964,10 +964,9 @@ export function ChatScreen({
     let cancel = false;
     stickToBottomRef.current = true;
     setShowJumpToLatest(false);
-    setChatPaintReady(false);
+    setChatPaintReady(true);
     setMessages([]);
     setHasMoreOlder(false);
-    setPlain({});
     setMembers([]);
     setMembersLoaded(conv.kind !== "group");
     setMembersOpen(false);
@@ -983,7 +982,10 @@ export function ChatScreen({
     async function pull(isInitial = false) {
       if (conv.kind === "group") {
         try {
-          if (!cancel) await syncGroupKeyIfRotated(conv.id);
+          if (!cancel) {
+            await ensureGroupKey(conv.id);
+            await syncGroupKeyIfRotated(conv.id);
+          }
         } catch (err) {
           console.error(err);
           if (
@@ -1256,6 +1258,7 @@ export function ChatScreen({
     fileNames,
     fileSizes,
     decryptGroupMessageText,
+    ensureGroupKey,
     setPlain,
     setFileNames,
     setFileSizes,
@@ -4196,8 +4199,24 @@ export function ChatScreen({
                   }}
                   sx={{ cursor: active ? "pointer" : "default" }}
                 >
-                  <Typography variant="subtitle1" fontWeight={700} noWrap>
-                    {active ? activeTitle : "Select a conversation"}
+                  <Typography variant="subtitle1" fontWeight={700} noWrap sx={{ display: "flex", alignItems: "center", minWidth: 0 }}>
+                    <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {active ? activeTitle : "Select a conversation"}
+                    </Box>
+                    {active?.kind === "dm" && activeDmPeer?.team?.trim() && (
+                      <Box
+                        component="span"
+                        sx={{
+                          fontWeight: 500,
+                          color: "text.secondary",
+                          fontSize: "0.875rem",
+                          ml: 0.75,
+                          flexShrink: 0,
+                        }}
+                      >
+                        • {activeDmPeer.team.trim()}
+                      </Box>
+                    )}
                   </Typography>
                   {typingLabel ? (
                     <Typography variant="caption" color="primary" display="block">

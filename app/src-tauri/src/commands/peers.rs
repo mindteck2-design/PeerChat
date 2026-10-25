@@ -56,6 +56,7 @@ pub async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, St
         for p in map.values() {
             // Read existing row once — used for pinned-key preservation and IP-change detection.
             let existing = db::get_peer(&conn, &p.user_id).ok().flatten();
+            let was_offline = existing.as_ref().map(|e| e["online"].as_bool().unwrap_or(false) == false).unwrap_or(true);
             let old_ip = existing.as_ref().and_then(|e| e["last_ip"].as_str().map(|s| s.to_string()));
             let ip_changed = old_ip.as_deref() != Some(p.ip.as_str())
                 && discovery::is_usable_lan_ip(&p.ip);
@@ -87,7 +88,7 @@ pub async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, St
                 true,
                 Some(p.team.as_str()),
             )?;
-            if ip_changed {
+            if ip_changed || was_offline {
                 peers_to_kick.push(p.user_id.clone());
             }
             out.push(json!({
