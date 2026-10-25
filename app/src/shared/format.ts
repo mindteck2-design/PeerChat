@@ -100,9 +100,16 @@ export function conversationPreviewLine(
   }
   if (kind === "calendar_share") {
     try {
-      const j = JSON.parse(decrypted) as { title?: string; kind?: string };
+      const j = JSON.parse(decrypted) as { title?: string; kind?: string; type?: string };
       const title = (j.title || "Calendar item").trim();
-      body = senderId === myId ? `Shared: ${title}` : `Calendar: ${title}`;
+      if (j.type === "deleted") {
+        body =
+          senderId === myId
+            ? `Deleted calendar: ${title}`
+            : `Calendar deleted: ${title}`;
+      } else {
+        body = senderId === myId ? `Shared: ${title}` : `Calendar: ${title}`;
+      }
     } catch {
       body = "Calendar share";
     }

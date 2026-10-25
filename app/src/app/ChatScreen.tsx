@@ -2158,7 +2158,7 @@ export function ChatScreen({
       [profile.id]: exportPublic(identity).x25519_public,
     };
     const body = JSON.stringify({
-      type: "invite",
+      type: share.deleted ? "deleted" : "invite",
       itemId: share.itemId,
       title: share.title,
       kind: share.kind,

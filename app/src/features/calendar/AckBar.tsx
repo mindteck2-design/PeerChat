@@ -64,7 +64,7 @@ export function AckBar({
           ))}
         </Stack>
       )}
-      {!readOnly && !iAcked && !iRejected && (
+      {!readOnly && !iAcked && !iRejected && expected.some((id) => id === myId) && (
         <Button
           size="small"
           variant="outlined"

@@ -512,9 +512,11 @@ export function CalendarItemEditor({
         {/* Share with people */}
         <PeerPicker
           peers={peers}
-          selectedIds={draft.participant_ids}
+          selectedIds={draft.participant_ids.filter((id) => id !== myId)}
           disabled={fieldsLocked}
-          onChange={(participant_ids) => setDraft({ ...draft, participant_ids })}
+          onChange={(participant_ids) =>
+            setDraft({ ...draft, participant_ids: participant_ids.filter((id) => id !== myId) })
+          }
         />
 
         {showAck && !inEdit && (
@@ -525,7 +527,7 @@ export function CalendarItemEditor({
             myName={myName}
             peers={peers}
             disabled={busy || !liveOk}
-            readOnly={!liveOk}
+            readOnly={!liveOk || owner}
             onAck={onAck}
           />
         )}

@@ -4,7 +4,6 @@ import {
   Button,
   Chip,
   LinearProgress,
-  Paper,
   Stack,
   Typography,
 } from "@mui/material";
@@ -15,13 +14,14 @@ import StickyNote2Icon from "@mui/icons-material/StickyNote2Rounded";
 import CheckCircleIcon from "@mui/icons-material/CheckCircleRounded";
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForwardRounded";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import { listen } from "@tauri-apps/api/event";
 import { peerApi, type CalendarItem, type CalendarKind } from "../../peer";
 import { formatTime12 } from "./calendarRules";
 import { KIND_THEMES, parseChecklist } from "./calendarTypes";
 
 export type CalendarSharePayload = {
-  type: "invite";
+  type: "invite" | "deleted";
   itemId: string;
   title: string;
   kind: CalendarKind;
@@ -36,7 +36,7 @@ export function parseCalendarShare(raw: string): CalendarSharePayload | null {
     const o = JSON.parse(raw);
     if (
       o &&
-      o.type === "invite" &&
+      (o.type === "invite" || o.type === "deleted") &&
       typeof o.itemId === "string" &&
       o.itemId &&
       typeof o.title === "string" &&
@@ -89,6 +89,20 @@ function responseOf(acks: Record<string, string> | undefined, myId: string | und
   return "accepted" as const;
 }
 
+function kindNoun(kind: CalendarKind): string {
+  switch (kind) {
+    case "meeting":
+      return "meeting";
+    case "todo":
+      return "to-do";
+    case "reminder":
+      return "reminder";
+    case "note":
+    default:
+      return "note";
+  }
+}
+
 export function CalendarShareCard(props: {
   payload: CalendarSharePayload;
   mine: boolean;
@@ -98,10 +112,14 @@ export function CalendarShareCard(props: {
 }) {
   const { payload, mine, peerName, myId, onOpen } = props;
   const [liveItem, setLiveItem] = useState<CalendarItem | null>(null);
+  const [sawLive, setSawLive] = useState(false);
+  const [itemGone, setItemGone] = useState(payload.type === "deleted");
   const [busy, setBusy] = useState(false);
 
   const kind = (liveItem?.kind || payload.kind) as CalendarKind;
   const theme = KIND_THEMES[kind] || KIND_THEMES.note;
+  // Tombstone only when chat says deleted, or we had the item and it disappeared (owner delete fanout).
+  const deleted = payload.type === "deleted" || itemGone;
 
   // Refresh live item from SQLite
   const fetchLive = useCallback(async () => {
@@ -109,21 +127,35 @@ export function CalendarShareCard(props: {
       const hit = await peerApi.getCalendarItem(payload.itemId);
       if (hit) {
         setLiveItem(hit);
-      } else {
-        const items = await peerApi.listCalendarItems(payload.day, payload.day);
-        const dayHit = items.find((i) => i.id === payload.itemId);
-        if (dayHit) setLiveItem(dayHit);
+        setSawLive(true);
+        setItemGone(false);
+        return;
       }
+      const items = await peerApi.listCalendarItems(payload.day, payload.day);
+      const dayHit = items.find((i) => i.id === payload.itemId);
+      if (dayHit) {
+        setLiveItem(dayHit);
+        setSawLive(true);
+        setItemGone(false);
+        return;
+      }
+      setLiveItem(null);
+      // Don't mark gone on first miss (share may still be delivering); only after we once had it.
+      setItemGone((prev) => prev || sawLive);
     } catch {
       /* ignore offline or not yet delivered */
     }
-  }, [payload.day, payload.itemId]);
+  }, [payload.day, payload.itemId, sawLive]);
 
   useEffect(() => {
+    if (payload.type === "deleted") {
+      setItemGone(true);
+      return;
+    }
     void fetchLive();
-  }, [fetchLive]);
+  }, [fetchLive, payload.type]);
 
-  // Listen for real-time calendar updates
+  // Listen for real-time calendar updates (including remote deletes)
   useEffect(() => {
     let un: (() => void) | undefined;
     void listen<{ kind?: string }>("inbox-updated", (ev) => {
@@ -173,6 +205,66 @@ export function CalendarShareCard(props: {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (deleted) {
+    return (
+      <Box
+        sx={{
+          minWidth: 240,
+          maxWidth: 320,
+          pl: 1.25,
+          pr: 0.5,
+          py: 0.25,
+          borderLeft: "3.5px solid",
+          borderColor: "text.disabled",
+          color: "text.primary",
+          opacity: 0.92,
+        }}
+      >
+        <Stack direction="row" alignItems="center" spacing={1} mb={0.75}>
+          <Box
+            sx={{
+              width: 24,
+              height: 24,
+              borderRadius: 1.5,
+              display: "grid",
+              placeItems: "center",
+              bgcolor: "action.hover",
+              color: "text.secondary",
+              flexShrink: 0,
+            }}
+          >
+            <DeleteOutlineIcon sx={{ fontSize: 14 }} />
+          </Box>
+          <Typography
+            variant="caption"
+            fontWeight={700}
+            sx={{
+              color: "text.secondary",
+              textTransform: "uppercase",
+              fontSize: "0.7rem",
+              letterSpacing: "0.5px",
+            }}
+          >
+            {theme.label} deleted
+          </Typography>
+        </Stack>
+        <Typography
+          fontWeight={700}
+          fontSize="0.9rem"
+          lineHeight={1.25}
+          mb={0.35}
+          noWrap
+          sx={{ textDecoration: "line-through", color: "text.secondary" }}
+        >
+          {payload.title}
+        </Typography>
+        <Typography variant="caption" color="text.secondary" display="block" fontSize="0.75rem">
+          This {kindNoun(kind)} was deleted by the owner.
+        </Typography>
+      </Box>
+    );
   }
 
   return (

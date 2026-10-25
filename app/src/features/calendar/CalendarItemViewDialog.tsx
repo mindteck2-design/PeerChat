@@ -379,7 +379,10 @@ export function CalendarItemViewDialog({
             <Stack spacing={1}>
               {participantList.map((p) => {
                 const ackStamp = item.acks?.[p.id];
-                const isAcked = !!ackStamp;
+                const isAcked =
+                  !!ackStamp &&
+                  !ackStamp.startsWith("rejected|") &&
+                  ackStamp !== "rejected";
                 return (
                   <Paper
                     key={p.id}
@@ -504,8 +507,12 @@ export function CalendarItemViewDialog({
 
         {/* Right Actions: Acknowledge, Edit, Close */}
         <Stack direction="row" spacing={1} alignItems="center">
-          {/* Acknowledge button for meetings & reminders if not yet acked and liveOk */}
-          {(item.kind === "meeting" || item.kind === "reminder") && shared && liveOk && !hasAcked && (
+          {/* Sharees only — owners don't need to acknowledge their own item */}
+          {!owner &&
+            (item.kind === "meeting" || item.kind === "reminder") &&
+            shared &&
+            liveOk &&
+            !hasAcked && (
             <Button
               size="small"
               variant="contained"

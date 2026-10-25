@@ -42,8 +42,10 @@ import {
   type CalendarDraft,
 } from "./calendarTypes";
 
-function itemToDraft(it: CalendarItem, myId: string): CalendarDraft {
+function itemToDraft(it: CalendarItem, _myId?: string): CalendarDraft {
   const checklist = parseChecklist(it.checklist);
+  // Keep full participant_ids (including the local user when they are a sharee).
+  // Filtering "me" out here made sharees see Participants (1) and "2/1 acknowledged".
   return {
     id: it.id,
     title: it.title,
@@ -52,7 +54,7 @@ function itemToDraft(it: CalendarItem, myId: string): CalendarDraft {
     day: it.day,
     time: it.time || "",
     meeting_url: it.meeting_url || "",
-    participant_ids: [...(it.participant_ids || [])].filter((id) => id !== myId),
+    participant_ids: [...(it.participant_ids || [])],
     created_by: it.created_by,
     done: !!it.done,
     checklist:
@@ -88,6 +90,8 @@ export type CalendarShareNotify = {
   day: string;
   time?: string | null;
   meeting_url?: string | null;
+  /** When set, chat cards should show a deleted tombstone instead of the invite. */
+  deleted?: boolean;
 };
 
 const timelineScrollSx = {
@@ -294,14 +298,17 @@ export function CalendarScreen({
           editor.kind === "meeting" && editor.meeting_url?.trim()
             ? editor.meeting_url.trim()
             : null,
-        participant_ids: editor.participant_ids,
+        participant_ids: editor.participant_ids.filter((id) => id !== myId),
         done: editor.done,
-        shared: editor.participant_ids.length > 0,
+        shared: editor.participant_ids.filter((id) => id !== myId).length > 0,
         created_by: myId,
         checklist: editor.kind === "todo" ? editor.checklist : [],
         acks: editor.acks || {},
       });
-      const notifyIds = editor.participant_ids.filter((id) => !prevParts.includes(id));
+      const savedParts = (saved?.participant_ids || editor.participant_ids || []).filter(
+        (id: string) => id !== myId
+      );
+      const notifyIds = savedParts.filter((id: string) => !prevParts.includes(id));
       if (onNotifyShare && notifyIds.length && saved?.id) {
         for (const peerId of notifyIds) {
           try {
@@ -321,7 +328,7 @@ export function CalendarScreen({
       setEditor(null);
       await refresh();
       onStatus?.(
-        editor.participant_ids.length
+        savedParts.length
           ? "Saved and shared with selected people"
           : "Saved to your calendar"
       );
@@ -333,9 +340,28 @@ export function CalendarScreen({
   }
 
   async function removeItem(id: string) {
+    const existing = items.find((it) => it.id === id);
+    const recipients = [...(existing?.participant_ids || [])].filter((pid) => pid && pid !== myId);
     setBusy(true);
     try {
       await peerApi.deleteCalendarItem(id);
+      if (onNotifyShare && recipients.length && existing) {
+        for (const peerId of recipients) {
+          try {
+            await onNotifyShare(peerId, {
+              itemId: id,
+              title: existing.title,
+              kind: existing.kind,
+              day: existing.day,
+              time: existing.time ?? null,
+              meeting_url: existing.meeting_url ?? null,
+              deleted: true,
+            });
+          } catch (err: any) {
+            onStatus?.(err?.message || String(err));
+          }
+        }
+      }
       if (editor?.id === id) setEditor(null);
       if (viewItem?.id === id) setViewItem(null);
       await refresh();
@@ -425,16 +451,18 @@ export function CalendarScreen({
           overflow: "hidden",
         }}
       >
-        {/* Section 2: Month View (Left / Main Grid) */}
+        {/* Section 2: Month View (Left ~40%) */}
         <Box
           sx={{
-            flex: { xs: "0 0 auto", md: "0 0 380px", lg: "0 0 420px" },
+            flex: { xs: "0 0 auto", md: "0 0 40%" },
+            maxWidth: { md: "40%" },
             p: { xs: 1.5, md: 2 },
             borderRight: { md: "1px solid" },
             borderColor: "divider",
             overflow: "hidden",
             display: "flex",
             flexDirection: "column",
+            minHeight: 0,
           }}
         >
           {/* Month Navigation Row */}
@@ -509,18 +537,22 @@ export function CalendarScreen({
             ))}
           </Box>
 
-          {/* Month Day Cells */}
+          {/* Month Day Cells — fill leftover vertical space under the grid */}
           <Box
             sx={{
               display: "grid",
               gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
-              gap: 0.5,
+              gridAutoRows: "minmax(44px, 1fr)",
+              gap: 0.75,
               width: "100%",
+              flex: 1,
+              minHeight: 0,
+              alignContent: "stretch",
             }}
           >
             {grid.map((cell) => {
               if (cell.day == null) {
-                return <Box key={cell.key} sx={{ height: { xs: 34, md: 38 } }} />;
+                return <Box key={cell.key} sx={{ minHeight: { xs: 40, md: 48 } }} />;
               }
               const cellItems = byDay.get(cell.key) || [];
               const selected = cell.key === selectedDay;
@@ -536,7 +568,8 @@ export function CalendarScreen({
                   type="button"
                   onClick={() => setSelectedDay(cell.key)}
                   sx={{
-                    height: { xs: 34, md: 38 },
+                    minHeight: { xs: 40, md: 48 },
+                    height: "100%",
                     width: "100%",
                     minWidth: 0,
                     border: "1px solid",
@@ -557,8 +590,8 @@ export function CalendarScreen({
                     flexDirection: "column",
                     alignItems: "center",
                     justifyContent: "center",
-                    gap: 0.2,
-                    p: 0.25,
+                    gap: 0.35,
+                    p: 0.35,
                     color: "text.primary",
                     transition: "all 0.15s ease",
                     "&:hover": {
@@ -568,8 +601,8 @@ export function CalendarScreen({
                   }}
                 >
                   <Typography
-                    fontSize={13}
-                    fontWeight={isToday || selected ? 700 : 500}
+                    fontSize={{ xs: 15, md: 17 }}
+                    fontWeight={isToday || selected ? 700 : 600}
                     color={isToday ? "primary.main" : "inherit"}
                     lineHeight={1.1}
                   >
@@ -577,15 +610,15 @@ export function CalendarScreen({
                   </Typography>
 
                   {/* Clean Status Indicator Dots (Mockup Section 2) */}
-                  <Box sx={{ height: 5, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Box sx={{ height: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     {kinds.length > 0 && (
-                      <Stack direction="row" spacing={0.35} alignItems="center" justifyContent="center">
+                      <Stack direction="row" spacing={0.4} alignItems="center" justifyContent="center">
                         {kinds.slice(0, 4).map((kind) => (
                           <Box
                             key={kind}
                             sx={{
-                              width: 4.5,
-                              height: 4.5,
+                              width: 5,
+                              height: 5,
                               borderRadius: "50%",
                               bgcolor: KIND_THEMES[kind]?.color || "primary.main",
                             }}
@@ -600,10 +633,11 @@ export function CalendarScreen({
           </Box>
         </Box>
 
-        {/* Section 3: Day View Timeline (Right Panel) */}
+        {/* Section 3: Day View Timeline (Right ~60%) */}
         <Box
           sx={{
-            flex: 1,
+            flex: { xs: 1, md: "0 0 60%" },
+            maxWidth: { md: "60%" },
             minWidth: 0,
             display: "flex",
             flexDirection: "column",
@@ -899,7 +933,14 @@ export function CalendarScreen({
                               <Stack direction="row" spacing={0.5} alignItems="center">
                                 <PersonOutlineIcon sx={{ fontSize: 15, color: "text.secondary" }} />
                                 <Typography variant="caption" color="text.secondary">
-                                  {(it.participant_ids || []).length + 1} participants
+                                  {
+                                    Array.from(
+                                      new Set(
+                                        [it.created_by, ...(it.participant_ids || [])].filter(Boolean)
+                                      )
+                                    ).length
+                                  }{" "}
+                                  participants
                                 </Typography>
                               </Stack>
                             )}
