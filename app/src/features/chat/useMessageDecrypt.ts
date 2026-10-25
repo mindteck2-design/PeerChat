@@ -20,8 +20,10 @@ import { messageAttachmentIds } from "../../shared/messageMeta";
 /** Persistent in-memory plaintext cache across renders & conversation toggles */
 const plaintextCache = new Map<string, string>();
 
-/** Pending decrypts that failed only because the group key was not ready yet. */
-const pendingMissingKey = new Set<string>();
+/** Message ids waiting on transient decrypt failures (missing wrap / key / peer pub). */
+const pendingRetry = new Map<string, number>();
+
+const UNABLE = "[unable to decrypt]";
 
 export function getCachedPlaintext(messageId: string): string | undefined {
   return plaintextCache.get(messageId);
@@ -29,33 +31,37 @@ export function getCachedPlaintext(messageId: string): string | undefined {
 
 /** Seed plaintext for an outgoing (or known) message so UI never flashes "…". */
 export function cachePlaintext(messageId: string, text: string): void {
-  if (!messageId || text == null) return;
+  if (!messageId || text == null || text === "") return;
   plaintextCache.set(messageId, text);
-  pendingMissingKey.delete(messageId);
+  pendingRetry.delete(messageId);
 }
 
-export function seedPlainFromCache(
-  messages: Message[],
-  conversationId: string
-): Record<string, string> {
+export function seedPlainFromCache(messages: Message[]): Record<string, string> {
   const patch: Record<string, string> = {};
   for (const m of messages) {
-    if (m.conversation_id === conversationId && plaintextCache.has(m.id)) {
+    if (plaintextCache.has(m.id)) {
       patch[m.id] = plaintextCache.get(m.id)!;
     }
   }
   return patch;
 }
 
-function messageFingerprint(messages: Message[], conversationId: string): string {
+/** Fingerprint the loaded window (all rows — DM lists can mix related conversation ids). */
+function messageFingerprint(messages: Message[]): string {
+  if (!messages.length) return "0";
   let n = 0;
   let last = "";
+  let wrapBits = 0;
   for (const m of messages) {
-    if (m.conversation_id !== conversationId) continue;
     n += 1;
     last = m.id;
+    // Include a cheap wrap/ciphertext signal so late-hydrated crypto fields retrigger decrypt.
+    const wraps = m.wrapped_keys;
+    if (wraps && typeof wraps === "object") wrapBits += Object.keys(wraps).length;
+    else if (typeof wraps === "string") wrapBits += wraps.length;
+    wrapBits += (m.ciphertext || "").length & 0xff;
   }
-  return `${n}:${last}`;
+  return `${n}:${last}:${wrapBits}`;
 }
 
 function keyEpoch(keys: Record<string, Uint8Array>, convId: string | undefined): string {
@@ -63,6 +69,30 @@ function keyEpoch(keys: Record<string, Uint8Array>, convId: string | undefined):
   const k = keys[convId];
   if (!k || k.byteLength < 4) return "missing";
   return `${k[0]}-${k[1]}-${k[2]}-${k[3]}-${k.byteLength}`;
+}
+
+/** Tauri/SQLite sometimes resurface wrapped_keys as a JSON string. */
+function normalizeWrappedKeys(
+  raw: Message["wrapped_keys"]
+): Record<string, { eph_pub: string; nonce: string; wrapped: string }> {
+  if (!raw) return {};
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      return {};
+    }
+    return {};
+  }
+  if (typeof raw === "object" && !Array.isArray(raw)) return raw as any;
+  return {};
+}
+
+function isTransientDecryptError(reason: string): boolean {
+  return /no wrapped key|no group key|waiting for group key|missing signature|invalid message signature/i.test(
+    reason
+  );
 }
 
 /** Builds plaintext + filename maps for the active conversation (loaded window only). */
@@ -104,7 +134,6 @@ export function useMessageDecrypt(opts: {
     setFileMetaReady,
   } = opts;
 
-  // Stable refs so peer/online churn and callback identity do not cancel in-flight decrypts.
   const peersRef = useRef(peers);
   peersRef.current = peers;
   const decryptGroupRef = useRef(decryptGroupMessageText);
@@ -117,20 +146,23 @@ export function useMessageDecrypt(opts: {
   profileIdRef.current = profile.id;
   const groupKeysRef = useRef(groupKeys);
   groupKeysRef.current = groupKeys;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryAttemptRef = useRef(0);
   const [retryTick, setRetryTick] = useState(0);
 
   const activeId = active?.id;
   const activeKind = active?.kind;
-  const msgFp = activeId ? messageFingerprint(messages, activeId) : "";
+  const msgFp = messageFingerprint(messages);
   const gkEpoch = keyEpoch(groupKeys, activeId);
   const histLen = activeId ? (groupKeyHistory[activeId]?.length ?? 0) : 0;
 
   // Paint-time hydrate from cache so chat switches do not flash "…" for known plaintext.
   useLayoutEffect(() => {
     if (!activeId) return;
-    const patch = seedPlainFromCache(messages, activeId);
+    // IMPORTANT: do not filter by conversation_id — DM windows include related/legacy ids.
+    const patch = seedPlainFromCache(messages);
     const ids = Object.keys(patch);
     if (!ids.length) return;
     setPlain((prev) => {
@@ -149,92 +181,105 @@ export function useMessageDecrypt(opts: {
   useEffect(() => {
     const generation = Symbol("decrypt");
     const convIdAtStart = activeId;
-    // Snapshot ids so concurrent message merges don't drop work mid-flight.
-    const messagesSnapshot = messages;
+    const kindAtStart = activeKind;
+    // Always decrypt the full loaded window (includes dm_related legacy conversation rows).
+    const messagesSnapshot = messagesRef.current;
 
     const commitPlain = (patch: Record<string, string>) => {
       const ids = Object.keys(patch);
       if (!ids.length) return;
-      // Always commit successful plaintext — never drop it because a newer effect started.
       for (const id of ids) {
         const text = patch[id]!;
-        if (text && text !== "[unable to decrypt]") {
+        // Cache successful decrypts including empty bodies so we do not spin forever.
+        // Never cache UNABLE — allow retry when keys/wraps arrive later.
+        if (text !== UNABLE) {
           plaintextCache.set(id, text);
-          pendingMissingKey.delete(id);
+          pendingRetry.delete(id);
         }
       }
       setPlain((prev) => ({ ...prev, ...patch }));
     };
 
-    (async () => {
-      if (!convIdAtStart || !activeKind) return;
+    const scheduleRetry = (why: string) => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+      const attempt = retryAttemptRef.current;
+      const delay = Math.min(6_000, 300 * Math.pow(1.5, attempt));
+      retryAttemptRef.current = attempt + 1;
+      appLog("info", "[Decrypt:schedule_retry]", {
+        conversation_id: convIdAtStart,
+        why,
+        attempt,
+        delay_ms: delay,
+      });
+      retryTimerRef.current = setTimeout(() => {
+        setRetryTick((n) => n + 1);
+      }, delay);
+    };
 
-      const instant = seedPlainFromCache(messagesSnapshot, convIdAtStart);
+    (async () => {
+      if (!convIdAtStart || !kindAtStart) return;
+
+      const instant = seedPlainFromCache(messagesSnapshot);
       if (Object.keys(instant).length) {
         commitPlain(instant);
       }
 
       let gk =
-        activeKind === "group" ? groupKeysRef.current[convIdAtStart] : undefined;
-      if (activeKind === "group" && !gk && ensureGroupKeyRef.current) {
+        kindAtStart === "group" ? groupKeysRef.current[convIdAtStart] : undefined;
+      if (kindAtStart === "group" && !gk && ensureGroupKeyRef.current) {
         try {
           const loaded = await ensureGroupKeyRef.current(convIdAtStart);
           if (loaded) gk = loaded;
         } catch (err) {
-          appLog("warn", "[GroupCrypto:decrypt:ensure_err]", {
-            group_id: convIdAtStart,
+          appLog("warn", "[Decrypt:ensure_group_key_err]", {
+            conversation_id: convIdAtStart,
             member_id: profileIdRef.current,
             err: String(err),
           });
         }
       }
 
-      // Never abort after awaits due to messages/peers churn — commitPlain is merge-safe.
-
-      if (activeKind === "group" && !gk) {
+      if (kindAtStart === "group" && !gk) {
         const pending = messagesSnapshot.filter(
-          (m) =>
-            m.conversation_id === convIdAtStart &&
-            m.kind !== "file_notice" &&
-            m.kind !== "deleted" &&
-            !plaintextCache.has(m.id)
+          (m) => m.kind !== "file_notice" && m.kind !== "deleted" && !plaintextCache.has(m.id)
         );
-        for (const m of pending) pendingMissingKey.add(m.id);
-        appLog("info", "[GroupCrypto:decrypt:waiting_key]", {
-          group_id: convIdAtStart,
+        for (const m of pending) pendingRetry.set(m.id, (pendingRetry.get(m.id) || 0) + 1);
+        appLog("info", "[Decrypt:waiting_group_key]", {
+          conversation_id: convIdAtStart,
           member_id: profileIdRef.current,
           pending_count: pending.length,
-          message_ids: pending.slice(0, 8).map((m) => m.id),
-          attempt: retryAttemptRef.current,
+          sample_ids: pending.slice(0, 6).map((m) => m.id),
+          sample_conv_ids: pending.slice(0, 6).map((m) => m.conversation_id),
         });
-        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-        const delay = Math.min(8_000, 400 * Math.pow(1.6, retryAttemptRef.current));
-        retryAttemptRef.current += 1;
-        retryTimerRef.current = setTimeout(() => {
-          setRetryTick((n) => n + 1);
-        }, delay);
+        scheduleRetry("missing_group_key");
         return;
       }
 
-      retryAttemptRef.current = 0;
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
-
       const toDecrypt = messagesSnapshot.filter(
-        (m) =>
-          m.conversation_id === convIdAtStart &&
-          m.kind !== "file_notice" &&
-          m.kind !== "deleted" &&
-          !plaintextCache.has(m.id)
+        (m) => m.kind !== "file_notice" && m.kind !== "deleted" && !plaintextCache.has(m.id)
       );
 
-      if (toDecrypt.length === 0) return;
+      if (toDecrypt.length === 0) {
+        retryAttemptRef.current = 0;
+        return;
+      }
 
-      appLog("info", "[GroupCrypto:decrypt:start]", {
-        group_id: convIdAtStart,
-        kind: activeKind,
+      // Log when loaded rows use a different conversation_id than the open chat (DM legacy).
+      const mismatched = toDecrypt.filter((m) => m.conversation_id !== convIdAtStart);
+      if (mismatched.length) {
+        appLog("info", "[Decrypt:related_conversation_rows]", {
+          active_id: convIdAtStart,
+          mismatched: mismatched.slice(0, 8).map((m) => ({
+            message_id: m.id,
+            conversation_id: m.conversation_id,
+            sender_id: m.sender_id,
+          })),
+        });
+      }
+
+      appLog("info", "[Decrypt:start]", {
+        conversation_id: convIdAtStart,
+        kind: kindAtStart,
         member_id: profileIdRef.current,
         count: toDecrypt.length,
         key_epoch: gkEpoch,
@@ -242,6 +287,7 @@ export function useMessageDecrypt(opts: {
         generation: String(generation),
       });
 
+      let transientFails = 0;
       const batchSize = 10;
       for (let i = 0; i < toDecrypt.length; i += batchSize) {
         const chunk = toDecrypt.slice(i, i + batchSize);
@@ -250,66 +296,96 @@ export function useMessageDecrypt(opts: {
           chunk.map(async (m) => {
             try {
               let text = "";
-              if (activeKind === "group" && gk) {
+              if (kindAtStart === "group" && gk) {
                 text = await decryptGroupRef.current(m);
               } else {
                 let senderPub =
                   m.sender_id === profileIdRef.current
                     ? exportPublic(identityRef.current).ed25519_public
-                    : peersRef.current.find((p) => p.user_id === m.sender_id)
-                        ?.ed25519_public;
+                    : peersRef.current.find((p) => p.user_id === m.sender_id)?.ed25519_public;
                 if (!senderPub && m.sender_id !== profileIdRef.current) {
                   try {
                     const all = await peerApi.listPeers();
                     const found = all.find((p) => p.user_id === m.sender_id);
-                    if (found?.ed25519_public) {
-                      senderPub = found.ed25519_public;
-                    }
+                    if (found?.ed25519_public) senderPub = found.ed25519_public;
                   } catch {
                     /* ignore */
                   }
                 }
+                const wrapped = normalizeWrappedKeys(m.wrapped_keys);
                 text = await decryptMessage(
-                  { ...m, wrapped_keys: m.wrapped_keys || {} },
+                  { ...m, wrapped_keys: wrapped },
                   profileIdRef.current,
                   identityRef.current,
                   senderPub
                 );
               }
+              if (!text) {
+                // Empty plaintext is valid but must not block retries if crypto was incomplete.
+                appLog("warn", "[Decrypt:empty_plaintext]", {
+                  conversation_id: m.conversation_id,
+                  message_id: m.id,
+                  sender_id: m.sender_id,
+                });
+              }
               patch[m.id] = text;
-              appLog("debug", "[GroupCrypto:decrypt:ok]", {
-                group_id: convIdAtStart,
+              pendingRetry.delete(m.id);
+              appLog("debug", "[Decrypt:ok]", {
+                conversation_id: m.conversation_id,
+                active_id: convIdAtStart,
                 message_id: m.id,
                 sender_id: m.sender_id,
                 len: text.length,
               });
             } catch (err) {
               const reason = err instanceof Error ? err.message : String(err);
-              const missingKey =
-                /no group key|waiting for group key/i.test(reason) ||
-                reason.includes("unable to decrypt: no group key");
-              if (missingKey) {
-                pendingMissingKey.add(m.id);
-                appLog("warn", "[GroupCrypto:decrypt:missing_key]", {
-                  group_id: convIdAtStart,
+              const attempts = (pendingRetry.get(m.id) || 0) + 1;
+              pendingRetry.set(m.id, attempts);
+              if (isTransientDecryptError(reason) && attempts < 8) {
+                transientFails += 1;
+                appLog("warn", "[Decrypt:transient_fail]", {
+                  conversation_id: m.conversation_id,
+                  active_id: convIdAtStart,
                   message_id: m.id,
                   sender_id: m.sender_id,
+                  attempt: attempts,
                   reason,
+                  wrap_keys:
+                    m.wrapped_keys && typeof m.wrapped_keys === "object"
+                      ? Object.keys(m.wrapped_keys as object)
+                      : typeof m.wrapped_keys,
                 });
                 return;
               }
-              appLog("error", "[GroupCrypto:decrypt:fail]", {
-                group_id: convIdAtStart,
+              appLog("error", "[Decrypt:fail]", {
+                conversation_id: m.conversation_id,
+                active_id: convIdAtStart,
                 message_id: m.id,
                 sender_id: m.sender_id,
-                key_epoch: gkEpoch,
+                attempt: attempts,
                 reason,
               });
-              patch[m.id] = "[unable to decrypt]";
+              patch[m.id] = UNABLE;
             }
           })
         );
         commitPlain(patch);
+      }
+
+      // Still-undecrypted rows in this window → keep retrying (do not depend on another send).
+      const stillPending = messagesSnapshot.filter(
+        (m) =>
+          m.kind !== "file_notice" &&
+          m.kind !== "deleted" &&
+          !plaintextCache.has(m.id) &&
+          pendingRetry.has(m.id)
+      );
+      if (transientFails > 0 || stillPending.length > 0) {
+        scheduleRetry(
+          transientFails > 0 ? "transient_decrypt_errors" : "undecrypted_rows_remain"
+        );
+      } else {
+        retryAttemptRef.current = 0;
       }
     })();
   }, [
@@ -349,7 +425,6 @@ export function useMessageDecrypt(opts: {
           }
         }
       }
-      // Also refresh local_path_present for known names missing path hints.
       const pathCheck: string[] = [];
       for (const m of messages) {
         if (m.kind === "deleted") continue;
