@@ -58,15 +58,48 @@ jobs:
       - name: Run backend unit tests
         run: cargo test --manifest-path app/src-tauri/Cargo.toml
 
-      - name: Build Tauri .deb bundle
+      # ── Standard Edition (No Games) ──
+      - name: Build Standard Linux .deb bundle (No Games)
         working-directory: app
         run: npm run tauri:build -- --bundles deb
 
-      - name: Upload Linux .deb package
+      - name: Prepare Standard Linux package
+        run: |
+          mkdir -p artifacts/standard
+          cp app/src-tauri/target/release/bundle/deb/*.deb artifacts/standard/
+          for f in artifacts/standard/*.deb; do
+            mv "$f" "${f%.deb}-standard.deb"
+          done
+
+      - name: Upload Standard Linux .deb package
         uses: actions/upload-artifact@v4
         with:
-          name: peerchat-linux-deb
-          path: app/src-tauri/target/release/bundle/deb/*.deb
+          name: peerchat-linux-deb-standard
+          path: artifacts/standard/*.deb
+          if-no-files-found: error
+
+      # ── Intranet Edition (With Games) ──
+      - name: Build Intranet Linux .deb bundle (With Games)
+        working-directory: app
+        env:
+          VITE_ENABLE_GAMES: "true"
+        run: |
+          touch src-tauri/src/main.rs
+          npm run tauri:build -- --bundles deb
+
+      - name: Prepare Intranet Linux package
+        run: |
+          mkdir -p artifacts/intranet
+          cp app/src-tauri/target/release/bundle/deb/*.deb artifacts/intranet/
+          for f in artifacts/intranet/*.deb; do
+            mv "$f" "${f%.deb}-intranet.deb"
+          done
+
+      - name: Upload Intranet Linux .deb package
+        uses: actions/upload-artifact@v4
+        with:
+          name: peerchat-linux-deb-intranet
+          path: artifacts/intranet/*.deb
           if-no-files-found: error
 
   build-windows-nsis:
@@ -103,13 +136,48 @@ jobs:
       - name: Run backend unit tests
         run: cargo test --manifest-path app/src-tauri/Cargo.toml
 
-      - name: Build Tauri NSIS installer
+      # ── Standard Edition (No Games) ──
+      - name: Build Standard Windows NSIS installer (No Games)
         working-directory: app
         run: npm run tauri:build -- --bundles nsis
 
-      - name: Upload Windows NSIS installer
+      - name: Prepare Standard Windows package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/standard
+          Get-ChildItem -Path app/src-tauri/target/release/bundle/nsis/*.exe | ForEach-Object {
+            $newName = $_.BaseName + "-standard" + $_.Extension
+            Copy-Item $_.FullName -Destination "artifacts/standard/$newName"
+          }
+
+      - name: Upload Standard Windows NSIS installer
         uses: actions/upload-artifact@v4
         with:
-          name: peerchat-windows-installer
-          path: app/src-tauri/target/release/bundle/nsis/*.exe
+          name: peerchat-windows-installer-standard
+          path: artifacts/standard/*.exe
+          if-no-files-found: error
+
+      # ── Intranet Edition (With Games) ──
+      - name: Build Intranet Windows NSIS installer (With Games)
+        working-directory: app
+        env:
+          VITE_ENABLE_GAMES: "true"
+        run: |
+          (Get-Item src-tauri/src/main.rs).LastWriteTime = Get-Date
+          npm run tauri:build -- --bundles nsis
+
+      - name: Prepare Intranet Windows package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/intranet
+          Get-ChildItem -Path app/src-tauri/target/release/bundle/nsis/*.exe | ForEach-Object {
+            $newName = $_.BaseName + "-intranet" + $_.Extension
+            Copy-Item $_.FullName -Destination "artifacts/intranet/$newName"
+          }
+
+      - name: Upload Intranet Windows NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: peerchat-windows-installer-intranet
+          path: artifacts/intranet/*.exe
           if-no-files-found: error
