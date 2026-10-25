@@ -221,6 +221,7 @@ import { ScreenshotAnnotator } from "../features/screenshot/ScreenshotAnnotator"
 import { PeerTrustDialogs } from "../features/peers/PeerTrustDialogs";
 import { GroupCreateDialog } from "../features/groups/GroupCreateDialog";
 import { GroupMembersDialog } from "../features/groups/GroupMembersDialog";
+import { ChatProfileDialog } from "../features/chat/ChatProfileDialog";
 import { useGroupCrypto } from "../features/groups/useGroupCrypto";
 import {
   cachePlaintext,
@@ -4234,7 +4235,11 @@ export function ChatScreen({
     setMembersOpen,
     setPinOpen,
     setRenameDraft,
-    setTab
+    setTab,
+    chatInfoOpen,
+    setChatInfoOpen,
+    setInChatSearchOpen,
+    handleDeleteDmChat,
   };
 
   return (
@@ -4441,8 +4446,13 @@ export function ChatScreen({
                 {active && (
                   <Avatar
                     onClick={() => {
-                      setChatInfoTab(0);
-                      setChatInfoOpen(true);
+                      if (active.kind === "group") {
+                        setRenameDraft(active.title || "");
+                        setAddPick([]);
+                        setMembersOpen(true);
+                      } else {
+                        setChatInfoOpen(true);
+                      }
                     }}
                     sx={{
                       width: 42,
@@ -4466,8 +4476,13 @@ export function ChatScreen({
                   minWidth={0}
                   onClick={() => {
                     if (!active) return;
-                    setChatInfoTab(0);
-                    setChatInfoOpen(true);
+                    if (active.kind === "group") {
+                      setRenameDraft(active.title || "");
+                      setAddPick([]);
+                      setMembersOpen(true);
+                    } else {
+                      setChatInfoOpen(true);
+                    }
                   }}
                   sx={{ cursor: active ? "pointer" : "default" }}
                 >
@@ -4536,9 +4551,10 @@ export function ChatScreen({
                 )}
                 {active?.kind === "group" && (
                   <IconButton
-                    aria-label="Group members"
+                    aria-label="Group details"
                     onClick={() => {
                       setRenameDraft(active.title || "");
+                      setAddPick([]);
                       setMembersOpen(true);
                     }}
                   >
@@ -5496,140 +5512,7 @@ export function ChatScreen({
         </Alert>
       </Snackbar>
 
-      <Dialog
-        open={chatInfoOpen && !!active}
-        onClose={() => setChatInfoOpen(false)}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>{activeTitle} — Media & links</DialogTitle>
-        <Tabs
-          value={chatInfoTab}
-          onChange={(_, v) => setChatInfoTab(v)}
-          sx={{ px: 2, borderBottom: 1, borderColor: "divider" }}
-        >
-          <Tab label="Media" />
-          <Tab label="Docs" />
-          <Tab label="Links" />
-        </Tabs>
-        <DialogContent dividers sx={{ minHeight: 280, p: 0 }}>
-          {(() => {
-            const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|svg|heic|avif)$/i;
-            const jump = (messageId: string) => {
-              setChatInfoOpen(false);
-              stickToBottomRef.current = false;
-              setHighlightMsgId(messageId);
-            };
-            if (chatInfoTab === 0 || chatInfoTab === 1) {
-              // Flatten attachment ids from file notices and captioned messages.
-              type Row = { key: string; messageId: string; fileId: string; name: string; at: string };
-              const rows: Row[] = [];
-              for (const m of messages) {
-                if (m.kind === "deleted" || m.kind === "poll_vote") continue;
-                for (const fid of messageAttachmentIds(m)) {
-                  const name = fileNames[fid] || "Encrypted file";
-                  const isImg = IMAGE_RE.test(name);
-                  if (chatInfoTab === 0 ? isImg : !isImg) {
-                    rows.push({
-                      key: `${m.id}:${fid}`,
-                      messageId: m.id,
-                      fileId: fid,
-                      name,
-                      at: m.created_at,
-                    });
-                  }
-                }
-              }
-              if (!rows.length) {
-                return (
-                  <Typography color="text.secondary" sx={{ p: 2.5 }}>
-                    {chatInfoTab === 0 ? "No media in this chat yet." : "No documents in this chat yet."}
-                  </Typography>
-                );
-              }
-              return (
-                <List dense>
-                  {rows.map((row) => {
-                    const thumb = fileThumbs[row.fileId];
-                    return (
-                      <ListItemButton key={row.key} onClick={() => jump(row.messageId)}>
-                        <ListItemAvatar sx={{ minWidth: 56 }}>
-                          {thumb ? (
-                            <Avatar
-                              variant="rounded"
-                              src={thumb}
-                              alt=""
-                              sx={{ width: 44, height: 44 }}
-                            />
-                          ) : (
-                            <Avatar
-                              variant="rounded"
-                              sx={{
-                                width: 44,
-                                height: 44,
-                                bgcolor: chatInfoTab === 0 ? "primary.main" : "action.selected",
-                              }}
-                            >
-                              <InsertDriveFileIcon fontSize="small" />
-                            </Avatar>
-                          )}
-                        </ListItemAvatar>
-                        <ListItemText
-                          primary={row.name}
-                          secondary={formatClock(row.at)}
-                          primaryTypographyProps={{ noWrap: true }}
-                        />
-                      </ListItemButton>
-                    );
-                  })}
-                </List>
-              );
-            }
-            const linkRows: { id: string; url: string; at: string }[] = [];
-            for (const m of messages) {
-              if (m.kind === "deleted" || m.kind === "file_notice") continue;
-              const body = plain[m.id] || "";
-              const found = body.match(URL_RE);
-              if (!found) continue;
-              for (const url of found) {
-                linkRows.push({ id: m.id, url, at: m.created_at });
-              }
-            }
-            if (!linkRows.length) {
-              return (
-                <Typography color="text.secondary" sx={{ p: 2.5 }}>
-                  No links in this chat yet.
-                </Typography>
-              );
-            }
-            return (
-              <List dense>
-                {linkRows.map((row, i) => (
-                  <ListItemButton
-                    key={`${row.id}-${i}`}
-                    onClick={() => {
-                      void openExternalLink(row.url);
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      jump(row.id);
-                    }}
-                  >
-                    <ListItemText
-                      primary={row.url}
-                      secondary={`${formatClock(row.at)} · open in browser · right-click to jump`}
-                      primaryTypographyProps={{ noWrap: true, fontSize: 13, color: "primary.main" }}
-                    />
-                  </ListItemButton>
-                ))}
-              </List>
-            );
-          })()}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setChatInfoOpen(false)}>Close</Button>
-        </DialogActions>
-      </Dialog>
+      <ChatProfileDialog vm={vm} />
 
       {/* Virus scan warning — outgoing send confirm, or inbound download notice */}
       <Dialog open={!!scanWarn} maxWidth="xs" fullWidth>
