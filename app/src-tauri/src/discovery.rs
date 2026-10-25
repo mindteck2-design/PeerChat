@@ -23,6 +23,9 @@ fn silent_command(program: &str) -> std::process::Command {
 static LAN_IP_CACHE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 const LAN_IP_TTL: Duration = Duration::from_secs(30);
 
+static ARP_CACHE: Mutex<Option<(Instant, Vec<LanHost>)>> = Mutex::new(None);
+const ARP_CACHE_TTL: Duration = Duration::from_secs(45);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerBeacon {
     pub magic: String,
@@ -379,9 +382,36 @@ fn looks_like_ipv4(s: &str) -> bool {
     parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
 }
 
-/// Best-effort LAN neighbor list from the OS ARP table (no MAC persistence).
+/// Best-effort LAN neighbor list from the OS ARP table (cached for 45s to avoid process spawn storms).
 pub fn lan_hosts_without_app(exclude_ips: &[String]) -> Vec<LanHost> {
     let me = lan_ip();
+    let raw_hosts = {
+        let mut cache = ARP_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((ts, ref hosts)) = *cache {
+            if ts.elapsed() < ARP_CACHE_TTL {
+                hosts.clone()
+            } else {
+                let fresh = parse_raw_arp(&me);
+                *cache = Some((Instant::now(), fresh.clone()));
+                fresh
+            }
+        } else {
+            let fresh = parse_raw_arp(&me);
+            *cache = Some((Instant::now(), fresh.clone()));
+            fresh
+        }
+    };
+
+    let mut hosts: Vec<LanHost> = raw_hosts
+        .into_iter()
+        .filter(|h| !exclude_ips.iter().any(|e| e == &h.ip))
+        .collect();
+    hosts.sort_by(|a, b| a.ip.cmp(&b.ip));
+    hosts.truncate(64);
+    hosts
+}
+
+fn parse_raw_arp(me: &str) -> Vec<LanHost> {
     let output = {
         #[cfg(windows)]
         {
@@ -415,10 +445,7 @@ pub fn lan_hosts_without_app(exclude_ips: &[String]) -> Vec<LanHost> {
         if ip == me || ip.ends_with(".255") || ip.ends_with(".0") {
             continue;
         }
-        if !ipv4_same_slash24(&me, &ip) {
-            continue;
-        }
-        if exclude_ips.iter().any(|e| e == &ip) {
+        if !ipv4_same_slash24(me, &ip) {
             continue;
         }
         if !seen.insert(ip.clone()) {
@@ -429,8 +456,6 @@ pub fn lan_hosts_without_app(exclude_ips: &[String]) -> Vec<LanHost> {
             label: format!("Device on LAN ({ip})"),
         });
     }
-    hosts.sort_by(|a, b| a.ip.cmp(&b.ip));
-    hosts.truncate(64);
     hosts
 }
 

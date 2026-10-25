@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useIncomingTransfer, useOutgoingTransfer } from "../files/transferProgressStore";
 import {
   Avatar, Box, Chip, Fade, Grow, IconButton,
@@ -118,7 +118,7 @@ function ExpandableMessageText({
   );
 }
 
-export function MessageList({ vm }: { vm: ChatScreenVm }) {
+function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
   const {
     abortIncomingTransfer,
     abortOutgoingTransfer,
@@ -982,3 +982,26 @@ export function MessageList({ vm }: { vm: ChatScreenVm }) {
     </>
   );
 }
+
+export const MessageList = memo(
+  MessageListImpl,
+  (prev, next) => {
+    return (
+      prev.vm.messages === next.vm.messages &&
+      prev.vm.active?.id === next.vm.active?.id &&
+      prev.vm.profile.id === next.vm.profile.id &&
+      prev.vm.highlightMsgId === next.vm.highlightMsgId &&
+      prev.vm.editingMessage?.id === next.vm.editingMessage?.id &&
+      prev.vm.status === next.vm.status &&
+      prev.vm.dark === next.vm.dark &&
+      prev.vm.hasMoreOlder === next.vm.hasMoreOlder &&
+      prev.vm.chatPaintReady === next.vm.chatPaintReady &&
+      prev.vm.peers === next.vm.peers &&
+      prev.vm.fileNames === next.vm.fileNames &&
+      prev.vm.fileSizes === next.vm.fileSizes &&
+      prev.vm.fileThumbs === next.vm.fileThumbs &&
+      prev.vm.fileLocalPaths === next.vm.fileLocalPaths &&
+      prev.vm.fileMetaReady === next.vm.fileMetaReady
+    );
+  }
+);

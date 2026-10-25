@@ -2,7 +2,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { APP_VERSION_FALLBACK, appVersion } from "../version";
 import {
   Alert,
@@ -154,15 +154,21 @@ import {
 import CampaignIcon from "@mui/icons-material/CampaignRounded";
 import type { SavedItem, ScanResult, TransferLog } from "../peer";
 import { ThemeMode } from "../theme";
-import { SettingsScreen } from "../features/settings/SettingsScreen";
-import {
-  CalendarScreen,
-  type CalendarFocusRequest,
-  type CalendarShareNotify,
+const SettingsScreen = lazy(() =>
+  import("../features/settings/SettingsScreen").then((m) => ({ default: m.SettingsScreen }))
+);
+const CalendarScreen = lazy(() =>
+  import("../features/calendar/CalendarScreen").then((m) => ({ default: m.CalendarScreen }))
+);
+import type {
+  CalendarFocusRequest,
+  CalendarShareNotify,
 } from "../features/calendar/CalendarScreen";
 import { FEATURE_GAMES } from "../features";
+const GamesHub = lazy(() =>
+  import("../games/games").then((m) => ({ default: m.GamesHub }))
+);
 import {
-  GamesHub,
   applyInboundToSession,
   type GameDispatchFn,
   type GameMsg,
@@ -300,6 +306,7 @@ export function ChatScreen({
   const [inChatQuery, setInChatQuery] = useState("");
   const inChatSearchInputRef = useRef<HTMLInputElement | null>(null);
   const [lastPreviews, setLastPreviews] = useState<Record<string, string>>({});
+  const previewCacheRef = useRef<Record<string, { key: string; text: string }>>({});
   const [convMenu, setConvMenu] = useState<{ anchor: HTMLElement; conv: Conversation } | null>(null);
 
   const [text, setText] = useState("");
@@ -567,35 +574,42 @@ export function ChatScreen({
           next[c.id] = kind === "system" ? "Group update" : "";
           continue;
         }
+        const msgKey = `${c.id}:${c.last_message_at || ""}:${ct}`;
         let plainText = "";
-        try {
-          const stub: Message = {
-            id: "preview",
-            conversation_id: c.id,
-            sender_id: c.last_message_sender || "",
-            kind,
-            ciphertext: ct,
-            nonce: c.last_message_nonce || "",
-            wrapped_keys: c.last_message_wrapped_keys || {},
-            signature: "",
-            created_at: c.last_message_at || "",
-          };
-          if (c.kind === "group") {
-            const gk = keys[c.id];
-            if (!gk) {
-              next[c.id] = "…";
-              continue;
+        const cachedPreview = previewCacheRef.current[c.id];
+        if (cachedPreview && cachedPreview.key === msgKey) {
+          plainText = cachedPreview.text;
+        } else {
+          try {
+            const stub: Message = {
+              id: "preview",
+              conversation_id: c.id,
+              sender_id: c.last_message_sender || "",
+              kind,
+              ciphertext: ct,
+              nonce: c.last_message_nonce || "",
+              wrapped_keys: c.last_message_wrapped_keys || {},
+              signature: "",
+              created_at: c.last_message_at || "",
+            };
+            if (c.kind === "group") {
+              const gk = keys[c.id];
+              if (!gk) {
+                next[c.id] = "…";
+                continue;
+              }
+              plainText = await decryptGroupMessageText(stub);
+            } else if (c.peer_id) {
+              plainText = await decryptMessage(
+                { ...stub, wrapped_keys: stub.wrapped_keys || {} },
+                profile.id,
+                identity
+              );
             }
-            plainText = await decryptGroupMessageText(stub);
-          } else if (c.peer_id) {
-            plainText = await decryptMessage(
-              { ...stub, wrapped_keys: stub.wrapped_keys || {} },
-              profile.id,
-              identity
-            );
+          } catch {
+            plainText = "";
           }
-        } catch {
-          plainText = "";
+          previewCacheRef.current[c.id] = { key: msgKey, text: plainText };
         }
         const sid = c.last_message_sender || "";
         const senderName =
@@ -613,7 +627,18 @@ export function ChatScreen({
           c.kind === "group"
         );
       }
-      if (!cancel) setLastPreviews(next);
+      if (!cancel) {
+        setLastPreviews((prev) => {
+          const nextKeys = Object.keys(next);
+          if (
+            nextKeys.length === Object.keys(prev).length &&
+            nextKeys.every((k) => prev[k] === next[k])
+          ) {
+            return prev;
+          }
+          return next;
+        });
+      }
     })();
     return () => {
       cancel = true;
@@ -958,7 +983,20 @@ export function ChatScreen({
         try {
           const list = await peerApi.listMembers(conv.id);
           if (!cancel) {
-            setMembers(list);
+            setMembers((prev) => {
+              if (
+                prev.length === list.length &&
+                prev.every(
+                  (m, i) =>
+                    m.user_id === list[i].user_id &&
+                    m.role === list[i].role &&
+                    m.display_name === list[i].display_name
+                )
+              ) {
+                return prev;
+              }
+              return list;
+            });
             setMembersLoaded(true);
           }
         } catch (err) {
@@ -1008,7 +1046,7 @@ export function ChatScreen({
       console.error(err);
       if (!cancel) setChatPaintReady(true);
     });
-    const t = setInterval(() => pull(false).catch(() => {}), 750);
+    const t = setInterval(() => pull(false).catch(() => {}), 4000);
     let unlisten: (() => void) | undefined;
     listen("inbox-updated", () => {
       pull(false).catch(() => {});
@@ -3947,15 +3985,17 @@ export function ChatScreen({
         overflow="hidden"
       >
         {nav === "calendar" && (
-          <CalendarScreen
-            peers={peers}
-            myId={profile.id}
-            myName={profile.display_name}
-            onStatus={setStatus}
-            focusRequest={pendingCalendarFocus}
-            onFocusConsumed={() => setPendingCalendarFocus(null)}
-            onNotifyShare={sendCalendarShareMsg}
-          />
+          <Suspense fallback={<Box sx={{ minHeight: "100%", display: "grid", placeItems: "center" }}><CircularProgress /></Box>}>
+            <CalendarScreen
+              peers={peers}
+              myId={profile.id}
+              myName={profile.display_name}
+              onStatus={setStatus}
+              focusRequest={pendingCalendarFocus}
+              onFocusConsumed={() => setPendingCalendarFocus(null)}
+              onNotifyShare={sendCalendarShareMsg}
+            />
+          </Suspense>
         )}
         {FEATURE_GAMES && nav === "games" && (gamesOn || pendingGameInvite ? (
           <GamesHub
@@ -4027,19 +4067,21 @@ export function ChatScreen({
         )}
         {nav === "settings" && (
           <Box sx={{ flex: 1, height: "100%", overflowY: "auto", bgcolor: "background.default" }}>
-            <SettingsScreen
-              profile={profile}
-              identity={identity}
-              version={version}
-              onBack={() => {
-                setNav("chats");
-                setTab(1);
-              }}
-              onNameUpdated={(p) => {
-                setProfile(p);
-                onProfileUpdated?.(p);
-              }}
-            />
+            <Suspense fallback={<Box sx={{ minHeight: "100%", display: "grid", placeItems: "center" }}><CircularProgress /></Box>}>
+              <SettingsScreen
+                profile={profile}
+                identity={identity}
+                version={version}
+                onBack={() => {
+                  setNav("chats");
+                  setTab(1);
+                }}
+                onNameUpdated={(p) => {
+                  setProfile(p);
+                  onProfileUpdated?.(p);
+                }}
+              />
+            </Suspense>
           </Box>
         )}
         <Box

@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { memo } from "react";
 import {
   Avatar, Box, Chip, Divider, IconButton, InputAdornment, List, ListItemAvatar,
   ListItemButton, ListItemIcon, ListItemText, TextField, Tooltip, Typography,
@@ -18,7 +19,7 @@ import { peerApi } from "../../peer";
 import { avatarColor, formatPreviewTime, lastSeenLabel, conversationPreviewLine } from "../../shared/format";
 import type { ChatScreenVm } from "../chat/chatVm";
 
-export function ListPane({ vm }: { vm: ChatScreenVm }) {
+function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
   const {
     active,
     announceBoards,
@@ -519,3 +520,25 @@ export function ListPane({ vm }: { vm: ChatScreenVm }) {
 
   );
 }
+
+export const ListPane = memo(
+  ListPaneImpl,
+  (prev, next) => {
+    return (
+      prev.vm.convs === next.vm.convs &&
+      prev.vm.filteredConvs === next.vm.filteredConvs &&
+      prev.vm.active?.id === next.vm.active?.id &&
+      prev.vm.tab === next.vm.tab &&
+      prev.vm.chatSearch === next.vm.chatSearch &&
+      prev.vm.peers === next.vm.peers &&
+      prev.vm.lanHosts === next.vm.lanHosts &&
+      prev.vm.transfers === next.vm.transfers &&
+      prev.vm.savedItems === next.vm.savedItems &&
+      prev.vm.lastPreviews === next.vm.lastPreviews &&
+      prev.vm.sidebarMsgHits === next.vm.sidebarMsgHits &&
+      prev.vm.sidebarMsgSearchBusy === next.vm.sidebarMsgSearchBusy &&
+      prev.vm.scanning === next.vm.scanning &&
+      prev.vm.nav === next.vm.nav
+    );
+  }
+);
