@@ -371,6 +371,9 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                 || payload.get("group_event").is_some()
                 || payload.get("calendar_share").is_some();
             let mut fresh_message = false;
+            // Emit after COMMIT so UI/IPC readers see committed wraps/membership.
+            let mut pending_group_key_updated: Option<Value> = None;
+            let mut pending_group_sync_request: Option<Value> = None;
             let conn = db.lock();
             if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
                 return http_ok(http_json(500, json!({"error":"db busy"})), None);
@@ -688,10 +691,21 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                 let inbound_wrap = payload
                     .get("wrapped_group_key")
                     .or_else(|| payload.pointer("/group_event/wrapped_group_key"))
-                    .and_then(|v| v.as_str());
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
                 if let Some(wrap) = inbound_wrap {
                     let _ = db::upsert_member(&conn, group_cid, my_id, Some(wrap), None);
-                    println!("[GroupSync:deliver:wrap] updated wrapped_group_key for my_id={} in group_id={}", my_id, group_cid);
+                    println!(
+                        "[GroupSync:deliver:wrap] updated wrapped_group_key for my_id={} in group_id={} wrap_len={}",
+                        my_id,
+                        group_cid,
+                        wrap.len()
+                    );
+                    pending_group_key_updated = Some(json!({
+                        "conversation_id": group_cid,
+                        "member_id": my_id,
+                        "source": "deliver",
+                    }));
                 }
             }
 
@@ -731,17 +745,33 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                             cid,
                             wrap.is_some()
                         );
-                        let _ = enqueue_group_event(
-                            &conn,
-                            &from_peer,
-                            cid,
-                            deliver_sender_id,
-                            &title,
-                            wrap,
-                            &roster,
-                            "sync",
-                            None,
-                        );
+                        if wrap.is_some() {
+                            let _ = enqueue_group_event(
+                                &conn,
+                                &from_peer,
+                                cid,
+                                deliver_sender_id,
+                                &title,
+                                wrap,
+                                &roster,
+                                "sync",
+                                None,
+                            );
+                        } else {
+                            // No stored wrap for requester — ask local UI to re-wrap from plaintext key.
+                            println!(
+                                "[GroupSync:handle_request_sync:needs_repair] group_id={} requester={} — emitting group-sync-request",
+                                cid, deliver_sender_id
+                            );
+                            pending_group_sync_request = Some(json!({
+                                "conversation_id": cid,
+                                "requester_id": deliver_sender_id,
+                                "requester_name": payload
+                                    .pointer("/from_peer/display_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(""),
+                            }));
+                        }
                     }
                 }
                 if op == "rename" && !cid.is_empty() {
@@ -854,6 +884,12 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
             if conn.execute_batch("COMMIT").is_err() {
                 let _ = conn.execute_batch("ROLLBACK");
                 return http_ok(http_json(500, json!({"error":"commit failed"})), None);
+            }
+            if let Some(ev) = pending_group_key_updated {
+                let _ = app.emit("group-key-updated", ev);
+            }
+            if let Some(ev) = pending_group_sync_request {
+                let _ = app.emit("group-sync-request", ev);
             }
             // Toast only for newly inserted messages (redelivery must not double-notify).
             // Still emit inbox-updated for UI refresh whenever anything arrived.

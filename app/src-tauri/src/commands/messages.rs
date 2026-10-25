@@ -297,6 +297,11 @@ pub fn send_message(
                 }
                 if let Ok(Some(w)) = db::get_wrapped_group_key(&conn, conversation_id.as_str(), rid) {
                     payload["wrapped_group_key"] = json!(w);
+                } else if is_group {
+                    eprintln!(
+                        "[GroupSync:send_message:missing_wrap] group_id={} msg_id={} sender={} recipient={} — recipient may not decrypt until wrap is repaired",
+                        conversation_id, out_id, me, rid
+                    );
                 }
                 if let Some(ref t) = title {
                     payload["group_title"] = json!(t);

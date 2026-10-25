@@ -222,14 +222,17 @@ import { PeerTrustDialogs } from "../features/peers/PeerTrustDialogs";
 import { GroupCreateDialog } from "../features/groups/GroupCreateDialog";
 import { GroupMembersDialog } from "../features/groups/GroupMembersDialog";
 import { useGroupCrypto } from "../features/groups/useGroupCrypto";
-import { useMessageDecrypt } from "../features/chat/useMessageDecrypt";
+import {
+  getCachedPlaintext,
+  useMessageDecrypt,
+} from "../features/chat/useMessageDecrypt";
 import { useChatSync } from "../features/chat/useChatSync";
+import { appLog } from "../shared/appLog";
 import { useAnnouncementBoards } from "../features/announcements/useAnnouncementBoards";
 import { useGroupAdmin } from "../features/groups/useGroupAdmin";
 import { useFileTransfer } from "../features/files/useFileTransfer";
 import { FilePreviewDialog } from "../features/files/FilePreviewDialog";
 import { publishTransferProgress } from "../features/files/transferProgressStore";
-import { appLog } from "../shared/appLog";
 
 export function ChatScreen({
   profile: initialProfile,
@@ -446,6 +449,8 @@ export function ChatScreen({
   const chatSearchRef = useRef<HTMLInputElement | null>(null);
   const groupKeysRef = useRef(groupKeys);
   groupKeysRef.current = groupKeys;
+  const peersRef = useRef(peers);
+  peersRef.current = peers;
   const [groupKeyHistory, setGroupKeyHistory] = useState<Record<string, Uint8Array[]>>({});
   const groupKeyHistoryRef = useRef(groupKeyHistory);
   groupKeyHistoryRef.current = groupKeyHistory;
@@ -1083,6 +1088,107 @@ export function ChatScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.id]);
 
+  // Group key readiness: adopt wraps as soon as they land, and re-wrap for peers
+  // that request sync when we have no stored wrap for them.
+  useEffect(() => {
+    let cancelled = false;
+    const unsubs: Array<() => void> = [];
+
+    listen<{ conversation_id?: string; member_id?: string }>("group-key-updated", (ev) => {
+      const cid = ev.payload?.conversation_id || "";
+      if (!cid) return;
+      appLog("info", "[GroupCrypto:event:group-key-updated]", {
+        group_id: cid,
+        member_id: ev.payload?.member_id || profile.id,
+      });
+      void (async () => {
+        try {
+          await syncGroupKeyIfRotated(cid);
+          await ensureGroupKey(cid);
+        } catch (err) {
+          appLog("warn", "[GroupCrypto:event:group-key-updated:err]", {
+            group_id: cid,
+            err: String(err),
+          });
+        }
+      })();
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unsubs.push(fn);
+    });
+
+    listen<{
+      conversation_id?: string;
+      requester_id?: string;
+      requester_name?: string;
+    }>("group-sync-request", (ev) => {
+      const cid = ev.payload?.conversation_id || "";
+      const requesterId = ev.payload?.requester_id || "";
+      if (!cid || !requesterId) return;
+      appLog("info", "[GroupCrypto:event:group-sync-request]", {
+        group_id: cid,
+        requester_id: requesterId,
+        member_id: profile.id,
+      });
+      void (async () => {
+        try {
+          const gk = await ensureGroupKey(cid);
+          if (!gk) {
+            appLog("warn", "[GroupCrypto:repair:no_local_key]", {
+              group_id: cid,
+              requester_id: requesterId,
+            });
+            return;
+          }
+          let allPeers = peersRef.current;
+          let peer = allPeers.find((p) => p.user_id === requesterId);
+          if (!peer?.x25519_public) {
+            try {
+              allPeers = await peerApi.listPeers();
+              peer = allPeers.find((p) => p.user_id === requesterId);
+            } catch {
+              /* ignore */
+            }
+          }
+          if (!peer?.x25519_public) {
+            appLog("warn", "[GroupCrypto:repair:missing_pub]", {
+              group_id: cid,
+              requester_id: requesterId,
+            });
+            return;
+          }
+          const wraps = wrapGroupKeyForMembers(gk, identity, {
+            [requesterId]: peer.x25519_public,
+          });
+          const wrap = wraps[requesterId];
+          if (!wrap) return;
+          await peerApi.repairGroupMemberKey(cid, requesterId, wrap);
+          appLog("info", "[GroupCrypto:repair:sent]", {
+            group_id: cid,
+            requester_id: requesterId,
+            member_id: profile.id,
+          });
+        } catch (err) {
+          appLog("warn", "[GroupCrypto:repair:err]", {
+            group_id: cid,
+            requester_id: requesterId,
+            err: String(err),
+          });
+        }
+      })();
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unsubs.push(fn);
+    });
+
+    return () => {
+      cancelled = true;
+      for (const u of unsubs) u();
+    };
+    // identity / profile.id / ensureGroupKey / syncGroupKeyIfRotated are stable enough via refs+hooks
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity, profile.id]);
+
   function scrollChatToBottom(behavior: ScrollBehavior = "auto") {
     const el = scroller.current;
     if (!el) return;
@@ -1370,7 +1476,15 @@ export function ChatScreen({
       draftsRef.current[prev.id] = textRef.current;
     }
     setMessages([]);
-    setPlain({});
+    // Keep any plaintext already in the module cache so returning to a chat
+    // does not flash "…" while messages reload and decrypt re-runs.
+    setPlain((prevPlain) => {
+      const kept: Record<string, string> = {};
+      for (const [id, text] of Object.entries(prevPlain)) {
+        if (getCachedPlaintext(id) === text) kept[id] = text;
+      }
+      return kept;
+    });
     setReplyTo(null);
     setEditingMessage(null);
     setTypingLabel(null);
@@ -1379,6 +1493,13 @@ export function ChatScreen({
     setInChatSearchOpen(false);
     setInChatQuery("");
     setActive(c);
+    if (c.kind === "group") {
+      appLog("info", "[GroupCrypto:selectConversation]", {
+        group_id: c.id,
+        member_id: profile.id,
+      });
+      void ensureGroupKey(c.id).catch(() => {});
+    }
   }
 
   /** Open a chat from sidebar message search and scroll to the matching message. */
@@ -3677,18 +3798,41 @@ export function ChatScreen({
           /* ignore */
         }
       }
+      const missing: string[] = [];
       for (const id of groupPick) {
         const u = allPeers.find((x) => x.user_id === id);
         if (u?.x25519_public) {
           pubs[id] = u.x25519_public;
         } else {
-          console.warn(`[GroupCrypto:createGroup] member_id=${id} missing x25519_public in peers`);
+          missing.push(u?.display_name || id);
+          appLog("warn", "[GroupCrypto:createGroup:missing_pub]", {
+            member_id: id,
+            member_name: u?.display_name || "",
+          });
         }
       }
+      if (missing.length) {
+        setStatus(
+          `Cannot create group until these people are discovered/online: ${missing.join(", ")}`
+        );
+        return;
+      }
       const wraps = wrapGroupKeyForMembers(gk, identity, pubs);
+      for (const id of [profile.id, ...groupPick]) {
+        if (!wraps[id]) {
+          setStatus(`Missing group key wrap for ${id}`);
+          return;
+        }
+      }
+      appLog("info", "[GroupCrypto:createGroup]", {
+        member_ids: groupPick,
+        wrap_count: Object.keys(wraps).length,
+        creator: profile.id,
+      });
       const conversation = await peerApi.createGroup(groupTitle.trim(), groupPick, wraps);
       setGroupKeys((g) => ({ ...g, [conversation.id]: gk }));
       groupKeysRef.current = { ...groupKeysRef.current, [conversation.id]: gk };
+      await persistMyGroupWrap(conversation.id, gk);
       await sendGroupSystemNotice(
         conversation,
         `${profile.display_name} started the group`,

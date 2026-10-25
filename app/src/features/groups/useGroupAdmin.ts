@@ -55,12 +55,19 @@ export function useGroupAdmin(opts: {
         }
       }
       const pubs: Record<string, string> = {};
+      const missing: string[] = [];
       for (const id of addPick) {
         const p = allPeers.find((x) => x.user_id === id);
         if (p?.x25519_public) pubs[id] = p.x25519_public;
+        else missing.push(p?.display_name || id);
       }
-      if (!Object.keys(pubs).length) {
-        setStatus("None of the selected people have been discovered yet");
+      if (missing.length) {
+        console.warn(
+          `[GroupCrypto:addMembers] group_id=${active.id} missing x25519 for: ${missing.join(", ")}`
+        );
+        setStatus(
+          `Wait until these people are online/discovered before adding: ${missing.join(", ")}`
+        );
         return;
       }
       await peerApi.addGroupMembers(active.id, wrapGroupKeyForMembers(gk, identity, pubs));

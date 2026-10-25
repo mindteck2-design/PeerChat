@@ -251,6 +251,7 @@ pub fn run() {
             open_dm,
             create_group,
             request_group_sync,
+            repair_group_member_key,
             list_messages,
             retry_message,
             delete_message_for_me,

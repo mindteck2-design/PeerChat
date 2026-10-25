@@ -193,6 +193,17 @@ export const peerApi = {
     inv<void>("set_my_group_key", { conversationId, wrappedGroupKey }),
   requestGroupSync: (conversationId: string) =>
     inv<void>("request_group_sync", { conversationId }),
+  /** Re-wrap group key for a member and push a sync event (heal missing wrap). */
+  repairGroupMemberKey: (
+    conversationId: string,
+    userId: string,
+    wrappedGroupKey: string
+  ) =>
+    inv<void>("repair_group_member_key", {
+      conversationId,
+      userId,
+      wrappedGroupKey,
+    }),
   memberIds: (conversationId: string) => inv<string[]>("member_ids", { conversationId }),
   listMembers: (conversationId: string) =>
     inv<Member[]>("list_group_members", { conversationId }),

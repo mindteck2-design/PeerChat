@@ -48,13 +48,22 @@ pub fn create_group(
         if mid == &me {
             continue;
         }
-        members.push((
-            mid.clone(),
-            wrapped_group_keys
-                .get(mid.as_str())
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        ));
+        let wrap = wrapped_group_keys
+            .get(mid.as_str())
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if wrap.is_none() {
+            return Err(format!(
+                "missing wrapped group key for member {mid}; refuse to create group without crypto state"
+            ));
+        }
+        members.push((mid.clone(), wrap));
+    }
+    if members
+        .iter()
+        .any(|(uid, wrap)| uid == &me && wrap.is_none())
+    {
+        return Err("missing wrapped group key for creator".into());
     }
     db::create_group(&conn, &id, &title, &me, &members)?;
     let roster = Value::Array(db::list_members(&conn, &id)?);
@@ -226,6 +235,70 @@ pub fn set_my_group_key(
     )
 }
 
+/// Store a (re)wrapped group key for a member and push a sync event so they can decrypt.
+/// Used when a peer requests sync but we previously had no wrap for them (or keys rotated).
+#[tauri::command]
+pub fn repair_group_member_key(
+    state: State<AppState>,
+    conversation_id: String,
+    user_id: String,
+    wrapped_group_key: String,
+) -> Result<(), String> {
+    if wrapped_group_key.trim().is_empty() {
+        return Err("wrapped_group_key required".into());
+    }
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("").to_string();
+    if me.is_empty() {
+        return Err("no profile".into());
+    }
+    if !db::is_conversation_member(&conn, &conversation_id, &me)? {
+        return Err("not a member of this group".into());
+    }
+    if !db::is_conversation_member(&conn, &conversation_id, &user_id)? {
+        // Requester may not be in our roster yet — still enroll them with the wrap.
+        let name = db::display_name_for(&conn, &user_id);
+        db::upsert_member(
+            &conn,
+            &conversation_id,
+            &user_id,
+            Some(wrapped_group_key.as_str()),
+            Some(name.as_str()),
+        )?;
+    } else {
+        db::update_member_wraps(
+            &conn,
+            &conversation_id,
+            &[(user_id.clone(), wrapped_group_key.clone())],
+        )?;
+    }
+    let title = db::conversation_title(&conn, &conversation_id)?.unwrap_or_else(|| "Group".into());
+    let roster = Value::Array(db::list_members(&conn, &conversation_id)?);
+    let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
+    enqueue_group_event(
+        &conn,
+        &from_peer,
+        &conversation_id,
+        &user_id,
+        &title,
+        Some(wrapped_group_key),
+        &roster,
+        "sync",
+        None,
+    )?;
+    println!(
+        "[GroupSync:repair_member_key] group_id={} from={} to={} roster_len={}",
+        conversation_id,
+        me,
+        user_id,
+        roster.as_array().map(|a| a.len()).unwrap_or(0)
+    );
+    drop(conn);
+    kick_flush(&state);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn member_ids(state: State<AppState>, conversation_id: String) -> Result<Vec<String>, String> {
     let conn = state.db.lock();
@@ -256,15 +329,27 @@ pub fn add_group_members(
     }
     let title = db::conversation_title(&conn, &conversation_id)?
         .unwrap_or_else(|| "Group".into());
-    if let Some(map) = wrapped_group_keys.as_object() {
-        for (uid, wrapv) in map {
-            if uid == &me {
-                continue;
-            }
-            let wrap = wrapv.as_str();
-            let name = db::display_name_for(&conn, uid);
-            db::upsert_member(&conn, &conversation_id, uid, wrap, Some(name.as_str()))?;
+    let Some(map) = wrapped_group_keys.as_object() else {
+        return Err("wrapped_group_keys required".into());
+    };
+    if map.is_empty() {
+        return Err("wrapped_group_keys required".into());
+    }
+    for (uid, wrapv) in map {
+        if uid == &me {
+            continue;
         }
+        let Some(wrap) = wrapv.as_str().filter(|s| !s.is_empty()) else {
+            return Err(format!(
+                "missing wrapped group key for member {uid}; refuse to add without crypto state"
+            ));
+        };
+        let name = db::display_name_for(&conn, uid);
+        db::upsert_member(&conn, &conversation_id, uid, Some(wrap), Some(name.as_str()))?;
+        println!(
+            "[GroupSync:add_members] group_id={} added member_id={} has_wrap=true",
+            conversation_id, uid
+        );
     }
     let roster = Value::Array(
         db::list_members(&conn, &conversation_id)?
