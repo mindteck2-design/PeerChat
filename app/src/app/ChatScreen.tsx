@@ -1651,6 +1651,7 @@ export function ChatScreen({
       previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
     }));
     setStagedFiles((prev) => [...prev, ...next]);
+    requestAnimationFrame(() => composerRef.current?.focus());
   }
 
   /** Prefer native dialog so we get real disk paths → local_path in DB. */
@@ -1667,6 +1668,8 @@ export function ChatScreen({
     } catch {
       // Browser preview / dialog unavailable — fall back to HTML picker.
       filePickRef.current?.click();
+    } finally {
+      requestAnimationFrame(() => composerRef.current?.focus());
     }
   }
 
@@ -1698,7 +1701,10 @@ export function ChatScreen({
         setStatus(err?.message || `Can't read ${path}`);
       }
     }
-    if (next.length) setStagedFiles((prev) => [...prev, ...next]);
+    if (next.length) {
+      setStagedFiles((prev) => [...prev, ...next]);
+      requestAnimationFrame(() => composerRef.current?.focus());
+    }
   }
 
   async function packFolderAndSend(folderPath: string, folderName: string) {

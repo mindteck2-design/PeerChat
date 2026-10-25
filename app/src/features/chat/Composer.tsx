@@ -250,7 +250,20 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
             aria-label="Attach files"
             size="small"
             disabled={(!!outgoingFile && !outgoingFile.cancelled) || !!editingMessage}
-            onClick={() => void pickAndStageFiles()}
+            onClick={(e) => {
+              e.currentTarget.blur();
+              void pickAndStageFiles();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                e.stopPropagation();
+                e.currentTarget.blur();
+                requestAnimationFrame(() => {
+                  (composerRef?.current as HTMLInputElement | HTMLTextAreaElement | null)?.focus();
+                });
+              }
+            }}
           >
             <AttachFileIcon fontSize="small" />
           </IconButton>
@@ -552,6 +565,9 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   const files = Array.from(e.target.files || []);
                   if (files.length) stageFiles(files);
                   e.target.value = "";
+                  requestAnimationFrame(() => {
+                    (composerRef?.current as HTMLInputElement | HTMLTextAreaElement | null)?.focus();
+                  });
                 }}
               />
               {!multiline && toolButtons}
