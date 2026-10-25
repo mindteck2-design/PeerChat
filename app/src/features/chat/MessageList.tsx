@@ -6,6 +6,8 @@ import {
   Paper, Stack, Tooltip, Typography,
 } from "@mui/material";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
+import DoneIcon from "@mui/icons-material/DoneRounded";
+import DoneAllIcon from "@mui/icons-material/DoneAllRounded";
 import ForwardIcon from "@mui/icons-material/ForwardRounded";
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
@@ -376,6 +378,23 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
               </Box>
             </Typography>
           </Tooltip>
+        ) : m.queued || (mine && !m.delivered && m.kind !== "deleted") ? (
+          <Tooltip title="Saved on this PC — will send when their PeerChat is open on the LAN">
+            <Typography
+              component="span"
+              variant="caption"
+              sx={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.35,
+                fontSize: 10.5,
+                color: "inherit",
+                lineHeight: 1,
+              }}
+            >
+              {formatClock(m.created_at)}
+            </Typography>
+          </Tooltip>
         ) : (
           <Typography
             component="span"
@@ -384,6 +403,24 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           >
             {formatClock(m.created_at)}
           </Typography>
+        )}
+        {mine && m.kind !== "deleted" && !m.failed && (
+          m.read ? (
+            <DoneAllIcon
+              titleAccess="Read"
+              sx={{ fontSize: 13, color: "#53bdeb", verticalAlign: "middle" }}
+            />
+          ) : m.delivered ? (
+            <DoneAllIcon
+              titleAccess="Delivered"
+              sx={{ fontSize: 13, color: "inherit", verticalAlign: "middle" }}
+            />
+          ) : (
+            <DoneIcon
+              titleAccess="Sent"
+              sx={{ fontSize: 13, color: "inherit", verticalAlign: "middle" }}
+            />
+          )
         )}
       </Box>
     );
