@@ -122,6 +122,15 @@ pub fn list_calendar_items(
 }
 
 #[tauri::command]
+pub fn get_calendar_item(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<Value>, String> {
+    let conn = state.db.lock();
+    db::get_calendar_item(&conn, &id)
+}
+
+#[tauri::command]
 pub async fn upsert_calendar_item(
     state: State<'_, AppState>,
     item: Value,

@@ -59,3 +59,16 @@ export function monthLabel(y: number, m: number) {
 export function daysInMonth(y: number, m: number) {
   return new Date(y, m + 1, 0).getDate();
 }
+
+/** Format HH:mm (24-hour) to hh:mm AM/PM (12-hour). */
+export function formatTime12(time?: string | null): string {
+  if (!time || !time.trim()) return "";
+  const parts = time.trim().split(":");
+  if (parts.length < 2) return time.trim();
+  const hour = parseInt(parts[0], 10);
+  const min = parts[1];
+  if (isNaN(hour)) return time.trim();
+  const ampm = hour >= 12 ? "PM" : "AM";
+  const h12 = hour % 12 || 12;
+  return `${pad2(h12)}:${min} ${ampm}`;
+}

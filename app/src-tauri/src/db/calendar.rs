@@ -8,6 +8,7 @@ fn row_to_item(
     kind: String,
     day: String,
     time: Option<String>,
+    meeting_url: Option<String>,
     created_by: String,
     created_at: String,
     updated_at: String,
@@ -30,6 +31,7 @@ fn row_to_item(
         "kind": kind,
         "day": day,
         "time": time,
+        "meeting_url": meeting_url,
         "created_by": created_by,
         "created_at": created_at,
         "updated_at": updated_at,
@@ -42,7 +44,7 @@ fn row_to_item(
     })
 }
 
-const SELECT_COLS: &str = r#"id, title, body, kind, day, time, created_by, created_at, updated_at,
+const SELECT_COLS: &str = r#"id, title, body, kind, day, time, meeting_url, created_by, created_at, updated_at,
                   done, shared, participant_ids, notified_at,
                   COALESCE(checklist_json, '[]'), COALESCE(acks_json, '{}')"#;
 
@@ -63,6 +65,7 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         r.get(12)?,
         r.get(13)?,
         r.get(14)?,
+        r.get(15)?,
     ))
 }
 
@@ -174,21 +177,23 @@ pub fn upsert_calendar_item(conn: &Connection, row: &Value) -> Result<(), String
         .get("updated_at")
         .and_then(|v| v.as_str())
         .unwrap_or(&now);
+    let meeting_url = row.get("meeting_url").and_then(|v| v.as_str());
     let notified_at = row.get("notified_at").and_then(|v| v.as_str());
     let checklist = normalize_checklist(row.get("checklist").unwrap_or(&json!([])));
     let acks = normalize_acks(row.get("acks").unwrap_or(&json!({})));
 
     conn.execute(
         r#"INSERT INTO calendar_items(
-             id, title, body, kind, day, time, created_by, created_at, updated_at,
+             id, title, body, kind, day, time, meeting_url, created_by, created_at, updated_at,
              done, shared, participant_ids, notified_at, checklist_json, acks_json
-           ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+           ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
            ON CONFLICT(id) DO UPDATE SET
              title=excluded.title,
              body=excluded.body,
              kind=excluded.kind,
              day=excluded.day,
              time=excluded.time,
+             meeting_url=excluded.meeting_url,
              updated_at=excluded.updated_at,
              done=excluded.done,
              shared=excluded.shared,
@@ -203,6 +208,7 @@ pub fn upsert_calendar_item(conn: &Connection, row: &Value) -> Result<(), String
             kind,
             day,
             time,
+            meeting_url,
             created_by,
             created_at,
             updated_at,
@@ -461,6 +467,7 @@ mod tests {
             "kind": "meeting",
             "day": "2026-11-01",
             "time": "14:00",
+            "meeting_url": "https://meet.google.com/abc-xyz",
             "created_by": "alice",
             "participant_ids": ["bob"],
             "shared": true,
@@ -474,6 +481,7 @@ mod tests {
         assert_eq!(fetched["kind"], "meeting");
         assert_eq!(fetched["day"], "2026-11-01");
         assert_eq!(fetched["time"], "14:00");
+        assert_eq!(fetched["meeting_url"], "https://meet.google.com/abc-xyz");
         assert_eq!(fetched["created_by"], "alice");
         assert_eq!(fetched["shared"], true);
         assert_eq!(fetched["done"], false);

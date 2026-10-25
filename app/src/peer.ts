@@ -360,6 +360,7 @@ export const peerApi = {
   listSavedItems: () => inv<SavedItem[]>("list_saved_items"),
   listCalendarItems: (fromDay: string, toDay: string) =>
     inv<CalendarItem[]>("list_calendar_items", { fromDay, toDay }),
+  getCalendarItem: (id: string) => inv<CalendarItem | null>("get_calendar_item", { id }),
   upsertCalendarItem: (item: Partial<CalendarItem> & { title: string; day: string; kind: CalendarKind }) =>
     inv<CalendarItem>("upsert_calendar_item", { item }),
   deleteCalendarItem: (id: string) => inv<void>("delete_calendar_item", { id }),
@@ -478,6 +479,7 @@ export type CalendarItem = {
   kind: CalendarKind;
   day: string;
   time?: string | null;
+  meeting_url?: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;

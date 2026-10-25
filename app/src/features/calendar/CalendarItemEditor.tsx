@@ -53,6 +53,7 @@ export function CalendarItemEditor({
   myId,
   myName,
   today,
+  startInEdit = true,
   onClose,
   onSave,
   onDelete,
@@ -68,6 +69,7 @@ export function CalendarItemEditor({
   myId: string;
   myName: string;
   today: string;
+  startInEdit?: boolean;
   onClose: () => void;
   onSave: () => void;
   onDelete: () => void;
@@ -76,16 +78,15 @@ export function CalendarItemEditor({
   onToggleOption: (optionId: string, checked: boolean) => void;
   onAck: () => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(startInEdit);
 
-  // Existing items always open in view mode; new items start in edit.
   useEffect(() => {
     if (!open || !draft) {
       setEditing(false);
       return;
     }
-    setEditing(!draft.id);
-  }, [open, draft?.id]);
+    setEditing(startInEdit || !draft.id);
+  }, [open, draft?.id, startInEdit]);
 
   if (!draft) return null;
 
@@ -232,6 +233,19 @@ export function CalendarItemEditor({
             onChange={(time) => setDraft({ ...draft, time })}
           />
         </Stack>
+
+        {draft.kind === "meeting" && (
+          <TextField
+            size="small"
+            label="Meeting Link / URL (Optional)"
+            value={draft.meeting_url || ""}
+            onChange={(e) => setDraft({ ...draft, meeting_url: e.target.value })}
+            fullWidth
+            disabled={fieldsLocked}
+            placeholder="https://meet.google.com/... or Teams / Zoom link"
+            InputLabelProps={{ shrink: true, sx: labelSx }}
+          />
+        )}
 
         {showDetails && (
           <TextField

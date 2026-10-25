@@ -4,9 +4,8 @@ import {
   Button,
   Chip,
   IconButton,
-  List,
-  ListItemButton,
-  ListItemText,
+  LinearProgress,
+  Paper,
   Stack,
   Typography,
 } from "@mui/material";
@@ -14,12 +13,21 @@ import AddIcon from "@mui/icons-material/AddRounded";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeftRounded";
 import ChevronRightIcon from "@mui/icons-material/ChevronRightRounded";
 import EventIcon from "@mui/icons-material/EventRounded";
+import GroupsIcon from "@mui/icons-material/GroupsRounded";
+import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutlineRounded";
+import NotificationsActiveIcon from "@mui/icons-material/NotificationsActiveRounded";
+import StickyNote2Icon from "@mui/icons-material/StickyNote2Rounded";
+import CheckCircleIcon from "@mui/icons-material/CheckCircleRounded";
+import PersonOutlineIcon from "@mui/icons-material/PersonOutlineRounded";
+import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
 import { listen } from "@tauri-apps/api/event";
-import { peerApi, type CalendarItem, type Peer } from "../../peer";
+import { peerApi, type CalendarItem, type Peer, type CalendarKind } from "../../peer";
 import { CalendarItemEditor } from "./CalendarItemEditor";
+import { CalendarItemViewDialog } from "./CalendarItemViewDialog";
 import {
   dayKey,
   daysInMonth,
+  formatTime12,
   isPastDay,
   monthLabel,
   parseDay,
@@ -30,6 +38,7 @@ import {
   newChecklistOption,
   parseAcks,
   parseChecklist,
+  KIND_THEMES,
   type CalendarDraft,
 } from "./calendarTypes";
 
@@ -42,6 +51,7 @@ function itemToDraft(it: CalendarItem, myId: string): CalendarDraft {
     kind: it.kind,
     day: it.day,
     time: it.time || "",
+    meeting_url: it.meeting_url || "",
     participant_ids: [...(it.participant_ids || [])].filter((id) => id !== myId),
     created_by: it.created_by,
     done: !!it.done,
@@ -52,11 +62,18 @@ function itemToDraft(it: CalendarItem, myId: string): CalendarDraft {
   };
 }
 
-function checklistSummary(it: CalendarItem): string {
-  const opts = parseChecklist(it.checklist);
-  if (!opts.length) return it.done ? "Done" : "To-do";
-  const done = opts.filter((o) => o.checked_by.length > 0).length;
-  return `${done}/${opts.length} checked`;
+function KindBadgeIcon({ kind, sx }: { kind: CalendarKind; sx?: any }) {
+  switch (kind) {
+    case "meeting":
+      return <GroupsIcon sx={sx} />;
+    case "todo":
+      return <CheckCircleOutlineIcon sx={sx} />;
+    case "reminder":
+      return <NotificationsActiveIcon sx={sx} />;
+    case "note":
+    default:
+      return <StickyNote2Icon sx={sx} />;
+  }
 }
 
 export type CalendarFocusRequest = {
@@ -70,6 +87,21 @@ export type CalendarShareNotify = {
   kind: CalendarItem["kind"];
   day: string;
   time?: string | null;
+  meeting_url?: string | null;
+};
+
+const timelineScrollSx = {
+  scrollbarWidth: "thin" as const,
+  scrollbarColor: "rgba(255,255,255,0.2) transparent",
+  "&::-webkit-scrollbar": { width: 6 },
+  "&::-webkit-scrollbar-track": { background: "transparent" },
+  "&::-webkit-scrollbar-thumb": {
+    backgroundColor: "rgba(255,255,255,0.2)",
+    borderRadius: 8,
+  },
+  "&::-webkit-scrollbar-thumb:hover": {
+    backgroundColor: "rgba(255,255,255,0.35)",
+  },
 };
 
 export function CalendarScreen({
@@ -98,6 +130,7 @@ export function CalendarScreen({
   });
   const [selectedDay, setSelectedDay] = useState(today);
   const [items, setItems] = useState<CalendarItem[]>([]);
+  const [viewItem, setViewItem] = useState<CalendarDraft | null>(null);
   const [editor, setEditor] = useState<CalendarDraft | null>(null);
   const [busy, setBusy] = useState(false);
   const focusTries = useRef(0);
@@ -118,6 +151,11 @@ export function CalendarScreen({
     try {
       const rows = await peerApi.listCalendarItems(range.from, range.to);
       setItems(rows);
+      setViewItem((prev) => {
+        if (!prev?.id) return prev;
+        const updated = rows.find((r) => r.id === prev.id);
+        return updated ? itemToDraft(updated, myId) : prev;
+      });
       setEditor((prev) => {
         if (!prev?.id) return prev;
         const updated = rows.find((r) => r.id === prev.id);
@@ -142,7 +180,7 @@ export function CalendarScreen({
     return () => un?.();
   }, [refresh]);
 
-  // Deep-link from chat View button — move month/day then open detail.
+  // Deep-link from chat View button — move month/day then open view dialog.
   useEffect(() => {
     if (!focusRequest?.itemId) {
       focusTries.current = 0;
@@ -160,7 +198,7 @@ export function CalendarScreen({
     const hit = items.find((it) => it.id === focusRequest.itemId);
     if (hit) {
       setSelectedDay(hit.day);
-      setEditor(itemToDraft(hit, myId));
+      setViewItem(itemToDraft(hit, myId));
       focusTries.current = 0;
       onFocusConsumed?.();
       return;
@@ -199,6 +237,16 @@ export function CalendarScreen({
 
   const dayItems = byDay.get(selectedDay) || [];
   const pastSelected = isPastDay(selectedDay, today);
+
+  // Chronologically sorted items for timeline day view
+  const sortedDayItems = useMemo(() => {
+    return [...dayItems].sort((a, b) => {
+      if (a.time && b.time) return a.time.localeCompare(b.time);
+      if (a.time && !b.time) return -1;
+      if (!a.time && b.time) return 1;
+      return a.title.localeCompare(b.title);
+    });
+  }, [dayItems]);
 
   const grid = useMemo(() => {
     const first = new Date(cursor.y, cursor.m, 1);
@@ -242,6 +290,10 @@ export function CalendarScreen({
         kind: editor.kind,
         day: editor.day,
         time: editor.time.trim() || null,
+        meeting_url:
+          editor.kind === "meeting" && editor.meeting_url?.trim()
+            ? editor.meeting_url.trim()
+            : null,
         participant_ids: editor.participant_ids,
         done: editor.done,
         shared: editor.participant_ids.length > 0,
@@ -259,6 +311,7 @@ export function CalendarScreen({
               kind: saved.kind || editor.kind,
               day: saved.day || editor.day,
               time: saved.time ?? (editor.time.trim() || null),
+              meeting_url: saved.meeting_url ?? null,
             });
           } catch (err: any) {
             onStatus?.(err?.message || String(err));
@@ -284,6 +337,7 @@ export function CalendarScreen({
     try {
       await peerApi.deleteCalendarItem(id);
       if (editor?.id === id) setEditor(null);
+      if (viewItem?.id === id) setViewItem(null);
       await refresh();
     } catch (err: any) {
       onStatus?.(err?.message || String(err));
@@ -293,9 +347,10 @@ export function CalendarScreen({
   }
 
   async function toggleOption(optionId: string, checked: boolean) {
-    if (!editor?.id) return;
+    const targetId = viewItem?.id || editor?.id;
+    if (!targetId) return;
     try {
-      await peerApi.toggleCalendarChecklistOption(editor.id, optionId, checked);
+      await peerApi.toggleCalendarChecklistOption(targetId, optionId, checked);
       await refresh();
     } catch (err: any) {
       onStatus?.(err?.message || String(err));
@@ -303,9 +358,10 @@ export function CalendarScreen({
   }
 
   async function ackItem() {
-    if (!editor?.id) return;
+    const targetId = viewItem?.id || editor?.id;
+    if (!targetId) return;
     try {
-      await peerApi.ackCalendarItem(editor.id);
+      await peerApi.ackCalendarItem(targetId);
       await refresh();
     } catch (err: any) {
       onStatus?.(err?.message || String(err));
@@ -321,36 +377,45 @@ export function CalendarScreen({
     setEditor(d);
   }
 
+  function jumpToToday() {
+    const now = new Date();
+    setCursor({ y: now.getFullYear(), m: now.getMonth() });
+    setSelectedDay(today);
+  }
+
   const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   return (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <Box sx={{ px: 2.5, pt: 2, pb: 1.25, borderBottom: "1px solid", borderColor: "divider" }}>
+      {/* Top Header */}
+      <Box sx={{ px: 2.5, pt: 2, pb: 1.5, borderBottom: "1px solid", borderColor: "divider" }}>
         <Stack direction="row" alignItems="center" spacing={1.5}>
           <Box
             sx={{
               width: 40,
               height: 40,
-              borderRadius: 2,
+              borderRadius: 2.5,
               display: "grid",
               placeItems: "center",
               bgcolor: "primary.main",
               color: "primary.contrastText",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
             }}
           >
-            <EventIcon />
+            <EventIcon fontSize="medium" />
           </Box>
           <Box flex={1} minWidth={0}>
-            <Typography variant="h6" fontWeight={700}>
+            <Typography variant="h6" fontWeight={700} lineHeight={1.2}>
               Calendar
             </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Notes, reminders, and meetings — share with people on this LAN.
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
+              Notes, reminders, to-dos and meetings — share with people on this LAN.
             </Typography>
           </Box>
         </Stack>
       </Box>
 
+      {/* Main Content Area: Left Month Grid, Right Day Timeline */}
       <Box
         sx={{
           flex: 1,
@@ -360,49 +425,73 @@ export function CalendarScreen({
           overflow: "hidden",
         }}
       >
+        {/* Section 2: Month View (Left / Main Grid) */}
         <Box
           sx={{
-            flex: { xs: "0 0 auto", md: "1 1 55%" },
-            p: 2,
+            flex: { xs: "0 0 auto", md: "1 1 54%" },
+            p: 2.5,
             borderRight: { md: "1px solid" },
             borderColor: "divider",
             overflow: "auto",
+            display: "flex",
+            flexDirection: "column",
           }}
         >
-          <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1.5}>
-            <IconButton
+          {/* Month Navigation Row */}
+          <Stack direction="row" alignItems="center" justifyContent="space-between" mb={2}>
+            <Stack direction="row" alignItems="center" spacing={0.5}>
+              <IconButton
+                size="small"
+                aria-label="Previous month"
+                onClick={() =>
+                  setCursor((c) => {
+                    const d = new Date(c.y, c.m - 1, 1);
+                    return { y: d.getFullYear(), m: d.getMonth() };
+                  })
+                }
+              >
+                <ChevronLeftIcon />
+              </IconButton>
+              <Typography fontWeight={700} fontSize="1.05rem" sx={{ px: 0.5, minWidth: 150 }}>
+                {monthLabel(cursor.y, cursor.m)}
+              </Typography>
+              <IconButton
+                size="small"
+                aria-label="Next month"
+                onClick={() =>
+                  setCursor((c) => {
+                    const d = new Date(c.y, c.m + 1, 1);
+                    return { y: d.getFullYear(), m: d.getMonth() };
+                  })
+                }
+              >
+                <ChevronRightIcon />
+              </IconButton>
+            </Stack>
+
+            <Button
               size="small"
-              aria-label="Previous month"
-              onClick={() =>
-                setCursor((c) => {
-                  const d = new Date(c.y, c.m - 1, 1);
-                  return { y: d.getFullYear(), m: d.getMonth() };
-                })
-              }
+              variant="outlined"
+              onClick={jumpToToday}
+              sx={{
+                borderRadius: 2,
+                textTransform: "none",
+                fontWeight: 600,
+                fontSize: "0.8rem",
+                px: 1.5,
+              }}
             >
-              <ChevronLeftIcon />
-            </IconButton>
-            <Typography fontWeight={700}>{monthLabel(cursor.y, cursor.m)}</Typography>
-            <IconButton
-              size="small"
-              aria-label="Next month"
-              onClick={() =>
-                setCursor((c) => {
-                  const d = new Date(c.y, c.m + 1, 1);
-                  return { y: d.getFullYear(), m: d.getMonth() };
-                })
-              }
-            >
-              <ChevronRightIcon />
-            </IconButton>
+              Today
+            </Button>
           </Stack>
 
+          {/* Weekday Labels Header */}
           <Box
             sx={{
               display: "grid",
               gridTemplateColumns: "repeat(7, 1fr)",
-              gap: 0.5,
-              mb: 0.5,
+              gap: 0.75,
+              mb: 1,
             }}
           >
             {weekdays.map((w) => (
@@ -412,19 +501,33 @@ export function CalendarScreen({
                 color="text.secondary"
                 fontWeight={600}
                 textAlign="center"
+                sx={{ textTransform: "uppercase", fontSize: "0.75rem", letterSpacing: "0.5px" }}
               >
                 {w}
               </Typography>
             ))}
           </Box>
-          <Box sx={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 0.5 }}>
+
+          {/* Month Day Cells */}
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "repeat(7, 1fr)",
+              gap: 0.75,
+              flex: 1,
+            }}
+          >
             {grid.map((cell) => {
               if (cell.day == null) {
-                return <Box key={cell.key} sx={{ aspectRatio: "1", minHeight: 40 }} />;
+                return <Box key={cell.key} sx={{ aspectRatio: "1", minHeight: 44 }} />;
               }
-              const count = byDay.get(cell.key)?.length || 0;
+              const cellItems = byDay.get(cell.key) || [];
               const selected = cell.key === selectedDay;
               const isToday = cell.key === today;
+
+              // Distinct kind types present on this day
+              const kinds = Array.from(new Set(cellItems.map((i) => i.kind)));
+
               return (
                 <Box
                   key={cell.key}
@@ -433,19 +536,33 @@ export function CalendarScreen({
                   onClick={() => setSelectedDay(cell.key)}
                   sx={{
                     aspectRatio: "1",
-                    minHeight: 44,
+                    minHeight: 48,
                     border: "1px solid",
-                    borderColor: selected ? "primary.main" : "divider",
-                    borderRadius: 2,
-                    bgcolor: selected ? "action.selected" : "background.paper",
+                    borderColor: selected
+                      ? "primary.main"
+                      : isToday
+                        ? "primary.light"
+                        : "divider",
+                    borderRadius: 2.5,
+                    bgcolor: selected
+                      ? "action.selected"
+                      : isToday
+                        ? "action.hover"
+                        : "background.paper",
+                    boxShadow: selected ? "0 0 0 2px rgba(99, 102, 241, 0.25)" : "none",
                     cursor: "pointer",
                     display: "flex",
                     flexDirection: "column",
                     alignItems: "center",
                     justifyContent: "center",
-                    gap: 0.25,
+                    gap: 0.5,
                     p: 0.5,
                     color: "text.primary",
+                    transition: "all 0.15s ease",
+                    "&:hover": {
+                      borderColor: "primary.main",
+                      bgcolor: "action.hover",
+                    },
                   }}
                 >
                   <Typography
@@ -455,99 +572,434 @@ export function CalendarScreen({
                   >
                     {cell.day}
                   </Typography>
-                  {count > 0 && (
-                    <Box
-                      sx={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: "50%",
-                        bgcolor: "primary.main",
-                      }}
-                    />
-                  )}
+
+                  {/* Clean Status Indicator Dots (Mockup Section 2) */}
+                  <Box sx={{ height: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {kinds.length > 0 && (
+                      <Stack direction="row" spacing={0.4} alignItems="center" justifyContent="center">
+                        {kinds.slice(0, 4).map((kind) => (
+                          <Box
+                            key={kind}
+                            sx={{
+                              width: 5,
+                              height: 5,
+                              borderRadius: "50%",
+                              bgcolor: KIND_THEMES[kind]?.color || "primary.main",
+                            }}
+                          />
+                        ))}
+                      </Stack>
+                    )}
+                  </Box>
                 </Box>
               );
             })}
           </Box>
         </Box>
 
+        {/* Section 3: Day View Timeline (Right Panel) */}
         <Box
           sx={{
-            flex: { xs: "1 1 auto", md: "1 1 45%" },
+            flex: { xs: "1 1 auto", md: "1 1 46%" },
             display: "flex",
             flexDirection: "column",
             minHeight: 0,
-            p: 2,
+            p: 2.5,
           }}
         >
-          <Stack direction="row" alignItems="center" spacing={1} mb={1}>
-            <Typography fontWeight={700} flex={1}>
-              {parseDay(selectedDay).toLocaleDateString(undefined, {
-                weekday: "long",
-                month: "short",
-                day: "numeric",
-              })}
-            </Typography>
-            <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={openNew}>
+          {/* Day View Header */}
+          <Stack direction="row" alignItems="center" spacing={1} mb={2}>
+            <Box flex={1} minWidth={0}>
+              <Typography fontWeight={700} fontSize="1.05rem" noWrap>
+                {parseDay(selectedDay).toLocaleDateString(undefined, {
+                  weekday: "long",
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}
+              </Typography>
+            </Box>
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={<AddIcon />}
+              onClick={openNew}
+              sx={{
+                borderRadius: 2,
+                textTransform: "none",
+                fontWeight: 600,
+                px: 1.75,
+              }}
+            >
               Add{pastSelected ? " note" : ""}
             </Button>
           </Stack>
 
-          <Box sx={{ flex: 1, overflow: "auto", minHeight: 0 }}>
-            {!dayItems.length ? (
-              <Typography color="text.secondary" variant="body2" sx={{ mt: 2 }}>
-                {pastSelected
-                  ? "Nothing on this day. You can still add a note."
-                  : "Nothing on this day. Add a note, reminder, meeting, or to-do."}
-              </Typography>
+          {/* Timeline Scrollable Container */}
+          <Box sx={{ flex: 1, overflow: "auto", minHeight: 0, pr: 0.5, ...timelineScrollSx }}>
+            {!sortedDayItems.length ? (
+              <Box
+                sx={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  py: 6,
+                  px: 2,
+                  textAlign: "center",
+                  bgcolor: "action.hover",
+                  borderRadius: 3,
+                  border: "1px dashed",
+                  borderColor: "divider",
+                  mt: 1,
+                }}
+              >
+                <EventIcon sx={{ fontSize: 40, color: "text.disabled", mb: 1 }} />
+                <Typography color="text.secondary" variant="body2" fontWeight={500}>
+                  {pastSelected
+                    ? "Nothing on this day. You can still add a note."
+                    : "No events scheduled for this day."}
+                </Typography>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<AddIcon />}
+                  onClick={openNew}
+                  sx={{ mt: 1.5, borderRadius: 2, textTransform: "none" }}
+                >
+                  Create an item
+                </Button>
+              </Box>
             ) : (
-              <List dense disablePadding>
-                {dayItems.map((it) => (
-                  <ListItemButton
-                    key={it.id}
-                    onClick={() => setEditor(itemToDraft(it, myId))}
-                    sx={{ borderRadius: 2, mb: 0.5, alignItems: "flex-start" }}
-                  >
-                    <ListItemText
-                      primary={
-                        <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap">
-                          <Typography fontWeight={600}>
-                            {it.time ? `${it.time} · ` : ""}
-                            {it.title}
-                          </Typography>
-                          <Chip size="small" label={it.kind} sx={{ height: 20, fontSize: 11 }} />
-                          {it.shared && (
+              <Box sx={{ position: "relative", pt: 1, pb: 2 }}>
+                {sortedDayItems.map((it, idx) => {
+                  const theme = KIND_THEMES[it.kind] || KIND_THEMES.note;
+                  const timeLabel = it.time ? formatTime12(it.time) : "All day";
+
+                  // Details and summaries based on type
+                  const checklistOpts = parseChecklist(it.checklist);
+                  const doneOpts = checklistOpts.filter((o) => o.checked_by.length > 0).length;
+                  const isTodo = it.kind === "todo";
+
+                  // Acknowledgement metadata for meetings/reminders
+                  const ackCount = Object.keys(it.acks || {}).length;
+                  const totalExpected = Array.from(
+                    new Set([it.created_by, ...(it.participant_ids || [])].filter(Boolean))
+                  ).length;
+
+                  // Creator / Shared text
+                  const creatorName =
+                    it.created_by === myId
+                      ? "You"
+                      : peers.find((p) => p.user_id === it.created_by)?.display_name || "Peer";
+
+                  return (
+                    <Box
+                      key={it.id}
+                      sx={{
+                        display: "flex",
+                        gap: 1.5,
+                        position: "relative",
+                        mb: 2,
+                        "&:last-child": { mb: 0 },
+                      }}
+                    >
+                      {/* Left Time Marker & Timeline Rail */}
+                      <Box
+                        sx={{
+                          width: 72,
+                          flexShrink: 0,
+                          textAlign: "right",
+                          pt: 0.5,
+                        }}
+                      >
+                        <Typography
+                          variant="caption"
+                          fontWeight={600}
+                          sx={{
+                            color: it.time ? "text.primary" : "text.secondary",
+                            fontSize: "0.78rem",
+                            display: "block",
+                          }}
+                        >
+                          {timeLabel}
+                        </Typography>
+                      </Box>
+
+                      {/* Vertical Connector Line & Dot */}
+                      <Box
+                        sx={{
+                          position: "relative",
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: "center",
+                          width: 14,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {/* Dot Node */}
+                        <Box
+                          sx={{
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            bgcolor: theme.color,
+                            border: "2px solid",
+                            borderColor: "background.paper",
+                            boxShadow: `0 0 0 2px ${theme.color}`,
+                            mt: 0.75,
+                            zIndex: 1,
+                          }}
+                        />
+                        {/* Vertical line connecting nodes */}
+                        {idx < sortedDayItems.length - 1 && (
+                          <Box
+                            sx={{
+                              width: 2,
+                              flex: 1,
+                              bgcolor: "divider",
+                              my: 0.5,
+                            }}
+                          />
+                        )}
+                      </Box>
+
+                      {/* Right Item Card (Mockup Section 3) */}
+                      <Paper
+                        elevation={0}
+                        onClick={() => setViewItem(itemToDraft(it, myId))}
+                        sx={{
+                          flex: 1,
+                          minWidth: 0,
+                          p: 1.75,
+                          borderRadius: 2.5,
+                          bgcolor: "background.paper",
+                          border: "1px solid",
+                          borderColor: "divider",
+                          borderLeft: `4px solid ${theme.color}`,
+                          cursor: "pointer",
+                          transition: "all 0.15s ease",
+                          "&:hover": {
+                            borderColor: theme.border,
+                            boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
+                          },
+                        }}
+                      >
+                        {/* Card Header Row */}
+                        <Stack direction="row" alignItems="flex-start" spacing={1.25}>
+                          {/* Type Icon Chip */}
+                          <Box
+                            sx={{
+                              width: 32,
+                              height: 32,
+                              borderRadius: 2,
+                              display: "grid",
+                              placeItems: "center",
+                              bgcolor: theme.bg,
+                              color: theme.color,
+                              flexShrink: 0,
+                              mt: 0.25,
+                            }}
+                          >
+                            <KindBadgeIcon kind={it.kind} sx={{ fontSize: 18 }} />
+                          </Box>
+
+                          {/* Titles and Subtitle */}
+                          <Box flex={1} minWidth={0}>
+                            <Typography fontWeight={700} fontSize="0.95rem" lineHeight={1.3} noWrap>
+                              {it.title}
+                            </Typography>
+                            <Stack direction="row" spacing={0.75} alignItems="center" mt={0.25}>
+                              <Typography
+                                variant="caption"
+                                fontWeight={600}
+                                sx={{ color: theme.color, fontSize: "0.75rem" }}
+                              >
+                                {theme.label}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                •
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {it.shared ? "Shared" : "Personal"}
+                              </Typography>
+                            </Stack>
+                          </Box>
+
+                          {/* Open Button */}
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setViewItem(itemToDraft(it, myId));
+                            }}
+                            sx={{
+                              borderRadius: 2,
+                              textTransform: "none",
+                              fontSize: "0.78rem",
+                              py: 0.35,
+                              px: 1.5,
+                              flexShrink: 0,
+                            }}
+                          >
+                            Open
+                          </Button>
+                        </Stack>
+
+                        {/* Card Body & Progress Section */}
+                        {isTodo && checklistOpts.length > 0 && (
+                          <Box sx={{ mt: 1.5 }}>
+                            <Stack direction="row" justifyContent="space-between" alignItems="center" mb={0.5}>
+                              <Typography variant="caption" color="text.secondary" fontWeight={500}>
+                                Checklist
+                              </Typography>
+                              <Typography variant="caption" fontWeight={600} color={theme.color}>
+                                {doneOpts}/{checklistOpts.length} completed
+                              </Typography>
+                            </Stack>
+                            <LinearProgress
+                              variant="determinate"
+                              value={(doneOpts / checklistOpts.length) * 100}
+                              sx={{
+                                height: 5,
+                                borderRadius: 3,
+                                bgcolor: "action.hover",
+                                "& .MuiLinearProgress-bar": {
+                                  bgcolor: theme.color,
+                                  borderRadius: 3,
+                                },
+                              }}
+                            />
+                          </Box>
+                        )}
+
+                        {it.kind === "meeting" && (
+                          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" mt={1.25}>
+                            {it.shared && totalExpected > 0 && (
+                              <Chip
+                                size="small"
+                                icon={<CheckCircleIcon sx={{ fontSize: "14px !important" }} />}
+                                label={`${ackCount}/${totalExpected} acknowledged`}
+                                sx={{
+                                  height: 22,
+                                  fontSize: "0.75rem",
+                                  bgcolor: "rgba(34, 197, 94, 0.12)",
+                                  color: "#22c55e",
+                                  fontWeight: 600,
+                                  "& .MuiChip-icon": { color: "#22c55e" },
+                                }}
+                              />
+                            )}
+                            {it.shared && (
+                              <Stack direction="row" spacing={0.5} alignItems="center">
+                                <PersonOutlineIcon sx={{ fontSize: 15, color: "text.secondary" }} />
+                                <Typography variant="caption" color="text.secondary">
+                                  {(it.participant_ids || []).length + 1} participants
+                                </Typography>
+                              </Stack>
+                            )}
+                            {it.meeting_url && (
+                              <Chip
+                                size="small"
+                                icon={<OpenInNewIcon sx={{ fontSize: "13px !important" }} />}
+                                label="Join Link"
+                                clickable
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void peerApi.openExternalUrl(it.meeting_url!);
+                                }}
+                                sx={{
+                                  height: 22,
+                                  fontSize: "0.75rem",
+                                  bgcolor: "rgba(59, 130, 246, 0.12)",
+                                  color: "#3b82f6",
+                                  fontWeight: 600,
+                                }}
+                              />
+                            )}
+                          </Stack>
+                        )}
+
+                        {it.kind === "reminder" && it.shared && totalExpected > 0 && (
+                          <Box mt={1.25}>
                             <Chip
                               size="small"
-                              color="primary"
-                              variant="outlined"
-                              label="Shared"
-                              sx={{ height: 20, fontSize: 11 }}
+                              icon={<CheckCircleIcon sx={{ fontSize: "14px !important" }} />}
+                              label={`${ackCount}/${totalExpected} acknowledged`}
+                              sx={{
+                                height: 22,
+                                fontSize: "0.75rem",
+                                bgcolor: "rgba(34, 197, 94, 0.12)",
+                                color: "#22c55e",
+                                fontWeight: 600,
+                                "& .MuiChip-icon": { color: "#22c55e" },
+                              }}
                             />
-                          )}
-                        </Stack>
-                      }
-                      secondary={
-                        it.kind === "todo"
-                          ? checklistSummary(it)
-                          : it.body?.trim()
-                            ? it.body
-                            : it.shared
-                              ? `${(it.participant_ids || []).length} people`
-                              : it.created_by === myId
-                                ? "Personal"
-                                : "From a peer"
-                      }
-                      secondaryTypographyProps={{ noWrap: true }}
-                    />
-                  </ListItemButton>
-                ))}
-              </List>
+                          </Box>
+                        )}
+
+                        {it.kind === "note" && (
+                          <Box mt={1}>
+                            {it.body?.trim() && (
+                              <Typography
+                                variant="body2"
+                                color="text.secondary"
+                                sx={{
+                                  fontSize: "0.82rem",
+                                  display: "-webkit-box",
+                                  WebkitLineClamp: 2,
+                                  WebkitBoxOrient: "vertical",
+                                  overflow: "hidden",
+                                  mb: 0.5,
+                                }}
+                              >
+                                {it.body}
+                              </Typography>
+                            )}
+                            {it.shared && (
+                              <Typography variant="caption" color="text.secondary" fontStyle="italic">
+                                {it.created_by === myId ? "Shared with peers" : `Shared by ${creatorName}`}
+                              </Typography>
+                            )}
+                          </Box>
+                        )}
+                      </Paper>
+                    </Box>
+                  );
+                })}
+              </Box>
             )}
           </Box>
         </Box>
       </Box>
 
+      {/* Read-Only Type-Specific View Dialog (Panels 4, 5, 6, 7) */}
+      <CalendarItemViewDialog
+        open={!!viewItem}
+        item={viewItem}
+        myId={myId}
+        myName={myName}
+        peers={others}
+        today={today}
+        busy={busy}
+        onClose={() => setViewItem(null)}
+        onEdit={() => {
+          if (!viewItem) return;
+          setEditor(viewItem);
+          setViewItem(null);
+        }}
+        onDelete={() => viewItem?.id && void removeItem(viewItem.id)}
+        onToggleOption={(optionId, checked) => void toggleOption(optionId, checked)}
+        onAck={() => void ackItem()}
+        onOpenUrl={(url) => {
+          void peerApi.openExternalUrl(url).catch((err) => {
+            onStatus?.(err?.message || String(err));
+          });
+        }}
+      />
+
+      {/* Form Editor for Creating or Modifying Items */}
       <CalendarItemEditor
         open={!!editor}
         draft={editor}
@@ -557,6 +1009,7 @@ export function CalendarScreen({
         myId={myId}
         myName={myName}
         today={today}
+        startInEdit={true}
         onClose={() => setEditor(null)}
         onSave={() => void saveDraft()}
         onDelete={() => editor?.id && void removeItem(editor.id)}

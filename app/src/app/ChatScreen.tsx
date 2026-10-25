@@ -1990,6 +1990,7 @@ export function ChatScreen({
       kind: share.kind,
       day: share.day,
       time: share.time ?? null,
+      meeting_url: (share as any).meeting_url ?? null,
       fromName: profile.display_name,
     });
     const enc = await encryptMessage(body, conv.id, profile.id, identity, pubs);

@@ -313,6 +313,7 @@ pub fn run() {
             delete_saved_item,
             list_saved_items,
             list_calendar_items,
+            get_calendar_item,
             upsert_calendar_item,
             delete_calendar_item,
             set_calendar_todo_done,
