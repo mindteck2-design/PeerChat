@@ -10,6 +10,7 @@ import {
   DialogContent,
   Divider,
   IconButton,
+  InputAdornment,
   List,
   ListItemAvatar,
   ListItemButton,
@@ -43,6 +44,9 @@ import PhotoLibraryRoundedIcon from "@mui/icons-material/PhotoLibraryRounded";
 import InsertDriveFileRoundedIcon from "@mui/icons-material/InsertDriveFileRounded";
 import LinkRoundedIcon from "@mui/icons-material/LinkRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
+import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
+import FilterListRoundedIcon from "@mui/icons-material/FilterListRounded";
+import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 
 import {
   extractChatMediaFilesLinks,
@@ -51,7 +55,7 @@ import {
   getFileThemeColor,
 } from "../chat/ChatMediaUtils";
 import { ViewAllCategoryView } from "../chat/ViewAllCategoryView";
-import { avatarColor, formatBytes } from "../../shared/format";
+import { avatarColor, formatBytes, lastSeenLabel } from "../../shared/format";
 import { openExternalLink } from "../../panels";
 import type { ChatScreenVm } from "../chat/chatVm";
 
@@ -80,6 +84,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
     openAttachment,
     openDm,
     others,
+    peers,
     plain,
     profile,
     renameDraft,
@@ -97,6 +102,14 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
   // Rename mode
   const [isRenaming, setIsRenaming] = useState(false);
 
+  // Group settings menu
+  const [groupSettingsAnchor, setGroupSettingsAnchor] = useState<HTMLElement | null>(null);
+
+  // Member search & role filter for scaling to 100+ members
+  const [memberSearch, setMemberSearch] = useState("");
+  const [memberRoleFilter, setMemberRoleFilter] = useState<"all" | "admin" | "online">("all");
+  const [filterMenuAnchor, setFilterMenuAnchor] = useState<HTMLElement | null>(null);
+
   // Member action menu
   const [memberMenuAnchor, setMemberMenuAnchor] = useState<{
     el: HTMLElement;
@@ -105,11 +118,38 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
 
   const isOpen = membersOpen && active?.kind === "group";
 
+  // Peer lookup map for fast online/last seen lookups across 100+ members
+  const peerMap = useMemo(() => {
+    const map = new Map<string, any>();
+    for (const p of others || []) map.set(p.user_id, p);
+    for (const p of peers || []) map.set(p.user_id, p);
+    return map;
+  }, [others, peers]);
+
   // Media, Files, Links extraction
   const { media, files, links } = useMemo(() => {
     if (!isOpen) return { media: [], files: [], links: [] };
     return extractChatMediaFilesLinks(messages, fileNames, fileSizes, fileThumbs, plain);
   }, [isOpen, messages, fileNames, fileSizes, fileThumbs, plain]);
+
+  // Filtered members list
+  const filteredMembers = useMemo(() => {
+    let list = members;
+    if (memberSearch.trim()) {
+      const q = memberSearch.toLowerCase();
+      list = list.filter((m) => m.display_name.toLowerCase().includes(q));
+    }
+    if (memberRoleFilter === "admin") {
+      list = list.filter((m) => m.role === "admin");
+    } else if (memberRoleFilter === "online") {
+      list = list.filter((m) => {
+        if (m.user_id === profile.id) return true;
+        const p = peerMap.get(m.user_id);
+        return !!p?.online;
+      });
+    }
+    return list;
+  }, [members, memberSearch, memberRoleFilter, profile.id, peerMap]);
 
   if (!isOpen) return null;
 
@@ -117,11 +157,11 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
   const memberCount = members.length;
   const createdDateStr = formatFullDateTime(active?.created_at) || "Recently";
 
-  // Find creator name: look for an admin, or fallback to first member
+  // Find creator name
   const adminMember = members.find((m) => m.role === "admin");
   const creatorName = adminMember
     ? adminMember.user_id === profile.id
-      ? `${profile.display_name} (you)`
+      ? `${profile.display_name}`
       : adminMember.display_name
     : "Admin";
 
@@ -148,6 +188,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
         setViewAllCategory(null);
         setAddPeopleMode(false);
         setIsRenaming(false);
+        setMemberSearch("");
       }}
       maxWidth="sm"
       fullWidth
@@ -181,7 +222,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
         />
       ) : (
         <Box sx={{ display: "flex", flexDirection: "column", maxHeight: "88vh" }}>
-          {/* ── HEADER TITLE BAR ── */}
+          {/* ── HEADER TITLE BAR (Industry Team ... ✕) ── */}
           <Box
             sx={{
               display: "flex",
@@ -193,7 +234,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
             }}
           >
             <Typography variant="h6" fontWeight={700} fontSize={18} color="#FFFFFF">
-              {groupTitle} — Group details
+              {groupTitle}
             </Typography>
             <IconButton
               size="small"
@@ -215,319 +256,125 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                   display: "flex",
                   alignItems: "center",
+                  justifyContent: "space-between",
                   gap: 2,
                 }}
               >
-                <Avatar
-                  sx={{
-                    width: 64,
-                    height: 64,
-                    bgcolor: "rgba(130, 169, 248, 0.2)",
-                    color: "primary.main",
-                    flexShrink: 0,
-                  }}
-                >
-                  <GroupsRoundedIcon sx={{ fontSize: 34, color: "primary.main" }} />
-                </Avatar>
-
-                <Box flex={1} minWidth={0}>
-                  {/* Group Title with inline edit */}
-                  {isRenaming ? (
-                    <Box display="flex" alignItems="center" gap={1} mb={0.5}>
-                      <input
-                        type="text"
-                        value={renameDraft}
-                        onChange={(e) => setRenameDraft(e.target.value)}
-                        onKeyDown={(e) => e.key === "Enter" && void handleSaveRename()}
-                        style={{
-                          backgroundColor: "rgba(255, 255, 255, 0.08)",
-                          border: "1px solid rgba(255, 255, 255, 0.2)",
-                          borderRadius: 6,
-                          color: "#FFFFFF",
-                          fontSize: 16,
-                          fontWeight: 700,
-                          padding: "4px 8px",
-                          outline: "none",
-                          width: "100%",
-                        }}
-                        autoFocus
-                      />
-                      <IconButton size="small" onClick={() => void handleSaveRename()} sx={{ color: "primary.main" }}>
-                        <CheckRoundedIcon fontSize="small" />
-                      </IconButton>
-                    </Box>
-                  ) : (
-                    <Box display="flex" alignItems="center" gap={1}>
-                      <Typography fontWeight={700} fontSize={19} color="#FFFFFF" noWrap>
-                        {groupTitle}
-                      </Typography>
-                      {isAdmin && (
-                        <IconButton
-                          size="small"
-                          onClick={() => {
-                            setRenameDraft(groupTitle);
-                            setIsRenaming(true);
-                          }}
-                          sx={{ p: 0.3, color: "text.secondary", "&:hover": { color: "#FFFFFF" } }}
-                        >
-                          <EditOutlinedIcon sx={{ fontSize: 16 }} />
-                        </IconButton>
-                      )}
-                    </Box>
-                  )}
-
-                  <Typography variant="body2" color="text.secondary" fontSize={13} mb={1}>
-                    {memberCount} {memberCount === 1 ? "member" : "members"}
-                  </Typography>
-
-                  {/* Metadata chips: Created on, Created by */}
-                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" gap={0.5}>
-                    <Box
-                      sx={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 0.75,
-                        bgcolor: "rgba(255, 255, 255, 0.05)",
-                        borderRadius: 2,
-                        px: 1.25,
-                        py: 0.4,
-                      }}
-                    >
-                      <CalendarTodayRoundedIcon sx={{ fontSize: 13, color: "text.secondary" }} />
-                      <Typography variant="caption" sx={{ fontSize: 11.5, color: "text.secondary", fontWeight: 500 }}>
-                        Created on {createdDateStr}
-                      </Typography>
-                    </Box>
-
-                    <Box
-                      sx={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 0.75,
-                        bgcolor: "rgba(255, 255, 255, 0.05)",
-                        borderRadius: 2,
-                        px: 1.25,
-                        py: 0.4,
-                      }}
-                    >
-                      <PersonOutlineRoundedIcon sx={{ fontSize: 14, color: "text.secondary" }} />
-                      <Typography variant="caption" sx={{ fontSize: 11.5, color: "text.secondary", fontWeight: 500 }}>
-                        Created by {creatorName}
-                      </Typography>
-                    </Box>
-                  </Stack>
-                </Box>
-              </Box>
-
-              {/* ── CARD 2: MEMBERS SECTION ── */}
-              <Box
-                sx={{
-                  bgcolor: "rgba(23, 31, 45, 0.7)",
-                  borderRadius: 3,
-                  p: 2.25,
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
-                }}
-              >
-                {/* Header row: Members + Add people */}
-                <Box display="flex" alignItems="center" justifyContent="space-between" mb={1.5}>
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <GroupsRoundedIcon sx={{ fontSize: 19, color: "text.secondary" }} />
-                    <Typography fontWeight={700} fontSize={14.5} color="#FFFFFF">
-                      Members
-                    </Typography>
-                  </Stack>
-
-                  {canAddMembers && (
-                    <Button
-                      size="small"
-                      startIcon={<PersonAddAltRoundedIcon sx={{ fontSize: "16px !important" }} />}
-                      onClick={() => {
-                        setAddPick([]);
-                        setAddPeopleMode((prev) => !prev);
-                      }}
-                      sx={{
-                        borderRadius: 999,
-                        px: 1.75,
-                        py: 0.5,
-                        textTransform: "none",
-                        fontWeight: 700,
-                        fontSize: 12.5,
-                        bgcolor: addPeopleMode ? "action.selected" : "rgba(130, 169, 248, 0.12)",
-                        color: "primary.main",
-                        "&:hover": { bgcolor: "rgba(130, 169, 248, 0.2)" },
-                      }}
-                    >
-                      {addPeopleMode ? "Done" : "Add people"}
-                    </Button>
-                  )}
-                </Box>
-
-                {/* Inline Add People Panel if toggled */}
-                {addPeopleMode && (
-                  <Box
+                <Stack direction="row" spacing={2} alignItems="center" minWidth={0} flex={1}>
+                  <Avatar
                     sx={{
-                      p: 1.5,
-                      mb: 1.5,
-                      borderRadius: 2,
-                      bgcolor: "action.hover",
-                      border: "1px dashed rgba(255, 255, 255, 0.15)",
+                      width: 64,
+                      height: 64,
+                      bgcolor: "rgba(130, 169, 248, 0.2)",
+                      color: "primary.main",
+                      flexShrink: 0,
                     }}
                   >
-                    <Box display="flex" alignItems="center" justifyContent="space-between" mb={1}>
-                      <Typography fontSize={13} fontWeight={700} color="#FFFFFF">
-                        Select people on LAN to add
-                      </Typography>
-                      <Button
-                        size="small"
-                        variant="contained"
-                        disabled={!addPick.length}
-                        onClick={async () => {
-                          await handleAddMembers();
-                          setAddPeopleMode(false);
-                        }}
-                        sx={{
-                          textTransform: "none",
-                          fontWeight: 700,
-                          fontSize: 12,
-                          borderRadius: 999,
-                        }}
-                      >
-                        Add {addPick.length ? `(${addPick.length})` : ""}
-                      </Button>
-                    </Box>
+                    <GroupsRoundedIcon sx={{ fontSize: 34, color: "primary.main" }} />
+                  </Avatar>
 
-                    {!availableOthers.length ? (
-                      <Typography variant="caption" color="text.secondary">
-                        No other peers discovered on the LAN.
-                      </Typography>
-                    ) : (
-                      <List dense disablePadding sx={{ maxHeight: 160, overflowY: "auto" }}>
-                        {availableOthers.map((p) => (
-                          <ListItemButton
-                            key={p.user_id}
-                            onClick={() =>
-                              setAddPick((g) =>
-                                g.includes(p.user_id)
-                                  ? g.filter((x) => x !== p.user_id)
-                                  : [...g, p.user_id]
-                              )
-                            }
-                            sx={{ borderRadius: 2, py: 0.5, px: 1 }}
-                          >
-                            <ListItemAvatar sx={{ minWidth: 40 }}>
-                              <Avatar
-                                sx={{
-                                  width: 32,
-                                  height: 32,
-                                  bgcolor: avatarColor(p.display_name),
-                                  color: "#FFFFFF",
-                                  fontSize: 14,
-                                  fontWeight: 700,
-                                }}
-                              >
-                                {p.display_name.slice(0, 1).toUpperCase()}
-                              </Avatar>
-                            </ListItemAvatar>
-                            <ListItemText
-                              primary={p.display_name}
-                              secondary={p.online ? "Online" : "Offline"}
-                              primaryTypographyProps={{ fontWeight: 600, fontSize: 13 }}
-                              secondaryTypographyProps={{ fontSize: 11 }}
-                            />
-                            <Checkbox
-                              edge="end"
-                              size="small"
-                              checked={addPick.includes(p.user_id)}
-                              tabIndex={-1}
-                              disableRipple
-                            />
-                          </ListItemButton>
-                        ))}
-                      </List>
-                    )}
-                  </Box>
-                )}
-
-                {/* Member List */}
-                <Stack spacing={0.75} sx={{ maxHeight: 220, overflowY: "auto", pr: 0.5 }}>
-                  {members.map((m) => {
-                    const isSelf = m.user_id === profile.id;
-                    const isMemberAdmin = m.role === "admin";
-                    const label = isSelf ? `${m.display_name} (you)` : m.display_name;
-
-                    return (
-                      <Box
-                        key={m.user_id}
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          p: 0.9,
-                          borderRadius: 2,
-                          "&:hover": { bgcolor: "action.hover" },
-                        }}
-                      >
-                        <Stack direction="row" spacing={1.5} alignItems="center" minWidth={0} flex={1}>
-                          <Avatar
-                            sx={{
-                              width: 38,
-                              height: 38,
-                              bgcolor: avatarColor(m.display_name),
-                              color: "#FFFFFF",
-                              fontSize: 16,
-                              fontWeight: 700,
-                              flexShrink: 0,
-                            }}
-                          >
-                            {m.display_name.slice(0, 1).toUpperCase()}
-                          </Avatar>
-
-                          <Box minWidth={0} flex={1}>
-                            <Typography fontWeight={700} fontSize={14} color="#FFFFFF" noWrap>
-                              {label}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary" fontSize={12}>
-                              {isMemberAdmin ? "Admin" : "Member"}
-                            </Typography>
-                          </Box>
-                        </Stack>
-
-                        {/* Right: Admin Pill or Action Menu */}
-                        <Stack direction="row" spacing={0.5} alignItems="center">
-                          {isMemberAdmin && (
-                            <Chip
-                              size="small"
-                              label="Admin"
-                              sx={{
-                                height: 24,
-                                fontSize: 11.5,
-                                fontWeight: 700,
-                                bgcolor: "rgba(130, 169, 248, 0.15)",
-                                color: "primary.main",
-                                borderRadius: 1.5,
-                              }}
-                            />
-                          )}
-
-                          {!isSelf && (
-                            <IconButton
-                              size="small"
-                              onClick={(e) => {
-                                setMemberMenuAnchor({ el: e.currentTarget, member: m });
-                              }}
-                              sx={{ color: "text.secondary" }}
-                            >
-                              <MoreVertRoundedIcon fontSize="small" />
-                            </IconButton>
-                          )}
-                        </Stack>
+                  <Box minWidth={0} flex={1}>
+                    {/* Group Title with inline edit */}
+                    {isRenaming ? (
+                      <Box display="flex" alignItems="center" gap={1} mb={0.5}>
+                        <input
+                          type="text"
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && void handleSaveRename()}
+                          style={{
+                            backgroundColor: "rgba(255, 255, 255, 0.08)",
+                            border: "1px solid rgba(255, 255, 255, 0.2)",
+                            borderRadius: 6,
+                            color: "#FFFFFF",
+                            fontSize: 16,
+                            fontWeight: 700,
+                            padding: "4px 8px",
+                            outline: "none",
+                            width: "100%",
+                          }}
+                          autoFocus
+                        />
+                        <IconButton size="small" onClick={() => void handleSaveRename()} sx={{ color: "primary.main" }}>
+                          <CheckRoundedIcon fontSize="small" />
+                        </IconButton>
                       </Box>
-                    );
-                  })}
+                    ) : (
+                      <Box display="flex" alignItems="center" gap={0.75}>
+                        <Typography fontWeight={700} fontSize={18.5} color="#FFFFFF" noWrap>
+                          {groupTitle}
+                        </Typography>
+                        {isAdmin && (
+                          <IconButton
+                            size="small"
+                            onClick={() => {
+                              setRenameDraft(groupTitle);
+                              setIsRenaming(true);
+                            }}
+                            sx={{ p: 0.3, color: "text.secondary", "&:hover": { color: "#FFFFFF" } }}
+                          >
+                            <EditOutlinedIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        )}
+                      </Box>
+                    )}
+
+                    <Typography variant="body2" color="text.secondary" fontSize={13} mb={1}>
+                      {memberCount} {memberCount === 1 ? "member" : "members"}
+                    </Typography>
+
+                    {/* Metadata chips: Created on, Created by */}
+                    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" gap={0.5}>
+                      <Box
+                        sx={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 0.75,
+                          bgcolor: "rgba(255, 255, 255, 0.05)",
+                          borderRadius: 2,
+                          px: 1.25,
+                          py: 0.4,
+                        }}
+                      >
+                        <CalendarTodayRoundedIcon sx={{ fontSize: 13, color: "text.secondary" }} />
+                        <Typography variant="caption" sx={{ fontSize: 11.5, color: "text.secondary", fontWeight: 500 }}>
+                          Created on {createdDateStr}
+                        </Typography>
+                      </Box>
+
+                      <Box
+                        sx={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 0.75,
+                          bgcolor: "rgba(255, 255, 255, 0.05)",
+                          borderRadius: 2,
+                          px: 1.25,
+                          py: 0.4,
+                        }}
+                      >
+                        <PersonOutlineRoundedIcon sx={{ fontSize: 14, color: "text.secondary" }} />
+                        <Typography variant="caption" sx={{ fontSize: 11.5, color: "text.secondary", fontWeight: 500 }}>
+                          Created by {creatorName}
+                        </Typography>
+                      </Box>
+                    </Stack>
+                  </Box>
                 </Stack>
+
+                {/* Right: Three-dots button for group settings */}
+                {isAdmin && (
+                  <IconButton
+                    size="small"
+                    onClick={(e) => setGroupSettingsAnchor(e.currentTarget)}
+                    sx={{ color: "text.secondary", "&:hover": { color: "#FFFFFF" } }}
+                  >
+                    <MoreVertRoundedIcon />
+                  </IconButton>
+                )}
               </Box>
 
-              {/* ── CARD 3: MEDIA, FILES, LINKS TABS & PREVIEW ── */}
+              {/* ── CARD 2: CONSOLIDATED TABS (Members, Media, Files, Links) ── */}
               <Box
                 sx={{
                   bgcolor: "rgba(23, 31, 45, 0.7)",
@@ -536,7 +383,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                 }}
               >
-                {/* Tab Header Row */}
+                {/* Unified Tab Bar */}
                 <Box
                   sx={{
                     display: "flex",
@@ -554,6 +401,12 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                       "& .MuiTabs-indicator": { height: 2.5, borderRadius: 2 },
                     }}
                   >
+                    <Tab
+                      icon={<GroupsRoundedIcon sx={{ fontSize: 18 }} />}
+                      iconPosition="start"
+                      label={`Members ${memberCount}`}
+                      sx={{ minHeight: 36, py: 0.5, px: 1.5, fontSize: 13, textTransform: "none", fontWeight: 700 }}
+                    />
                     <Tab
                       icon={<PhotoLibraryRoundedIcon sx={{ fontSize: 17 }} />}
                       iconPosition="start"
@@ -574,182 +427,441 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                     />
                   </Tabs>
 
-                  <Button
-                    size="small"
-                    endIcon={<ArrowForwardRoundedIcon sx={{ fontSize: "15px !important" }} />}
-                    onClick={() => {
-                      const cat = activeTab === 0 ? "media" : activeTab === 1 ? "files" : "links";
-                      setViewAllCategory(cat);
-                    }}
-                    sx={{
-                      textTransform: "none",
-                      fontSize: 12.5,
-                      fontWeight: 700,
-                      color: "primary.main",
-                      pr: 0.5,
-                    }}
-                  >
-                    View all
-                  </Button>
+                  {activeTab !== 0 && (
+                    <Button
+                      size="small"
+                      endIcon={<ArrowForwardRoundedIcon sx={{ fontSize: "15px !important" }} />}
+                      onClick={() => {
+                        const cat = activeTab === 1 ? "media" : activeTab === 2 ? "files" : "links";
+                        setViewAllCategory(cat);
+                      }}
+                      sx={{
+                        textTransform: "none",
+                        fontSize: 12.5,
+                        fontWeight: 700,
+                        color: "primary.main",
+                        pr: 0.5,
+                      }}
+                    >
+                      View all
+                    </Button>
+                  )}
                 </Box>
 
-                {/* Preview Content */}
-                <Box sx={{ pt: 1.75 }}>
-                  {activeTab === 0 && (
-                    <>
-                      {!media.length ? (
-                        <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
-                          No media in this group yet.
-                        </Typography>
-                      ) : (
-                        <Box
-                          sx={{
-                            display: "grid",
-                            gridTemplateColumns: "repeat(4, 1fr)",
-                            gap: 1.25,
+                {/* ── TAB 0: MEMBERS SECTION (SCALING TO 100+ MEMBERS) ── */}
+                {activeTab === 0 && (
+                  <Box sx={{ pt: 1.75 }}>
+                    {/* Sub-toolbar: Search members input + Filter dropdown + + Add people button */}
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 1.25,
+                        mb: 1.5,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      {/* Search Input */}
+                      <TextField
+                        size="small"
+                        placeholder="Search members..."
+                        value={memberSearch}
+                        onChange={(e) => setMemberSearch(e.target.value)}
+                        InputProps={{
+                          startAdornment: (
+                            <InputAdornment position="start">
+                              <SearchRoundedIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+                            </InputAdornment>
+                          ),
+                        }}
+                        sx={{
+                          flex: 1,
+                          minWidth: 160,
+                          "& .MuiOutlinedInput-root": {
+                            borderRadius: 2,
+                            fontSize: 13,
+                            bgcolor: "rgba(255, 255, 255, 0.04)",
+                            "& fieldset": { borderColor: "rgba(255, 255, 255, 0.08)" },
+                          },
+                        }}
+                      />
+
+                      {/* Filter button (All ⌄ / Admins / Online) */}
+                      <Button
+                        size="small"
+                        endIcon={<KeyboardArrowDownRoundedIcon sx={{ fontSize: "16px !important" }} />}
+                        onClick={(e) => setFilterMenuAnchor(e.currentTarget)}
+                        sx={{
+                          borderRadius: 2,
+                          px: 1.5,
+                          py: 0.75,
+                          textTransform: "none",
+                          fontSize: 12.5,
+                          fontWeight: 600,
+                          color: "text.secondary",
+                          bgcolor: "rgba(255, 255, 255, 0.05)",
+                          "&:hover": { bgcolor: "action.hover" },
+                        }}
+                      >
+                        {memberRoleFilter === "all"
+                          ? "All"
+                          : memberRoleFilter === "admin"
+                          ? "Admins"
+                          : "Online"}
+                      </Button>
+
+                      <Menu
+                        anchorEl={filterMenuAnchor}
+                        open={!!filterMenuAnchor}
+                        onClose={() => setFilterMenuAnchor(null)}
+                        PaperProps={{ sx: { borderRadius: 2, minWidth: 120 } }}
+                      >
+                        <MenuItem
+                          selected={memberRoleFilter === "all"}
+                          onClick={() => {
+                            setMemberRoleFilter("all");
+                            setFilterMenuAnchor(null);
                           }}
                         >
-                          {media.slice(0, 8).map((m) => (
-                            <Box
-                              key={m.key}
-                              onClick={() => void openAttachment(m.fileId, m.senderId)}
-                              sx={{
-                                position: "relative",
-                                aspectRatio: "1",
-                                borderRadius: 2,
-                                overflow: "hidden",
-                                bgcolor: "action.hover",
-                                border: "1px solid rgba(255, 255, 255, 0.08)",
-                                cursor: "pointer",
-                                transition: "transform 0.12s ease",
-                                "&:hover": { transform: "scale(1.03)" },
-                              }}
-                            >
-                              {m.thumb ? (
-                                <Box
-                                  component="img"
-                                  src={m.thumb}
-                                  alt={m.name}
-                                  sx={{ width: "100%", height: "100%", objectFit: "cover" }}
-                                />
-                              ) : (
-                                <Box
-                                  sx={{
-                                    width: "100%",
-                                    height: "100%",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    bgcolor: "action.selected",
-                                  }}
-                                >
-                                  <InsertDriveFileRoundedIcon sx={{ fontSize: 24, color: "text.secondary" }} />
-                                </Box>
-                              )}
+                          All ({members.length})
+                        </MenuItem>
+                        <MenuItem
+                          selected={memberRoleFilter === "admin"}
+                          onClick={() => {
+                            setMemberRoleFilter("admin");
+                            setFilterMenuAnchor(null);
+                          }}
+                        >
+                          Admins ({members.filter((m) => m.role === "admin").length})
+                        </MenuItem>
+                        <MenuItem
+                          selected={memberRoleFilter === "online"}
+                          onClick={() => {
+                            setMemberRoleFilter("online");
+                            setFilterMenuAnchor(null);
+                          }}
+                        >
+                          Online
+                        </MenuItem>
+                      </Menu>
 
-                              <Box
-                                sx={{
-                                  position: "absolute",
-                                  bottom: 0,
-                                  left: 0,
-                                  right: 0,
-                                  p: 0.5,
-                                  display: "flex",
-                                  alignItems: "center",
-                                  justifyContent: "space-between",
-                                  background: "linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%)",
-                                }}
-                              >
-                                <Typography sx={{ fontSize: 9, color: "#FFFFFF", fontWeight: 600 }}>
-                                  {formatTimeOnly(m.at)}
-                                </Typography>
-                                {m.isVideo && (
-                                  <Box display="flex" alignItems="center" gap={0.25}>
-                                    <PlayArrowRoundedIcon sx={{ fontSize: 10, color: "#FFFFFF" }} />
-                                    <Typography sx={{ fontSize: 8.5, color: "#FFFFFF", fontWeight: 700 }}>
-                                      Video
-                                    </Typography>
-                                  </Box>
-                                )}
-                              </Box>
-                            </Box>
-                          ))}
-                        </Box>
+                      {/* + Add people button */}
+                      {canAddMembers && (
+                        <Button
+                          size="small"
+                          variant="contained"
+                          startIcon={<PersonAddAltRoundedIcon sx={{ fontSize: "16px !important" }} />}
+                          onClick={() => {
+                            setAddPick([]);
+                            setAddPeopleMode((prev) => !prev);
+                          }}
+                          sx={{
+                            borderRadius: 2,
+                            px: 1.75,
+                            py: 0.75,
+                            textTransform: "none",
+                            fontWeight: 700,
+                            fontSize: 12.5,
+                            bgcolor: "primary.main",
+                            color: "#FFFFFF",
+                            boxShadow: "none",
+                            "&:hover": { bgcolor: "primary.dark", boxShadow: "none" },
+                          }}
+                        >
+                          {addPeopleMode ? "Done" : "+ Add people"}
+                        </Button>
                       )}
-                    </>
-                  )}
+                    </Box>
 
-                  {activeTab === 1 && (
-                    <>
-                      {!files.length ? (
-                        <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
-                          No files in this group yet.
+                    {/* Inline Add People Panel if toggled */}
+                    {addPeopleMode && (
+                      <Box
+                        sx={{
+                          p: 1.5,
+                          mb: 1.5,
+                          borderRadius: 2,
+                          bgcolor: "action.hover",
+                          border: "1px dashed rgba(255, 255, 255, 0.15)",
+                        }}
+                      >
+                        <Box display="flex" alignItems="center" justifyContent="space-between" mb={1}>
+                          <Typography fontSize={13} fontWeight={700} color="#FFFFFF">
+                            Select people on LAN to add
+                          </Typography>
+                          <Button
+                            size="small"
+                            variant="contained"
+                            disabled={!addPick.length}
+                            onClick={async () => {
+                              await handleAddMembers();
+                              setAddPeopleMode(false);
+                            }}
+                            sx={{
+                              textTransform: "none",
+                              fontWeight: 700,
+                              fontSize: 12,
+                              borderRadius: 999,
+                            }}
+                          >
+                            Add {addPick.length ? `(${addPick.length})` : ""}
+                          </Button>
+                        </Box>
+
+                        {!availableOthers.length ? (
+                          <Typography variant="caption" color="text.secondary">
+                            No other peers discovered on the LAN.
+                          </Typography>
+                        ) : (
+                          <List dense disablePadding sx={{ maxHeight: 160, overflowY: "auto" }}>
+                            {availableOthers.map((p) => (
+                              <ListItemButton
+                                key={p.user_id}
+                                onClick={() =>
+                                  setAddPick((g) =>
+                                    g.includes(p.user_id)
+                                      ? g.filter((x) => x !== p.user_id)
+                                      : [...g, p.user_id]
+                                  )
+                                }
+                                sx={{ borderRadius: 2, py: 0.5, px: 1 }}
+                              >
+                                <ListItemAvatar sx={{ minWidth: 40 }}>
+                                  <Avatar
+                                    sx={{
+                                      width: 32,
+                                      height: 32,
+                                      bgcolor: avatarColor(p.display_name),
+                                      color: "#FFFFFF",
+                                      fontSize: 14,
+                                      fontWeight: 700,
+                                    }}
+                                  >
+                                    {p.display_name.slice(0, 1).toUpperCase()}
+                                  </Avatar>
+                                </ListItemAvatar>
+                                <ListItemText
+                                  primary={p.display_name}
+                                  secondary={p.online ? "Online" : "Offline"}
+                                  primaryTypographyProps={{ fontWeight: 600, fontSize: 13 }}
+                                  secondaryTypographyProps={{ fontSize: 11 }}
+                                />
+                                <Checkbox
+                                  edge="end"
+                                  size="small"
+                                  checked={addPick.includes(p.user_id)}
+                                  tabIndex={-1}
+                                  disableRipple
+                                />
+                              </ListItemButton>
+                            ))}
+                          </List>
+                        )}
+                      </Box>
+                    )}
+
+                    {/* Member List (Smooth vertical scroll, handles 100+ members) */}
+                    <Stack spacing={0.5} sx={{ maxHeight: 310, overflowY: "auto", pr: 0.5 }}>
+                      {!filteredMembers.length ? (
+                        <Typography color="text.secondary" variant="caption" align="center" py={3}>
+                          No members matching filter.
                         </Typography>
                       ) : (
-                        <Stack spacing={0.75}>
-                          {files.slice(0, 4).map((f) => {
-                            const iconStyle = getFileThemeColor(f.ext);
-                            return (
-                              <Box
-                                key={f.key}
-                                onClick={() => void openAttachment(f.fileId, f.senderId)}
-                                sx={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 1.5,
-                                  p: 0.9,
-                                  borderRadius: 2,
-                                  bgcolor: "action.hover",
-                                  cursor: "pointer",
-                                  "&:hover": { bgcolor: "action.selected" },
-                                }}
-                              >
-                                <Box
+                        filteredMembers.map((m) => {
+                          const isSelf = m.user_id === profile.id;
+                          const isMemberAdmin = m.role === "admin";
+                          const label = isSelf ? `${m.display_name} (you)` : m.display_name;
+
+                          const peer = peerMap.get(m.user_id);
+                          const isMemberOnline = isSelf ? true : !!peer?.online;
+                          const lastSeen = peer?.last_seen_at ? lastSeenLabel(peer.last_seen_at) : "";
+
+                          return (
+                            <Box
+                              key={m.user_id}
+                              sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                p: 0.85,
+                                borderRadius: 2,
+                                "&:hover": { bgcolor: "action.hover" },
+                              }}
+                            >
+                              <Stack direction="row" spacing={1.5} alignItems="center" minWidth={0} flex={1}>
+                                <Avatar
                                   sx={{
-                                    width: 34,
-                                    height: 34,
-                                    borderRadius: 1.5,
-                                    bgcolor: iconStyle.bg,
-                                    color: iconStyle.color,
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
+                                    width: 38,
+                                    height: 38,
+                                    bgcolor: avatarColor(m.display_name),
+                                    color: "#FFFFFF",
+                                    fontSize: 16,
+                                    fontWeight: 700,
                                     flexShrink: 0,
                                   }}
                                 >
-                                  <InsertDriveFileRoundedIcon sx={{ fontSize: 18 }} />
-                                </Box>
-                                <Box flex={1} minWidth={0}>
-                                  <Typography fontWeight={700} fontSize={13} noWrap color="#FFFFFF">
-                                    {f.name}
-                                  </Typography>
-                                  <Typography variant="caption" color="text.secondary" fontSize={11}>
-                                    {f.ext} · {formatBytes(f.size)}
-                                  </Typography>
-                                </Box>
-                                <Typography variant="caption" color="text.secondary" fontSize={11}>
-                                  {formatTimeOnly(f.at)}
-                                </Typography>
-                              </Box>
-                            );
-                          })}
-                        </Stack>
-                      )}
-                    </>
-                  )}
+                                  {m.display_name.slice(0, 1).toUpperCase()}
+                                </Avatar>
 
-                  {activeTab === 2 && (
-                    <>
-                      {!links.length ? (
-                        <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
-                          No links in this group yet.
-                        </Typography>
-                      ) : (
-                        <Stack spacing={0.75}>
-                          {links.slice(0, 3).map((l) => (
+                                <Box minWidth={0} flex={1}>
+                                  <Typography fontWeight={700} fontSize={14} color="#FFFFFF" noWrap>
+                                    {label}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary" fontSize={12}>
+                                    {isMemberAdmin ? "Admin" : "Member"}
+                                  </Typography>
+                                </Box>
+                              </Stack>
+
+                              {/* Online / Offline status with indicator dot */}
+                              <Stack direction="row" spacing={1.25} alignItems="center">
+                                <Stack direction="row" spacing={0.65} alignItems="center">
+                                  <Box
+                                    sx={{
+                                      width: 7,
+                                      height: 7,
+                                      borderRadius: "50%",
+                                      bgcolor: isMemberOnline ? "success.main" : "text.secondary",
+                                      flexShrink: 0,
+                                    }}
+                                  />
+                                  <Typography
+                                    variant="caption"
+                                    sx={{
+                                      color: isMemberOnline ? "success.main" : "text.secondary",
+                                      fontWeight: 500,
+                                      fontSize: 12,
+                                      minWidth: 55,
+                                    }}
+                                  >
+                                    {isMemberOnline
+                                      ? "Online"
+                                      : lastSeen
+                                      ? `Offline · ${lastSeen}`
+                                      : "Offline"}
+                                  </Typography>
+                                </Stack>
+
+                                {/* Action Menu */}
+                                {!isSelf && (
+                                  <IconButton
+                                    size="small"
+                                    onClick={(e) => {
+                                      setMemberMenuAnchor({ el: e.currentTarget, member: m });
+                                    }}
+                                    sx={{ color: "text.secondary", p: 0.5 }}
+                                  >
+                                    <MoreVertRoundedIcon fontSize="small" />
+                                  </IconButton>
+                                )}
+                              </Stack>
+                            </Box>
+                          );
+                        })
+                      )}
+                    </Stack>
+                  </Box>
+                )}
+
+                {/* ── TAB 1: MEDIA PREVIEW (4 cols x 2 rows) ── */}
+                {activeTab === 1 && (
+                  <Box sx={{ pt: 1.75 }}>
+                    {!media.length ? (
+                      <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
+                        No media in this group yet.
+                      </Typography>
+                    ) : (
+                      <Box
+                        sx={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(4, 1fr)",
+                          gap: 1.25,
+                        }}
+                      >
+                        {media.slice(0, 8).map((m) => (
+                          <Box
+                            key={m.key}
+                            onClick={() => void openAttachment(m.fileId, m.senderId)}
+                            sx={{
+                              position: "relative",
+                              aspectRatio: "1",
+                              borderRadius: 2,
+                              overflow: "hidden",
+                              bgcolor: "action.hover",
+                              border: "1px solid rgba(255, 255, 255, 0.08)",
+                              cursor: "pointer",
+                              transition: "transform 0.12s ease",
+                              "&:hover": { transform: "scale(1.03)" },
+                            }}
+                          >
+                            {m.thumb ? (
+                              <Box
+                                component="img"
+                                src={m.thumb}
+                                alt={m.name}
+                                sx={{ width: "100%", height: "100%", objectFit: "cover" }}
+                              />
+                            ) : (
+                              <Box
+                                sx={{
+                                  width: "100%",
+                                  height: "100%",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  bgcolor: "action.selected",
+                                }}
+                              >
+                                <InsertDriveFileRoundedIcon sx={{ fontSize: 24, color: "text.secondary" }} />
+                              </Box>
+                            )}
+
                             <Box
-                              key={l.key}
-                              onClick={() => void openExternalLink(l.url)}
+                              sx={{
+                                position: "absolute",
+                                bottom: 0,
+                                left: 0,
+                                right: 0,
+                                p: 0.5,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                background: "linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%)",
+                              }}
+                            >
+                              <Typography sx={{ fontSize: 9, color: "#FFFFFF", fontWeight: 600 }}>
+                                {formatTimeOnly(m.at)}
+                              </Typography>
+                              {m.isVideo && (
+                                <Box display="flex" alignItems="center" gap={0.25}>
+                                  <PlayArrowRoundedIcon sx={{ fontSize: 10, color: "#FFFFFF" }} />
+                                  <Typography sx={{ fontSize: 8.5, color: "#FFFFFF", fontWeight: 700 }}>
+                                    Video
+                                  </Typography>
+                                </Box>
+                              )}
+                            </Box>
+                          </Box>
+                        ))}
+                      </Box>
+                    )}
+                  </Box>
+                )}
+
+                {/* ── TAB 2: FILES PREVIEW ── */}
+                {activeTab === 2 && (
+                  <Box sx={{ pt: 1.75 }}>
+                    {!files.length ? (
+                      <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
+                        No files in this group yet.
+                      </Typography>
+                    ) : (
+                      <Stack spacing={0.75}>
+                        {files.slice(0, 4).map((f) => {
+                          const iconStyle = getFileThemeColor(f.ext);
+                          return (
+                            <Box
+                              key={f.key}
+                              onClick={() => void openAttachment(f.fileId, f.senderId)}
                               sx={{
                                 display: "flex",
                                 alignItems: "center",
@@ -766,36 +878,93 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                                   width: 34,
                                   height: 34,
                                   borderRadius: 1.5,
-                                  bgcolor: "rgba(130, 169, 248, 0.15)",
-                                  color: "primary.main",
+                                  bgcolor: iconStyle.bg,
+                                  color: iconStyle.color,
                                   display: "flex",
                                   alignItems: "center",
                                   justifyContent: "center",
                                   flexShrink: 0,
                                 }}
                               >
-                                <LinkRoundedIcon sx={{ fontSize: 18 }} />
+                                <InsertDriveFileRoundedIcon sx={{ fontSize: 18 }} />
                               </Box>
                               <Box flex={1} minWidth={0}>
                                 <Typography fontWeight={700} fontSize={13} noWrap color="#FFFFFF">
-                                  {l.title}
+                                  {f.name}
                                 </Typography>
-                                <Typography
-                                  variant="caption"
-                                  sx={{ color: "primary.main", display: "block" }}
-                                  fontSize={11.5}
-                                  noWrap
-                                >
-                                  {l.url}
+                                <Typography variant="caption" color="text.secondary" fontSize={11}>
+                                  {f.ext} · {formatBytes(f.size)}
                                 </Typography>
                               </Box>
+                              <Typography variant="caption" color="text.secondary" fontSize={11}>
+                                {formatTimeOnly(f.at)}
+                              </Typography>
                             </Box>
-                          ))}
-                        </Stack>
-                      )}
-                    </>
-                  )}
-                </Box>
+                          );
+                        })}
+                      </Stack>
+                    )}
+                  </Box>
+                )}
+
+                {/* ── TAB 3: LINKS PREVIEW ── */}
+                {activeTab === 3 && (
+                  <Box sx={{ pt: 1.75 }}>
+                    {!links.length ? (
+                      <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
+                        No links in this group yet.
+                      </Typography>
+                    ) : (
+                      <Stack spacing={0.75}>
+                        {links.slice(0, 3).map((l) => (
+                          <Box
+                            key={l.key}
+                            onClick={() => void openExternalLink(l.url)}
+                            sx={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 1.5,
+                              p: 0.9,
+                              borderRadius: 2,
+                              bgcolor: "action.hover",
+                              cursor: "pointer",
+                              "&:hover": { bgcolor: "action.selected" },
+                            }}
+                          >
+                            <Box
+                              sx={{
+                                width: 34,
+                                height: 34,
+                                borderRadius: 1.5,
+                                bgcolor: "rgba(130, 169, 248, 0.15)",
+                                color: "primary.main",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                flexShrink: 0,
+                              }}
+                            >
+                              <LinkRoundedIcon sx={{ fontSize: 18 }} />
+                            </Box>
+                            <Box flex={1} minWidth={0}>
+                              <Typography fontWeight={700} fontSize={13} noWrap color="#FFFFFF">
+                                {l.title}
+                              </Typography>
+                              <Typography
+                                variant="caption"
+                                sx={{ color: "primary.main", display: "block" }}
+                                fontSize={11.5}
+                                noWrap
+                              >
+                                {l.url}
+                              </Typography>
+                            </Box>
+                          </Box>
+                        ))}
+                      </Stack>
+                    )}
+                  </Box>
+                )}
               </Box>
             </Stack>
           </DialogContent>
@@ -954,6 +1123,25 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
             </MenuItem>
           </>
         )}
+      </Menu>
+
+      {/* Group Settings Menu (Members can add toggle) */}
+      <Menu
+        anchorEl={groupSettingsAnchor}
+        open={!!groupSettingsAnchor}
+        onClose={() => setGroupSettingsAnchor(null)}
+        PaperProps={{ sx: { borderRadius: 2, minWidth: 220, p: 1 } }}
+      >
+        <Box display="flex" alignItems="center" justifyContent="space-between" px={1} py={0.5}>
+          <Typography fontSize={13} fontWeight={600} color="#FFFFFF">
+            Members can add others
+          </Typography>
+          <Switch
+            size="small"
+            checked={active?.members_can_add !== false}
+            onChange={(_, v) => handleToggleMembersCanAdd(v)}
+          />
+        </Box>
       </Menu>
     </Dialog>
   );

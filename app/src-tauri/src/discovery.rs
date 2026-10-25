@@ -231,6 +231,7 @@ async fn broadcast_datagram_from(sock: &UdpSocket, payload: &[u8], discovery_por
 }
 
 /// Send UDP payload as broadcast out every usable NIC.
+#[allow(dead_code)]
 async fn broadcast_datagram(payload: &[u8], discovery_port: u16) {
     if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await {
         broadcast_datagram_from(&sock, payload, discovery_port).await;

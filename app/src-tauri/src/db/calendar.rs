@@ -354,6 +354,7 @@ fn ack_stamp(raw: &str) -> &str {
 }
 
 /// Record accept (`at` ISO) or reject (`rejected|{at}`) with per-user last-write-wins on stamp.
+#[allow(dead_code)]
 pub fn apply_calendar_ack(
     conn: &Connection,
     item_id: &str,
