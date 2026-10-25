@@ -226,6 +226,7 @@ import {
   cachePlaintext,
   getCachedPlaintext,
   useMessageDecrypt,
+  decryptMessagesBeforePaint,
 } from "../features/chat/useMessageDecrypt";
 import { useChatSync } from "../features/chat/useChatSync";
 import { appLog } from "../shared/appLog";
@@ -1051,6 +1052,27 @@ export function ChatScreen({
       const page = await peerApi.listMessages(conv.id, { limit: MESSAGE_PAGE_SIZE });
       if (cancel) return;
       const msgs = Array.isArray(page?.messages) ? page.messages : [];
+      // Decrypt BEFORE setMessages so inbound bubbles never paint as "…".
+      // Sender already caches via rememberPlain; receiver must do the same here.
+      try {
+        const plainPatch = await decryptMessagesBeforePaint({
+          messages: msgs,
+          kind: conv.kind,
+          myId: profile.id,
+          identity,
+          peers,
+          decryptGroupMessageText,
+        });
+        if (!cancel && Object.keys(plainPatch).length) {
+          setPlain((prev) => ({ ...prev, ...plainPatch }));
+        }
+      } catch (err) {
+        appLog("warn", "[Decrypt:pull_before_paint_err]", {
+          conversation_id: conv.id,
+          err: String(err),
+        });
+      }
+      if (cancel) return;
       if (isInitial) {
         setMessages(msgs);
         setHasMoreOlder(!!page?.has_more_older);
@@ -1270,7 +1292,23 @@ export function ChatScreen({
 
   async function refreshNewestMessages(conversationId: string) {
     const page = await peerApi.listMessages(conversationId, { limit: MESSAGE_PAGE_SIZE });
-    setMessages((prev) => mergeNewestPage(prev, page?.messages ?? []));
+    const msgs = page?.messages ?? [];
+    try {
+      const plainPatch = await decryptMessagesBeforePaint({
+        messages: msgs,
+        kind: active?.kind || "dm",
+        myId: profile.id,
+        identity,
+        peers,
+        decryptGroupMessageText,
+      });
+      if (Object.keys(plainPatch).length) {
+        setPlain((prev) => ({ ...prev, ...plainPatch }));
+      }
+    } catch {
+      /* useMessageDecrypt retries */
+    }
+    setMessages((prev) => mergeNewestPage(prev, msgs));
   }
 
   async function loadOlderMessages() {
@@ -1291,6 +1329,21 @@ export function ChatScreen({
       setHasMoreOlder(!!page?.has_more_older);
       const older = page?.messages ?? [];
       if (older.length) {
+        try {
+          const plainPatch = await decryptMessagesBeforePaint({
+            messages: older,
+            kind: active.kind,
+            myId: profile.id,
+            identity,
+            peers,
+            decryptGroupMessageText,
+          });
+          if (Object.keys(plainPatch).length) {
+            setPlain((prev) => ({ ...prev, ...plainPatch }));
+          }
+        } catch {
+          /* useMessageDecrypt retries */
+        }
         setMessages((prev) => prependOlderPage(prev, older));
       } else {
         olderScrollAnchorRef.current = null;

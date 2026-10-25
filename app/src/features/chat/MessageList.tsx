@@ -245,7 +245,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           <Box display="flex" justifyContent="center" my={0.35}>
             <Chip
               size="small"
-              label={plain[m.id] || "…"}
+              label={plain[m.id] ?? "…"}
               sx={{
                 height: "auto",
                 py: 0.55,
@@ -634,7 +634,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                           .join(" · ")
                       : quoted.kind === "calendar_share" ? (() => { const s = parseCalendarShare(plain[quoted.id] || ""); return s ? `📅 ${s.title}` : "📅 Calendar item"; })() : quoted.kind === "file_notice"
                         ? "📎 File"
-                        : truncate(plain[quoted.id] || "…", 80)}
+                        : truncate(plain[quoted.id] ?? "…", 80)}
                 </Typography>
               </Box>
             )}
@@ -801,7 +801,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                 {m.kind !== "file_notice" && (plain[m.id] || "").trim() !== "" && (
                   <Box sx={{ mb: 0.5 }}>
                     <ExpandableMessageText
-                      text={plain[m.id] || "…"}
+                      text={plain[m.id] ?? "…"}
                     />
                   </Box>
                 )}
@@ -886,7 +886,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             ) : bigEmoji ? (
               <Box>
                 <ExpandableMessageText
-                  text={plain[m.id] || "…"}
+                  text={plain[m.id] ?? "…"}
                   bigEmoji={true}
                   emojiFontSize={emojiOnlyFontSize(emojiN!)}
                 />
@@ -896,7 +896,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
               </Box>
             ) : (
               <ExpandableMessageText
-                text={plain[m.id] || "…"}
+                text={plain[m.id] ?? "…"}
                 trailingMeta={metaContent}
               />
             )}

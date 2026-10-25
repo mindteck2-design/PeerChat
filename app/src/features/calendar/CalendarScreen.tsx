@@ -537,22 +537,19 @@ export function CalendarScreen({
             ))}
           </Box>
 
-          {/* Month Day Cells — fill leftover vertical space under the grid */}
+          {/* Month Day Cells — modest size (not stretched to fill viewport) */}
           <Box
             sx={{
               display: "grid",
               gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
-              gridAutoRows: "minmax(44px, 1fr)",
-              gap: 0.75,
+              gap: 0.6,
               width: "100%",
-              flex: 1,
-              minHeight: 0,
-              alignContent: "stretch",
+              flex: "0 0 auto",
             }}
           >
             {grid.map((cell) => {
               if (cell.day == null) {
-                return <Box key={cell.key} sx={{ minHeight: { xs: 40, md: 48 } }} />;
+                return <Box key={cell.key} sx={{ height: { xs: 38, md: 44 } }} />;
               }
               const cellItems = byDay.get(cell.key) || [];
               const selected = cell.key === selectedDay;
@@ -568,8 +565,7 @@ export function CalendarScreen({
                   type="button"
                   onClick={() => setSelectedDay(cell.key)}
                   sx={{
-                    minHeight: { xs: 40, md: 48 },
-                    height: "100%",
+                    height: { xs: 38, md: 44 },
                     width: "100%",
                     minWidth: 0,
                     border: "1px solid",
@@ -590,8 +586,8 @@ export function CalendarScreen({
                     flexDirection: "column",
                     alignItems: "center",
                     justifyContent: "center",
-                    gap: 0.35,
-                    p: 0.35,
+                    gap: 0.25,
+                    p: 0.25,
                     color: "text.primary",
                     transition: "all 0.15s ease",
                     "&:hover": {
@@ -601,7 +597,7 @@ export function CalendarScreen({
                   }}
                 >
                   <Typography
-                    fontSize={{ xs: 15, md: 17 }}
+                    fontSize={{ xs: 14, md: 16 }}
                     fontWeight={isToday || selected ? 700 : 600}
                     color={isToday ? "primary.main" : "inherit"}
                     lineHeight={1.1}
@@ -610,15 +606,15 @@ export function CalendarScreen({
                   </Typography>
 
                   {/* Clean Status Indicator Dots (Mockup Section 2) */}
-                  <Box sx={{ height: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Box sx={{ height: 5, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     {kinds.length > 0 && (
-                      <Stack direction="row" spacing={0.4} alignItems="center" justifyContent="center">
+                      <Stack direction="row" spacing={0.35} alignItems="center" justifyContent="center">
                         {kinds.slice(0, 4).map((kind) => (
                           <Box
                             key={kind}
                             sx={{
-                              width: 5,
-                              height: 5,
+                              width: 4.5,
+                              height: 4.5,
                               borderRadius: "50%",
                               bgcolor: KIND_THEMES[kind]?.color || "primary.main",
                             }}

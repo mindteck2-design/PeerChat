@@ -31,7 +31,7 @@ export function getCachedPlaintext(messageId: string): string | undefined {
 
 /** Seed plaintext for an outgoing (or known) message so UI never flashes "…". */
 export function cachePlaintext(messageId: string, text: string): void {
-  if (!messageId || text == null || text === "") return;
+  if (!messageId || text == null) return;
   plaintextCache.set(messageId, text);
   pendingRetry.delete(messageId);
 }
@@ -72,7 +72,7 @@ function keyEpoch(keys: Record<string, Uint8Array>, convId: string | undefined):
 }
 
 /** Tauri/SQLite sometimes resurface wrapped_keys as a JSON string. */
-function normalizeWrappedKeys(
+export function normalizeWrappedKeys(
   raw: Message["wrapped_keys"]
 ): Record<string, { eph_pub: string; nonce: string; wrapped: string }> {
   if (!raw) return {};
@@ -87,6 +87,72 @@ function normalizeWrappedKeys(
   }
   if (typeof raw === "object" && !Array.isArray(raw)) return raw as any;
   return {};
+}
+
+/**
+ * Decrypt inbound rows BEFORE they hit React message state.
+ * Without this, MessageList paints `plain[id] || "…"` for one+ frames on every receive.
+ * Newest-first so the visible bubble is ready first.
+ */
+export async function decryptMessagesBeforePaint(opts: {
+  messages: Message[];
+  kind: "dm" | "group" | string;
+  myId: string;
+  identity: Identity;
+  peers: { user_id: string; ed25519_public?: string }[];
+  decryptGroupMessageText: (m: Message) => Promise<string>;
+}): Promise<Record<string, string>> {
+  const patch: Record<string, string> = {};
+  // messages are ASC (oldest→newest); decrypt newest first.
+  const ordered = [...opts.messages].reverse();
+  for (const m of ordered) {
+    if (m.kind === "file_notice" || m.kind === "deleted" || m.kind === "poll_vote") continue;
+    const cached = plaintextCache.get(m.id);
+    if (cached != null) {
+      patch[m.id] = cached;
+      continue;
+    }
+    try {
+      let text = "";
+      if (opts.kind === "group") {
+        text = await opts.decryptGroupMessageText(m);
+      } else {
+        let senderPub =
+          m.sender_id === opts.myId
+            ? exportPublic(opts.identity).ed25519_public
+            : opts.peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
+        if (!senderPub && m.sender_id !== opts.myId) {
+          try {
+            const all = await peerApi.listPeers();
+            const found = all.find((p) => p.user_id === m.sender_id);
+            if (found?.ed25519_public) senderPub = found.ed25519_public;
+          } catch {
+            /* ignore */
+          }
+        }
+        const wrapped = normalizeWrappedKeys(m.wrapped_keys);
+        text = await decryptMessage(
+          { ...m, wrapped_keys: wrapped },
+          opts.myId,
+          opts.identity,
+          senderPub
+        );
+      }
+      // Cache including empty string so UI does not keep showing "…" for blank bodies.
+      plaintextCache.set(m.id, text);
+      pendingRetry.delete(m.id);
+      patch[m.id] = text;
+    } catch (err) {
+      appLog("warn", "[Decrypt:before_paint_fail]", {
+        message_id: m.id,
+        conversation_id: m.conversation_id,
+        sender_id: m.sender_id,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      // Leave uncached — useMessageDecrypt will retry.
+    }
+  }
+  return patch;
 }
 
 function isTransientDecryptError(reason: string): boolean {
@@ -258,6 +324,8 @@ export function useMessageDecrypt(opts: {
       const toDecrypt = messagesSnapshot.filter(
         (m) => m.kind !== "file_notice" && m.kind !== "deleted" && !plaintextCache.has(m.id)
       );
+      // Newest first — visible bubbles must not wait behind older backlog.
+      toDecrypt.reverse();
 
       if (toDecrypt.length === 0) {
         retryAttemptRef.current = 0;
@@ -288,89 +356,83 @@ export function useMessageDecrypt(opts: {
       });
 
       let transientFails = 0;
-      const batchSize = 10;
-      for (let i = 0; i < toDecrypt.length; i += batchSize) {
-        const chunk = toDecrypt.slice(i, i + batchSize);
-        const patch: Record<string, string> = {};
-        await Promise.all(
-          chunk.map(async (m) => {
-            try {
-              let text = "";
-              if (kindAtStart === "group" && gk) {
-                text = await decryptGroupRef.current(m);
-              } else {
-                let senderPub =
-                  m.sender_id === profileIdRef.current
-                    ? exportPublic(identityRef.current).ed25519_public
-                    : peersRef.current.find((p) => p.user_id === m.sender_id)?.ed25519_public;
-                if (!senderPub && m.sender_id !== profileIdRef.current) {
-                  try {
-                    const all = await peerApi.listPeers();
-                    const found = all.find((p) => p.user_id === m.sender_id);
-                    if (found?.ed25519_public) senderPub = found.ed25519_public;
-                  } catch {
-                    /* ignore */
-                  }
+      // Parallel decrypt; commit each message as soon as it finishes (no batch delay).
+      await Promise.all(
+        toDecrypt.map(async (m) => {
+          try {
+            let text = "";
+            if (kindAtStart === "group" && gk) {
+              text = await decryptGroupRef.current(m);
+            } else {
+              let senderPub =
+                m.sender_id === profileIdRef.current
+                  ? exportPublic(identityRef.current).ed25519_public
+                  : peersRef.current.find((p) => p.user_id === m.sender_id)?.ed25519_public;
+              if (!senderPub && m.sender_id !== profileIdRef.current) {
+                try {
+                  const all = await peerApi.listPeers();
+                  const found = all.find((p) => p.user_id === m.sender_id);
+                  if (found?.ed25519_public) senderPub = found.ed25519_public;
+                } catch {
+                  /* ignore */
                 }
-                const wrapped = normalizeWrappedKeys(m.wrapped_keys);
-                text = await decryptMessage(
-                  { ...m, wrapped_keys: wrapped },
-                  profileIdRef.current,
-                  identityRef.current,
-                  senderPub
-                );
               }
-              if (!text) {
-                // Empty plaintext is valid but must not block retries if crypto was incomplete.
-                appLog("warn", "[Decrypt:empty_plaintext]", {
-                  conversation_id: m.conversation_id,
-                  message_id: m.id,
-                  sender_id: m.sender_id,
-                });
-              }
-              patch[m.id] = text;
-              pendingRetry.delete(m.id);
-              appLog("debug", "[Decrypt:ok]", {
+              const wrapped = normalizeWrappedKeys(m.wrapped_keys);
+              text = await decryptMessage(
+                { ...m, wrapped_keys: wrapped },
+                profileIdRef.current,
+                identityRef.current,
+                senderPub
+              );
+            }
+            if (!text) {
+              appLog("warn", "[Decrypt:empty_plaintext]", {
                 conversation_id: m.conversation_id,
-                active_id: convIdAtStart,
                 message_id: m.id,
                 sender_id: m.sender_id,
-                len: text.length,
               });
-            } catch (err) {
-              const reason = err instanceof Error ? err.message : String(err);
-              const attempts = (pendingRetry.get(m.id) || 0) + 1;
-              pendingRetry.set(m.id, attempts);
-              if (isTransientDecryptError(reason) && attempts < 8) {
-                transientFails += 1;
-                appLog("warn", "[Decrypt:transient_fail]", {
-                  conversation_id: m.conversation_id,
-                  active_id: convIdAtStart,
-                  message_id: m.id,
-                  sender_id: m.sender_id,
-                  attempt: attempts,
-                  reason,
-                  wrap_keys:
-                    m.wrapped_keys && typeof m.wrapped_keys === "object"
-                      ? Object.keys(m.wrapped_keys as object)
-                      : typeof m.wrapped_keys,
-                });
-                return;
-              }
-              appLog("error", "[Decrypt:fail]", {
+            }
+            pendingRetry.delete(m.id);
+            commitPlain({ [m.id]: text });
+            appLog("debug", "[Decrypt:ok]", {
+              conversation_id: m.conversation_id,
+              active_id: convIdAtStart,
+              message_id: m.id,
+              sender_id: m.sender_id,
+              len: text.length,
+            });
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err);
+            const attempts = (pendingRetry.get(m.id) || 0) + 1;
+            pendingRetry.set(m.id, attempts);
+            if (isTransientDecryptError(reason) && attempts < 8) {
+              transientFails += 1;
+              appLog("warn", "[Decrypt:transient_fail]", {
                 conversation_id: m.conversation_id,
                 active_id: convIdAtStart,
                 message_id: m.id,
                 sender_id: m.sender_id,
                 attempt: attempts,
                 reason,
+                wrap_keys:
+                  m.wrapped_keys && typeof m.wrapped_keys === "object"
+                    ? Object.keys(m.wrapped_keys as object)
+                    : typeof m.wrapped_keys,
               });
-              patch[m.id] = UNABLE;
+              return;
             }
-          })
-        );
-        commitPlain(patch);
-      }
+            appLog("error", "[Decrypt:fail]", {
+              conversation_id: m.conversation_id,
+              active_id: convIdAtStart,
+              message_id: m.id,
+              sender_id: m.sender_id,
+              attempt: attempts,
+              reason,
+            });
+            commitPlain({ [m.id]: UNABLE });
+          }
+        })
+      );
 
       // Still-undecrypted rows in this window → keep retrying (do not depend on another send).
       const stillPending = messagesSnapshot.filter(
