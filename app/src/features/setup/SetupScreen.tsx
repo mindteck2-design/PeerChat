@@ -3,8 +3,13 @@ import {
   Alert,
   Box,
   Button,
+  Divider,
   Fade,
+  FormControl,
+  InputLabel,
+  MenuItem,
   Paper,
+  Select,
   Stack,
   TextField,
   Typography,
@@ -12,6 +17,7 @@ import {
 import { exportPublic, type Identity } from "../../crypto";
 import { peerApi, type Profile } from "../../peer";
 import { newUserId } from "../../shared/ids";
+import { ENTERPRISE_ROLES } from "../profile/roles";
 
 function sanitizeNameOrTeam(val: string): string {
   return val.replace(/[^a-zA-Z0-9 _-]/g, "");
@@ -26,6 +32,9 @@ export function SetupScreen(props: {
 }) {
   const [name, setName] = useState("");
   const [team, setTeam] = useState("");
+  const [designation, setDesignation] = useState("Senior Sf Engineer");
+  const [isCustomRole, setIsCustomRole] = useState(false);
+  const [customRoleText, setCustomRoleText] = useState("");
   const [busy, setBusy] = useState(false);
   const pubs = exportPublic(props.identity);
 
@@ -37,6 +46,7 @@ export function SetupScreen(props: {
       return;
     }
     const teamTrimmed = team.trim();
+    const finalDesignation = (isCustomRole ? customRoleText : designation).trim();
     setBusy(true);
     try {
       const p = await peerApi.setupProfile({
@@ -46,6 +56,9 @@ export function SetupScreen(props: {
         ed25519Public: pubs.ed25519_public,
         team: teamTrimmed,
       });
+      if (finalDesignation) {
+        await peerApi.setAppSetting("profile_designation", finalDesignation).catch(() => {});
+      }
       props.onReady(p);
     } catch (e: any) {
       props.setError(e?.message || String(e));
@@ -111,6 +124,44 @@ export function SetupScreen(props: {
                 }
               }}
             />
+            <FormControl fullWidth size="small">
+              <InputLabel id="setup-role-label">Designation / Role</InputLabel>
+              <Select
+                labelId="setup-role-label"
+                label="Designation / Role"
+                value={isCustomRole ? "__custom__" : designation}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === "__custom__") {
+                    setIsCustomRole(true);
+                  } else {
+                    setIsCustomRole(false);
+                    setDesignation(val);
+                  }
+                }}
+              >
+                {ENTERPRISE_ROLES.map((r, idx) => [
+                  idx === 8 && <Divider key="div-mgr" sx={{ my: 0.5 }} />,
+                  <MenuItem key={r.id} value={r.label}>
+                    {r.label}
+                  </MenuItem>
+                ])}
+                <Divider sx={{ my: 0.5 }} />
+                <MenuItem value="__custom__">
+                  <em>+ Custom role / other…</em>
+                </MenuItem>
+              </Select>
+            </FormControl>
+            {isCustomRole && (
+              <TextField
+                label="Custom designation"
+                fullWidth
+                size="small"
+                value={customRoleText}
+                placeholder="e.g. Solution Architect"
+                onChange={(e) => setCustomRoleText(e.target.value)}
+              />
+            )}
             {props.error && <Alert severity="error">{props.error}</Alert>}
             <Button variant="contained" size="large" disabled={busy} onClick={create}>
               {busy ? "Starting…" : "Start PeerChat"}

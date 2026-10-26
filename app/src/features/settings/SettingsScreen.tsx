@@ -427,24 +427,9 @@ export function SettingsScreen(props: {
               </Box>
 
               <Box>
-                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 0.75 }}>
-                  <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500 }}>
-                    Designation / Role
-                  </Typography>
-                  {canBroadcastRole(isCustomRole ? customRoleText : designation) ? (
-                    <Chip
-                      size="small"
-                      label="⭐ Can Broadcast (Managerial)"
-                      color="primary"
-                      variant="outlined"
-                      sx={{ height: 20, fontSize: 10.5, fontWeight: 700 }}
-                    />
-                  ) : (
-                    <Typography variant="caption" sx={{ color: "text.secondary", fontSize: 11 }}>
-                      Subscriber (Read-only broadcast)
-                    </Typography>
-                  )}
-                </Box>
+                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
+                  Designation / Role
+                </Typography>
 
                 <FormControl size="small" fullWidth>
                   <Select
@@ -467,17 +452,7 @@ export function SettingsScreen(props: {
                     {ENTERPRISE_ROLES.map((r, idx) => [
                       idx === 8 && <Divider key="div-mgr" sx={{ my: 0.5 }} />,
                       <MenuItem key={r.id} value={r.label}>
-                        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", gap: 1 }}>
-                          <span>{r.label}</span>
-                          {r.canBroadcast && (
-                            <Chip
-                              size="small"
-                              label="Managerial"
-                              color="primary"
-                              sx={{ height: 18, fontSize: 9.5, fontWeight: 700 }}
-                            />
-                          )}
-                        </Box>
+                        {r.label}
                       </MenuItem>
                     ])}
                     <Divider sx={{ my: 0.5 }} />
@@ -494,7 +469,7 @@ export function SettingsScreen(props: {
                     value={customRoleText}
                     placeholder="Type custom designation…"
                     onChange={(e) => setCustomRoleText(e.target.value)}
-                    helperText="Custom roles default to read-only unless matching managerial titles (Deputy Manager & above)."
+                    helperText="Enter your specific role title if not listed above."
                     sx={{ ...inputSx, mt: 1 }}
                   />
                 )}
