@@ -223,6 +223,7 @@ import { PeerTrustDialogs } from "../features/peers/PeerTrustDialogs";
 import { GroupCreateDialog } from "../features/groups/GroupCreateDialog";
 import { GroupMembersDialog } from "../features/groups/GroupMembersDialog";
 import { ChatProfileDialog } from "../features/chat/ChatProfileDialog";
+import { BroadcastChannelInfoDialog } from "../features/chat/BroadcastChannelInfoDialog";
 import { useGroupCrypto } from "../features/groups/useGroupCrypto";
 import {
   cachePlaintext,
@@ -356,6 +357,7 @@ export function ChatScreen({
   const [members, setMembers] = useState<Member[]>([]);
   const [membersLoaded, setMembersLoaded] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
+  const [broadcastInfoOpen, setBroadcastInfoOpen] = useState(false);
   const [addPick, setAddPick] = useState<string[]>([]);
 
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
@@ -4176,6 +4178,8 @@ export function ChatScreen({
     canAddMembers,
     incomingFile,
     isAnnounceBoard,
+    broadcastInfoOpen,
+    setBroadcastInfoOpen,
     canBroadcast,
     myDesignation,
     setPollOpen,
@@ -4490,7 +4494,9 @@ export function ChatScreen({
                 {active && (
                   <Avatar
                     onClick={() => {
-                      if (active.kind === "group") {
+                      if (isAnnounceBoard) {
+                        setBroadcastInfoOpen(true);
+                      } else if (active.kind === "group") {
                         setRenameDraft(active.title || "");
                         setAddPick([]);
                         setMembersOpen(true);
@@ -4509,7 +4515,11 @@ export function ChatScreen({
                     }}
                   >
                     {active.kind === "group" ? (
-                      <GroupsIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
+                      isAnnounceBoard ? (
+                        <CampaignIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
+                      ) : (
+                        <GroupsIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
+                      )
                     ) : (
                       activeTitle.slice(0, 1).toUpperCase()
                     )}
@@ -4520,7 +4530,9 @@ export function ChatScreen({
                   minWidth={0}
                   onClick={() => {
                     if (!active) return;
-                    if (active.kind === "group") {
+                    if (isAnnounceBoard) {
+                      setBroadcastInfoOpen(true);
+                    } else if (active.kind === "group") {
                       setRenameDraft(active.title || "");
                       setAddPick([]);
                       setMembersOpen(true);
@@ -4595,14 +4607,18 @@ export function ChatScreen({
                 )}
                 {active?.kind === "group" && (
                   <IconButton
-                    aria-label="Group details"
+                    aria-label={isAnnounceBoard ? "Channel info" : "Group details"}
                     onClick={() => {
-                      setRenameDraft(active.title || "");
-                      setAddPick([]);
-                      setMembersOpen(true);
+                      if (isAnnounceBoard) {
+                        setBroadcastInfoOpen(true);
+                      } else {
+                        setRenameDraft(active.title || "");
+                        setAddPick([]);
+                        setMembersOpen(true);
+                      }
                     }}
                   >
-                    <GroupIcon />
+                    {isAnnounceBoard ? <CampaignIcon /> : <GroupIcon />}
                   </IconButton>
                 )}
                 {active && (
@@ -5411,6 +5427,8 @@ export function ChatScreen({
       <FilePreviewDialog vm={vm} />
 
       <GroupMembersDialog vm={vm} />
+
+      <BroadcastChannelInfoDialog vm={vm} />
 
       <AnnounceDialog
         open={announceOpen}
