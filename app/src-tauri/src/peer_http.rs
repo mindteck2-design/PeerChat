@@ -314,6 +314,7 @@ fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
         builder = builder.extra("conversation_id", cid);
     }
     let _ = builder.show();
+    crate::runtime::tray_flash::start_tray_flash(app);
 }
 
 enum HttpAction {

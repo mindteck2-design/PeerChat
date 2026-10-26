@@ -32,6 +32,8 @@ import DnsRoundedIcon from "@mui/icons-material/DnsRounded";
 import VolumeUpRoundedIcon from "@mui/icons-material/VolumeUpRounded";
 import SyncRoundedIcon from "@mui/icons-material/SyncRounded";
 import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
+import PushPinRoundedIcon from "@mui/icons-material/PushPinRounded";
+import { TaskbarPinTipDialog } from "../setup/TaskbarPinTipDialog";
 import {
   isPermissionGranted,
   requestPermission,
@@ -88,6 +90,7 @@ export function SettingsScreen(props: {
   const [notifBusy, setNotifBusy] = useState(false);
   /** "0" = off; otherwise a NotificationSoundId (legacy "1" treated as chime). */
   const [notifSoundPref, setNotifSoundPref] = useState("chime");
+  const [showTaskbarGuide, setShowTaskbarGuide] = useState(false);
 
   // Network tab state
   const [scanFreq, setScanFreq] = useState("1m");
@@ -145,7 +148,20 @@ export function SettingsScreen(props: {
       .catch(() => {});
     peerApi.getAppSetting("profile_emp_id").then((v) => setEmpId(v || "")).catch(() => {});
     peerApi.getAppSetting("profile_status").then((v) => setPresence(v || "Available")).catch(() => {});
-    peerApi.getAppSetting("profile_status_msg").then((v) => setStatusMsg(v || "")).catch(() => {});
+    peerApi
+      .getAppSetting("profile_status_msg")
+      .then((v) => {
+        if (v && v.trim()) {
+          setStatusMsg(v.trim().slice(0, 150));
+        } else {
+          const cached = localStorage.getItem("peerchat_about_" + props.profile.id);
+          if (cached) setStatusMsg(cached.slice(0, 150));
+        }
+      })
+      .catch(() => {
+        const cached = localStorage.getItem("peerchat_about_" + props.profile.id);
+        if (cached) setStatusMsg(cached.slice(0, 150));
+      });
   }, []);
 
   async function toggleAutostart(enabled: boolean) {
@@ -195,15 +211,17 @@ export function SettingsScreen(props: {
     const teamTrimmed = team.trim();
     if (!trimmed) return;
     const finalDesignation = (isCustomRole ? customRoleText : designation).trim();
+    const finalAbout = statusMsg.trim().slice(0, 150);
     setSavingProfile(true);
     try {
       const p = await peerApi.updateDisplayName(trimmed, teamTrimmed);
       props.onNameUpdated(p);
+      localStorage.setItem("peerchat_about_" + props.profile.id, finalAbout);
       await Promise.all([
         peerApi.setAppSetting("profile_designation", finalDesignation),
         peerApi.setAppSetting("profile_emp_id", empId.trim()),
         peerApi.setAppSetting("profile_status", presence),
-        peerApi.setAppSetting("profile_status_msg", statusMsg.trim()),
+        peerApi.setAppSetting("profile_status_msg", finalAbout),
       ]);
       props.onDesignationUpdated?.(finalDesignation);
       setStatus("Profile updated successfully");
@@ -264,7 +282,7 @@ export function SettingsScreen(props: {
 
   const cardSx = {
     p: 2.5,
-    borderRadius: 3,
+    borderRadius: 1.5,
     bgcolor: "background.paper",
     border: 1,
     borderColor: "divider",
@@ -276,7 +294,7 @@ export function SettingsScreen(props: {
   const inputSx = {
     "& .MuiOutlinedInput-root": {
       bgcolor: dark ? "chat.input" : "#F7FAF8",
-      borderRadius: 2,
+      borderRadius: 1.25,
       color: "text.primary",
       "& fieldset": { borderColor: "divider" },
       "&:hover fieldset": {
@@ -308,7 +326,7 @@ export function SettingsScreen(props: {
     bgcolor: "primary.main",
     color: "primary.contrastText",
     "&:hover": { bgcolor: "primary.dark" },
-    borderRadius: 2,
+    borderRadius: 1.25,
     px: 3,
     py: 0.75,
     fontWeight: 600,
@@ -345,7 +363,7 @@ export function SettingsScreen(props: {
           sx={{
             px: 2,
             py: 0.6,
-            borderRadius: "20px",
+            borderRadius: 1.25,
             bgcolor: dark ? "chat.input" : "rgba(20, 32, 28, 0.06)",
             border: 1,
             borderColor: "divider",
@@ -444,7 +462,7 @@ export function SettingsScreen(props: {
                       }
                     }}
                     displayEmpty
-                    sx={{ ...inputSx, borderRadius: 2 }}
+                    sx={{ ...inputSx, borderRadius: 1.25 }}
                   >
                     <MenuItem value="" disabled>
                       <em>Select enterprise role…</em>
@@ -499,7 +517,7 @@ export function SettingsScreen(props: {
                   <Select
                     value={presence}
                     onChange={(e) => setPresence(e.target.value)}
-                    sx={{ ...inputSx, borderRadius: 2 }}
+                    sx={{ ...inputSx, borderRadius: 1.25 }}
                   >
                     <MenuItem value="Available">🟢 Available</MenuItem>
                     <MenuItem value="In a meeting">🟡 In a meeting</MenuItem>
@@ -511,15 +529,21 @@ export function SettingsScreen(props: {
               </Box>
 
               <Box>
-                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
-                  Status Message
-                </Typography>
+                <Box display="flex" justifyContent="space-between" alignItems="center" mb={0.75}>
+                  <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500 }}>
+                    About
+                  </Typography>
+                  <Typography sx={{ fontSize: "0.75rem", color: statusMsg.length >= 150 ? "error.main" : mutedColor }}>
+                    {statusMsg.length}/150
+                  </Typography>
+                </Box>
                 <TextField
                   size="small"
                   fullWidth
-                  placeholder="What are you working on?"
+                  placeholder="Hey, I'm using PeerChat 😊"
                   value={statusMsg}
-                  onChange={(e) => setStatusMsg(e.target.value)}
+                  onChange={(e) => setStatusMsg(e.target.value.slice(0, 150))}
+                  inputProps={{ maxLength: 150 }}
                   sx={inputSx}
                 />
               </Box>
@@ -755,7 +779,7 @@ export function SettingsScreen(props: {
                         playNotificationSound(next as NotificationSoundId, true);
                       }
                     }}
-                    sx={{ ...inputSx, borderRadius: 2 }}
+                    sx={{ ...inputSx, borderRadius: 1.25 }}
                   >
                     <MenuItem value="0">Off</MenuItem>
                     {NOTIFICATION_SOUND_OPTIONS.map((opt) => (
@@ -768,8 +792,30 @@ export function SettingsScreen(props: {
               </Box>
             </Box>
           </Paper>
+
+          <Paper sx={cardSx} elevation={0}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.5 }}>
+              <PushPinRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
+                Taskbar & System Tray Visibility
+              </Typography>
+            </Box>
+            <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mb: 2 }}>
+              Keep PeerChat pinned outside the <b>^</b> overflow menu so you always see new message flashes and badge counts, just like IP Messenger.
+            </Typography>
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => setShowTaskbarGuide(true)}
+              sx={{ textTransform: "none", fontWeight: 600, borderRadius: 1.25 }}
+            >
+              Watch Pinning Guide Animation
+            </Button>
+          </Paper>
         </Box>
       )}
+
+      <TaskbarPinTipDialog open={showTaskbarGuide} onClose={() => setShowTaskbarGuide(false)} />
 
       {/* TAB 3: NETWORK & DISCOVERY */}
       {tab === 3 && (
@@ -795,7 +841,7 @@ export function SettingsScreen(props: {
                 <Select
                   value={scanFreq}
                   onChange={(e) => handleScanFreqChange(e.target.value)}
-                  sx={{ ...inputSx, borderRadius: 2 }}
+                  sx={{ ...inputSx, borderRadius: 1.25 }}
                 >
                   <MenuItem value="30s">Every 30 seconds</MenuItem>
                   <MenuItem value="1m">Every 1 minute (Default)</MenuItem>
@@ -812,7 +858,7 @@ export function SettingsScreen(props: {
                 disabled={scanningNow}
                 startIcon={<SyncRoundedIcon />}
                 onClick={triggerManualScan}
-                sx={{ textTransform: "none", fontWeight: 600, borderRadius: 2 }}
+                sx={{ textTransform: "none", fontWeight: 600, borderRadius: 1.25 }}
               >
                 {scanningNow ? "Scanning LAN…" : "Scan Network Now"}
               </Button>
@@ -827,7 +873,7 @@ export function SettingsScreen(props: {
               Network Protocol Ports
             </Typography>
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2 }}>
-              <Box sx={{ p: 1.5, borderRadius: 2, bgcolor: dark ? "chat.input" : "#F7FAF8", border: 1, borderColor: "divider" }}>
+              <Box sx={{ p: 1.5, borderRadius: 1.25, bgcolor: dark ? "chat.input" : "#F7FAF8", border: 1, borderColor: "divider" }}>
                 <Typography variant="caption" color="text.secondary" fontWeight={600}>
                   HTTPS Peer Server Port
                 </Typography>
@@ -839,7 +885,7 @@ export function SettingsScreen(props: {
                 </Typography>
               </Box>
 
-              <Box sx={{ p: 1.5, borderRadius: 2, bgcolor: dark ? "chat.input" : "#F7FAF8", border: 1, borderColor: "divider" }}>
+              <Box sx={{ p: 1.5, borderRadius: 1.25, bgcolor: dark ? "chat.input" : "#F7FAF8", border: 1, borderColor: "divider" }}>
                 <Typography variant="caption" color="text.secondary" fontWeight={600}>
                   UDP Discovery Broadcast Port
                 </Typography>
@@ -878,7 +924,7 @@ export function SettingsScreen(props: {
               <Button
                 variant="outlined"
                 onClick={chooseDownloadDir}
-                sx={{ borderRadius: 2, px: 2, py: 0.75, textTransform: "none", fontWeight: 600, flexShrink: 0 }}
+                sx={{ borderRadius: 1.25, px: 2, py: 0.75, textTransform: "none", fontWeight: 600, flexShrink: 0 }}
               >
                 Browse…
               </Button>

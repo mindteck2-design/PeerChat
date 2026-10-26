@@ -172,7 +172,7 @@ export function CalendarItemViewDialog({
           display: "flex",
           flexDirection: "column",
           maxHeight: "88vh",
-          borderRadius: 3,
+          borderRadius: 2,
           bgcolor: "background.paper",
           ...dialogScrollSx,
         },
@@ -186,7 +186,7 @@ export function CalendarItemViewDialog({
               sx={{
                 width: 42,
                 height: 42,
-                borderRadius: 2.5,
+                borderRadius: 1,
                 display: "grid",
                 placeItems: "center",
                 bgcolor: theme.bg,
@@ -270,7 +270,7 @@ export function CalendarItemViewDialog({
             elevation={0}
             sx={{
               p: 1.5,
-              borderRadius: 2.5,
+              borderRadius: 1.25,
               bgcolor: "rgba(59, 130, 246, 0.08)",
               border: "1px solid rgba(59, 130, 246, 0.25)",
             }}
@@ -295,7 +295,7 @@ export function CalendarItemViewDialog({
                 startIcon={<OpenInNewIcon sx={{ fontSize: 16 }} />}
                 onClick={() => onOpenUrl?.(item.meeting_url!)}
                 sx={{
-                  borderRadius: 2,
+                  borderRadius: 1.25,
                   textTransform: "none",
                   fontWeight: 600,
                   px: 2,
@@ -446,7 +446,7 @@ export function CalendarItemViewDialog({
               elevation={0}
               sx={{
                 p: 2,
-                borderRadius: 2.5,
+                borderRadius: 1.25,
                 bgcolor: "action.hover",
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-word",
@@ -477,7 +477,7 @@ export function CalendarItemViewDialog({
                   }
                   label={p.name}
                   variant="outlined"
-                  sx={{ borderRadius: 2 }}
+                  sx={{ borderRadius: 1 }}
                 />
               ))}
             </Stack>
@@ -498,7 +498,7 @@ export function CalendarItemViewDialog({
               startIcon={<DeleteOutlineIcon />}
               disabled={busy}
               onClick={onDelete}
-              sx={{ textTransform: "none", fontWeight: 600, borderRadius: 2 }}
+              sx={{ textTransform: "none", fontWeight: 600, borderRadius: 1.25 }}
             >
               Delete
             </Button>
@@ -520,7 +520,7 @@ export function CalendarItemViewDialog({
               startIcon={<CheckCircleIcon />}
               disabled={busy}
               onClick={onAck}
-              sx={{ textTransform: "none", fontWeight: 600, borderRadius: 2 }}
+              sx={{ textTransform: "none", fontWeight: 600, borderRadius: 1.25 }}
             >
               Acknowledge
             </Button>
@@ -533,7 +533,7 @@ export function CalendarItemViewDialog({
               startIcon={<EditIcon />}
               disabled={busy}
               onClick={onEdit}
-              sx={{ textTransform: "none", fontWeight: 600, borderRadius: 2 }}
+              sx={{ textTransform: "none", fontWeight: 600, borderRadius: 1.25 }}
             >
               Edit
             </Button>
@@ -544,7 +544,7 @@ export function CalendarItemViewDialog({
             variant="text"
             onClick={onClose}
             disabled={busy}
-            sx={{ textTransform: "none", fontWeight: 600, borderRadius: 2 }}
+            sx={{ textTransform: "none", fontWeight: 600, borderRadius: 1.25 }}
           >
             Close
           </Button>

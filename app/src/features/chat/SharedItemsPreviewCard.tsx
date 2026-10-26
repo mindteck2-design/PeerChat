@@ -119,7 +119,7 @@ export function SharedItemsPreviewCard({
     <Box
       sx={{
         bgcolor: "rgba(23, 31, 45, 0.7)",
-        borderRadius: 3,
+        borderRadius: 1.5,
         p: 2,
         border: "1px solid rgba(255, 255, 255, 0.05)",
       }}
@@ -130,7 +130,7 @@ export function SharedItemsPreviewCard({
             sx={{
               width: 36,
               height: 36,
-              borderRadius: 2,
+              borderRadius: 1.25,
               bgcolor: "rgba(130, 169, 248, 0.14)",
               color: "primary.main",
               display: "grid",
@@ -190,7 +190,7 @@ export function SharedItemsPreviewCard({
                   sx={{
                     position: "relative",
                     aspectRatio: "1",
-                    borderRadius: 2,
+                    borderRadius: 1,
                     overflow: "hidden",
                     bgcolor: "action.hover",
                     border: "1px solid rgba(255, 255, 255, 0.08)",
@@ -256,7 +256,7 @@ export function SharedItemsPreviewCard({
                   sx={{
                     position: "relative",
                     aspectRatio: "1",
-                    borderRadius: 2,
+                    borderRadius: 1,
                     overflow: "hidden",
                     border: "1px solid rgba(255, 255, 255, 0.08)",
                     cursor: "pointer",
@@ -304,7 +304,7 @@ export function SharedItemsPreviewCard({
                 sx={{
                   position: "relative",
                   aspectRatio: "1",
-                  borderRadius: 2,
+                  borderRadius: 1,
                   overflow: "hidden",
                   bgcolor: "rgba(130, 169, 248, 0.12)",
                   border: "1px solid rgba(130, 169, 248, 0.25)",
@@ -355,7 +355,7 @@ export function SharedItemsPreviewCard({
               onClick={() => onViewAll("media")}
               sx={{
                 aspectRatio: "1",
-                borderRadius: 2,
+                borderRadius: 1,
                 overflow: "hidden",
                 border: "1px solid rgba(255, 255, 255, 0.1)",
                 cursor: "pointer",

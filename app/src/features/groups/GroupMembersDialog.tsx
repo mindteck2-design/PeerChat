@@ -182,7 +182,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
       fullWidth
       PaperProps={{
         sx: {
-          borderRadius: 3.5,
+          borderRadius: 2,
           bgcolor: "#141c2b",
           backgroundImage: "none",
           border: "1px solid",
@@ -239,7 +239,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
               <Box
                 sx={{
                   bgcolor: "rgba(23, 31, 45, 0.7)",
-                  borderRadius: 3,
+                  borderRadius: 1.5,
                   p: 2.25,
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                   display: "flex",
@@ -366,7 +366,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
               <Box
                 sx={{
                   bgcolor: "rgba(23, 31, 45, 0.7)",
-                  borderRadius: 3,
+                  borderRadius: 1.5,
                   p: 2,
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                 }}
@@ -407,7 +407,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                           flex: 1,
                           minWidth: 160,
                           "& .MuiOutlinedInput-root": {
-                            borderRadius: 2,
+                            borderRadius: 1.25,
                             fontSize: 13,
                             bgcolor: "rgba(255, 255, 255, 0.04)",
                             "& fieldset": { borderColor: "rgba(255, 255, 255, 0.08)" },
@@ -421,7 +421,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                         endIcon={<KeyboardArrowDownRoundedIcon sx={{ fontSize: "16px !important" }} />}
                         onClick={(e) => setFilterMenuAnchor(e.currentTarget)}
                         sx={{
-                          borderRadius: 2,
+                          borderRadius: 1.25,
                           px: 1.5,
                           py: 0.75,
                           textTransform: "none",
@@ -443,7 +443,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                         anchorEl={filterMenuAnchor}
                         open={!!filterMenuAnchor}
                         onClose={() => setFilterMenuAnchor(null)}
-                        PaperProps={{ sx: { borderRadius: 2, minWidth: 120 } }}
+                        PaperProps={{ sx: { borderRadius: 1.25, minWidth: 120 } }}
                       >
                         <MenuItem
                           selected={memberRoleFilter === "all"}
@@ -485,7 +485,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                             setAddPeopleMode((prev) => !prev);
                           }}
                           sx={{
-                            borderRadius: 2,
+                            borderRadius: 1.25,
                             px: 1.75,
                             py: 0.75,
                             textTransform: "none",
@@ -508,7 +508,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                         sx={{
                           p: 1.5,
                           mb: 1.5,
-                          borderRadius: 2,
+                          borderRadius: 1.25,
                           bgcolor: "action.hover",
                           border: "1px dashed rgba(255, 255, 255, 0.15)",
                         }}
@@ -529,7 +529,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                               textTransform: "none",
                               fontWeight: 700,
                               fontSize: 12,
-                              borderRadius: 999,
+                              borderRadius: 1.25,
                             }}
                           >
                             Add {addPick.length ? `(${addPick.length})` : ""}
@@ -552,7 +552,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                                       : [...g, p.user_id]
                                   )
                                 }
-                                sx={{ borderRadius: 2, py: 0.5, px: 1 }}
+                                sx={{ borderRadius: 1, py: 0.5, px: 1 }}
                               >
                                 <ListItemAvatar sx={{ minWidth: 40 }}>
                                   <Avatar
@@ -613,7 +613,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                                 alignItems: "center",
                                 justifyContent: "space-between",
                                 p: 0.85,
-                                borderRadius: 2,
+                                borderRadius: 1,
                                 "&:hover": { bgcolor: "action.hover" },
                               }}
                             >
@@ -732,7 +732,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                   void handleDeleteGroup();
                 }}
                 sx={{
-                  borderRadius: 2,
+                  borderRadius: 1.25,
                   px: 2,
                   py: 0.75,
                   textTransform: "none",
@@ -795,7 +795,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                 variant="contained"
                 onClick={() => setMembersOpen(false)}
                 sx={{
-                  borderRadius: 999,
+                  borderRadius: 1.25,
                   px: 3,
                   py: 0.85,
                   textTransform: "none",
@@ -819,7 +819,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
         anchorEl={memberMenuAnchor?.el}
         open={!!memberMenuAnchor}
         onClose={() => setMemberMenuAnchor(null)}
-        PaperProps={{ sx: { borderRadius: 2, minWidth: 160 } }}
+        PaperProps={{ sx: { borderRadius: 1.25, minWidth: 160 } }}
       >
         {memberMenuAnchor?.member && (
           <>
@@ -872,7 +872,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
         anchorEl={groupSettingsAnchor}
         open={!!groupSettingsAnchor}
         onClose={() => setGroupSettingsAnchor(null)}
-        PaperProps={{ sx: { borderRadius: 2, minWidth: 220, p: 1 } }}
+        PaperProps={{ sx: { borderRadius: 1.25, minWidth: 220, p: 1 } }}
       >
         <Box display="flex" alignItems="center" justifyContent="space-between" px={1} py={0.5}>
           <Typography fontSize={13} fontWeight={600} color="#FFFFFF">

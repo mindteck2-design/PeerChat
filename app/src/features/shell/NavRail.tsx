@@ -90,7 +90,7 @@ export function NavRail(props: {
             }}
             sx={{
               bgcolor: nav === id ? "action.selected" : "transparent",
-              borderRadius: 2.5,
+              borderRadius: 1.5,
             }}
           >
             {icon}
@@ -159,7 +159,7 @@ export function NavRail(props: {
           }}
           sx={{
             bgcolor: nav === "settings" ? "action.selected" : "transparent",
-            borderRadius: 2.5,
+            borderRadius: 1.5,
           }}
         >
           <SettingsIcon />

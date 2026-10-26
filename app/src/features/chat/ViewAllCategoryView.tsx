@@ -163,7 +163,7 @@ export function ViewAllCategoryView({
         sx={{
           width: 40,
           height: 40,
-          borderRadius: 2,
+          borderRadius: 1,
           bgcolor: style.bg,
           color: style.color,
           display: "flex",
@@ -292,7 +292,7 @@ export function ViewAllCategoryView({
                 sx={{
                   fontWeight: 600,
                   fontSize: 12.5,
-                  borderRadius: 2,
+                  borderRadius: 1,
                   bgcolor: mediaFilter === "all" ? "primary.main" : "action.hover",
                   color: mediaFilter === "all" ? "#FFFFFF" : "text.secondary",
                   cursor: "pointer",
@@ -305,7 +305,7 @@ export function ViewAllCategoryView({
                 sx={{
                   fontWeight: 600,
                   fontSize: 12.5,
-                  borderRadius: 2,
+                  borderRadius: 1,
                   bgcolor: mediaFilter === "images" ? "primary.main" : "action.hover",
                   color: mediaFilter === "images" ? "#FFFFFF" : "text.secondary",
                   cursor: "pointer",
@@ -318,7 +318,7 @@ export function ViewAllCategoryView({
                 sx={{
                   fontWeight: 600,
                   fontSize: 12.5,
-                  borderRadius: 2,
+                  borderRadius: 1,
                   bgcolor: mediaFilter === "videos" ? "primary.main" : "action.hover",
                   color: mediaFilter === "videos" ? "#FFFFFF" : "text.secondary",
                   cursor: "pointer",
@@ -336,7 +336,7 @@ export function ViewAllCategoryView({
                 sx={{
                   fontWeight: 600,
                   fontSize: 12.5,
-                  borderRadius: 2,
+                  borderRadius: 1,
                   bgcolor: fileFilter === "all" ? "primary.main" : "action.hover",
                   color: fileFilter === "all" ? "#FFFFFF" : "text.secondary",
                   cursor: "pointer",
@@ -349,7 +349,7 @@ export function ViewAllCategoryView({
                 sx={{
                   fontWeight: 600,
                   fontSize: 12.5,
-                  borderRadius: 2,
+                  borderRadius: 1,
                   bgcolor: fileFilter === "documents" ? "primary.main" : "action.hover",
                   color: fileFilter === "documents" ? "#FFFFFF" : "text.secondary",
                   cursor: "pointer",
@@ -362,7 +362,7 @@ export function ViewAllCategoryView({
                 sx={{
                   fontWeight: 600,
                   fontSize: 12.5,
-                  borderRadius: 2,
+                  borderRadius: 1,
                   bgcolor: fileFilter === "spreadsheets" ? "primary.main" : "action.hover",
                   color: fileFilter === "spreadsheets" ? "#FFFFFF" : "text.secondary",
                   cursor: "pointer",
@@ -375,7 +375,7 @@ export function ViewAllCategoryView({
                 sx={{
                   fontWeight: 600,
                   fontSize: 12.5,
-                  borderRadius: 2,
+                  borderRadius: 1,
                   bgcolor: fileFilter === "others" ? "primary.main" : "action.hover",
                   color: fileFilter === "others" ? "#FFFFFF" : "text.secondary",
                   cursor: "pointer",
@@ -391,7 +391,7 @@ export function ViewAllCategoryView({
               sx={{
                 fontWeight: 600,
                 fontSize: 12.5,
-                borderRadius: 2,
+                borderRadius: 1,
                 bgcolor: "primary.main",
                 color: "#FFFFFF",
               }}
@@ -409,7 +409,7 @@ export function ViewAllCategoryView({
               textTransform: "none",
               color: "text.secondary",
               bgcolor: "action.hover",
-              borderRadius: 2,
+              borderRadius: 1.25,
               px: 1.5,
               fontSize: 12.5,
               fontWeight: 600,
@@ -423,7 +423,7 @@ export function ViewAllCategoryView({
             anchorEl={sortAnchor}
             open={!!sortAnchor}
             onClose={() => setSortAnchor(null)}
-            PaperProps={{ sx: { borderRadius: 2, minWidth: 150 } }}
+            PaperProps={{ sx: { borderRadius: 1.25, minWidth: 150 } }}
           >
             <MenuItem
               selected={sortOrder === "newest"}
@@ -470,7 +470,7 @@ export function ViewAllCategoryView({
             direction="row"
             sx={{
               bgcolor: "action.hover",
-              borderRadius: 2,
+              borderRadius: 1.25,
               p: 0.25,
             }}
           >
@@ -478,7 +478,7 @@ export function ViewAllCategoryView({
               size="small"
               onClick={() => setViewMode("grid")}
               sx={{
-                borderRadius: 1.5,
+                borderRadius: 1,
                 p: 0.6,
                 color: viewMode === "grid" ? "#FFFFFF" : "text.secondary",
                 bgcolor: viewMode === "grid" ? "primary.main" : "transparent",
@@ -491,7 +491,7 @@ export function ViewAllCategoryView({
               size="small"
               onClick={() => setViewMode("list")}
               sx={{
-                borderRadius: 1.5,
+                borderRadius: 1,
                 p: 0.6,
                 color: viewMode === "list" ? "#FFFFFF" : "text.secondary",
                 bgcolor: viewMode === "list" ? "primary.main" : "transparent",
@@ -528,7 +528,7 @@ export function ViewAllCategoryView({
                     sx={{
                       position: "relative",
                       aspectRatio: "1",
-                      borderRadius: 2.5,
+                      borderRadius: 1,
                       overflow: "hidden",
                       bgcolor: "action.hover",
                       cursor: "pointer",
@@ -616,7 +616,7 @@ export function ViewAllCategoryView({
                       alignItems: "center",
                       gap: 2,
                       p: 1.25,
-                      borderRadius: 2,
+                      borderRadius: 1.25,
                       bgcolor: "action.hover",
                       cursor: "pointer",
                       "&:hover": { bgcolor: "action.selected" },
@@ -626,7 +626,7 @@ export function ViewAllCategoryView({
                       sx={{
                         width: 48,
                         height: 48,
-                        borderRadius: 2,
+                        borderRadius: 1,
                         overflow: "hidden",
                         bgcolor: "background.default",
                         flexShrink: 0,
@@ -696,7 +696,7 @@ export function ViewAllCategoryView({
                       alignItems: "center",
                       gap: 2,
                       p: 1.25,
-                      borderRadius: 2.5,
+                      borderRadius: 1.25,
                       bgcolor: "action.hover",
                       cursor: "pointer",
                       transition: "background-color 0.12s ease",
@@ -746,7 +746,7 @@ export function ViewAllCategoryView({
                     onClick={() => onOpenAttachment(f.fileId, f.senderId)}
                     sx={{
                       p: 2,
-                      borderRadius: 2.5,
+                      borderRadius: 1.25,
                       bgcolor: "action.hover",
                       border: "1px solid rgba(255, 255, 255, 0.06)",
                       cursor: "pointer",
@@ -806,7 +806,7 @@ export function ViewAllCategoryView({
                       alignItems: "center",
                       gap: 2,
                       p: 1.25,
-                      borderRadius: 2.5,
+                      borderRadius: 1.25,
                       bgcolor: "action.hover",
                       cursor: "pointer",
                       transition: "background-color 0.12s ease",
@@ -817,7 +817,7 @@ export function ViewAllCategoryView({
                       sx={{
                         width: 40,
                         height: 40,
-                        borderRadius: 2,
+                        borderRadius: 1,
                         bgcolor: "rgba(130, 169, 248, 0.15)",
                         color: "primary.main",
                         display: "flex",
@@ -875,7 +875,7 @@ export function ViewAllCategoryView({
         anchorEl={menuAnchor?.el}
         open={!!menuAnchor}
         onClose={() => setMenuAnchor(null)}
-        PaperProps={{ sx: { borderRadius: 2, minWidth: 160 } }}
+        PaperProps={{ sx: { borderRadius: 1.25, minWidth: 160 } }}
       >
         {menuAnchor?.item && (
           <>

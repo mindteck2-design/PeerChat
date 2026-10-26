@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
 pub(crate) fn show_main_window(app: &AppHandle) {
+    crate::runtime::tray_flash::stop_tray_flash(app);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();

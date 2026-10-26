@@ -114,7 +114,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
       fullWidth
       PaperProps={{
         sx: {
-          borderRadius: 3.5,
+          borderRadius: 2,
           bgcolor: "#141c2b",
           backgroundImage: "none",
           border: "1px solid",
@@ -180,7 +180,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
               <Box
                 sx={{
                   bgcolor: "rgba(23, 31, 45, 0.7)",
-                  borderRadius: 3,
+                  borderRadius: 1.5,
                   p: 2.25,
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                   display: "flex",
@@ -314,7 +314,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
               <Box
                 sx={{
                   bgcolor: "rgba(23, 31, 45, 0.7)",
-                  borderRadius: 3,
+                  borderRadius: 1.5,
                   p: 2,
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                 }}
@@ -334,7 +334,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
               <Box
                 sx={{
                   bgcolor: "rgba(23, 31, 45, 0.7)",
-                  borderRadius: 3,
+                  borderRadius: 1.5,
                   p: 2,
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                 }}

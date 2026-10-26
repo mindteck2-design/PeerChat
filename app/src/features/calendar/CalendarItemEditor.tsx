@@ -190,7 +190,7 @@ export function CalendarItemEditor({
           display: "flex",
           flexDirection: "column",
           maxHeight: "90vh",
-          borderRadius: 3.5,
+          borderRadius: 2,
           bgcolor: "background.paper",
           border: "1px solid",
           borderColor: "divider",
@@ -339,7 +339,7 @@ export function CalendarItemEditor({
 
         {/* To-Do Checklist (To-Do Only) */}
         {draft.kind === "todo" && (
-          <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 2.5, p: 1.5, bgcolor: "action.hover" }}>
+          <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1.5, p: 1.5, bgcolor: "action.hover" }}>
             <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
               <Stack direction="row" spacing={1} alignItems="center">
                 <Typography variant="body2" fontWeight={700}>
@@ -461,7 +461,7 @@ export function CalendarItemEditor({
             elevation={0}
             sx={{
               p: 1.5,
-              borderRadius: 2.5,
+              borderRadius: 1.5,
               bgcolor: "action.hover",
               border: "1px solid",
               borderColor: "divider",
@@ -584,7 +584,7 @@ export function CalendarItemEditor({
             disabled={busy}
             onClick={onSave}
             sx={{
-              borderRadius: 2.5,
+              borderRadius: 1.25,
               textTransform: "none",
               fontWeight: 600,
               px: 3,

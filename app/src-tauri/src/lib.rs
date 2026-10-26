@@ -232,6 +232,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            clear_tray_flash,
             get_profile,
             setup_profile,
             update_display_name,

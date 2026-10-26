@@ -134,7 +134,8 @@ import {
   type Identity,
 } from "../crypto";
 import { EMOJI_SET, QUICK_REACTIONS, emojiOnlyCount, emojiOnlyFontSize } from "../emoji";
-import { getOrCreateIdentity } from "../storage";
+import { getOrCreateIdentity, loadLocal } from "../storage";
+import { TaskbarPinTipDialog } from "../features/setup/TaskbarPinTipDialog";
 import { matchingCommands, SLASH_COMMANDS, type CommandContext } from "../commands";
 
 const SLASH_NAMES = new Set(SLASH_COMMANDS.map((c) => c.name));
@@ -266,6 +267,33 @@ export function ChatScreen({
   const [peers, setPeers] = useState<Peer[]>([]);
   const [lanHosts, setLanHosts] = useState<LanHost[]>([]);
   const [convs, setConvs] = useState<Conversation[]>([]);
+  const [taskbarTipOpen, setTaskbarTipOpen] = useState(false);
+
+  useEffect(() => {
+    loadLocal<boolean>("peerchat.tray_pin_tip_dismissed")
+      .then((dismissed) => {
+        if (!dismissed) {
+          setTaskbarTipOpen(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Title bar badge on top: e.g. "(3) PeerChat v1.0.2"
+  const totalUnread = useMemo(
+    () => convs.reduce((sum, c) => sum + (c.unread_count || 0), 0),
+    [convs]
+  );
+
+  useEffect(() => {
+    const base = `PeerChat v${version}`;
+    const title = totalUnread > 0 ? `(${totalUnread}) ${base}` : base;
+    document.title = title;
+    void getCurrentWindow().setTitle(title).catch(() => {});
+    if (totalUnread === 0) {
+      peerApi.clearTrayFlash().catch(() => {});
+    }
+  }, [totalUnread, version]);
   const [active, setActive] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
@@ -5187,7 +5215,7 @@ export function ChatScreen({
         onClose={() => !confirmDialog?.busy && closeConfirmDialog(false)}
         fullWidth
         maxWidth="xs"
-        PaperProps={{ sx: { borderRadius: 3 } }}
+        PaperProps={{ sx: { borderRadius: 2 } }}
       >
         <DialogTitle sx={{ fontWeight: 800, pr: 6 }}>
           {confirmDialog?.title}
@@ -5230,7 +5258,7 @@ export function ChatScreen({
         onClose={() => !clearBusy && setClearChatTarget(null)}
         fullWidth
         maxWidth="xs"
-        PaperProps={{ sx: { borderRadius: 3 } }}
+        PaperProps={{ sx: { borderRadius: 2 } }}
       >
         <DialogTitle sx={{ fontWeight: 800, pr: 6 }}>
           Delete messages
@@ -5289,7 +5317,7 @@ export function ChatScreen({
         onClose={() => setForwardMessage(null)}
         fullWidth
         maxWidth="xs"
-        PaperProps={{ sx: { borderRadius: 3, overflow: "hidden" } }}
+        PaperProps={{ sx: { borderRadius: 2, overflow: "hidden" } }}
       >
         <DialogTitle sx={{ pb: 0.5, pr: 6 }}>
           <Stack direction="row" spacing={1} alignItems="center">
@@ -5575,6 +5603,7 @@ export function ChatScreen({
       </Snackbar>
 
       <ChatProfileDialog vm={vm} />
+      <TaskbarPinTipDialog open={taskbarTipOpen} onClose={() => setTaskbarTipOpen(false)} />
 
       {/* Virus scan warning — outgoing send confirm, or inbound download notice */}
       <Dialog open={!!scanWarn} maxWidth="xs" fullWidth>

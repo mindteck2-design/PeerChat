@@ -299,3 +299,8 @@ pub fn append_app_log(state: State<AppState>, line: String) -> Result<(), String
     Ok(())
 }
 
+
+#[tauri::command]
+pub fn clear_tray_flash(app: tauri::AppHandle) {
+    crate::runtime::tray_flash::stop_tray_flash(&app);
+}

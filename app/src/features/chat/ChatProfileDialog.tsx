@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   Avatar,
   Box,
@@ -8,6 +8,7 @@ import {
   DialogContent,
   IconButton,
   Stack,
+  TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -23,6 +24,7 @@ import ComputerRoundedIcon from "@mui/icons-material/ComputerRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 
 import { extractChatMediaFilesLinks } from "./ChatMediaUtils";
 import { SharedItemsPreviewCard } from "./SharedItemsPreviewCard";
@@ -44,6 +46,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
     openAttachment,
     peerApi,
     plain,
+    profile,
     refresh,
     setChatInfoOpen,
     setHighlightMsgId,
@@ -62,6 +65,32 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
     return extractChatMediaFilesLinks(messages, fileNames, fileSizes, fileThumbs, plain);
   }, [isOpen, messages, fileNames, fileSizes, fileThumbs, plain]);
 
+  const peerId = activeDmPeer?.user_id || active?.peer_id || "";
+  const isSelf = !!profile?.id && (peerId === profile.id || !activeDmPeer || activeDmPeer.user_id === profile.id);
+
+  const [savedAbout, setSavedAbout] = useState("Hey, I'm using PeerChat 😊");
+  const [isEditingAbout, setIsEditingAbout] = useState(false);
+  const [aboutDraft, setAboutDraft] = useState("");
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const local = localStorage.getItem(`peerchat_about_${peerId}`);
+    if (local) {
+      setSavedAbout(local);
+    } else if (isSelf) {
+      peerApi
+        .getAppSetting("profile_status_msg")
+        .then((v) => {
+          const val = v || "Hey, I'm using PeerChat 😊";
+          setSavedAbout(val);
+          localStorage.setItem(`peerchat_about_${peerId}`, val);
+        })
+        .catch(() => setSavedAbout("Hey, I'm using PeerChat 😊"));
+    } else {
+      setSavedAbout("Hey, I'm using PeerChat 😊");
+    }
+  }, [isOpen, peerId, isSelf, peerApi]);
+
   if (!isOpen) return null;
 
   const displayName = activeDmPeer?.display_name || active?.peer_name || "Peer";
@@ -69,9 +98,6 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
   const ipAddress = activeDmPeer?.last_ip || "192.168.1.24";
   const rawTeam = activeDmPeer?.team?.trim();
   const teamLabel = rawTeam ? (rawTeam.toLowerCase().endsWith("team") ? rawTeam : `${rawTeam} Team`) : "General Team";
-  const peerId = activeDmPeer?.user_id || active?.peer_id || "";
-  const aboutText =
-    localStorage.getItem(`peerchat_about_${peerId}`) || "Hey, I'm using PeerChat 😊";
   const isMuted = !!active?.muted;
   const isPinned = !!active?.pinned_at;
 
@@ -79,6 +105,16 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
     navigator.clipboard.writeText(ipAddress);
     setCopiedIp(true);
     setTimeout(() => setCopiedIp(false), 2000);
+  };
+
+  const handleSaveAbout = async () => {
+    const trimmed = aboutDraft.trim().slice(0, 150) || "Hey, I'm using PeerChat 😊";
+    setSavedAbout(trimmed);
+    localStorage.setItem(`peerchat_about_${peerId}`, trimmed);
+    if (isSelf) {
+      await peerApi.setAppSetting("profile_status_msg", trimmed).catch(() => {});
+    }
+    setIsEditingAbout(false);
   };
 
   const handleToggleMute = async () => {
@@ -118,7 +154,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
       fullWidth
       PaperProps={{
         sx: {
-          borderRadius: 3.5,
+          borderRadius: 2,
           bgcolor: "#141c2b",
           backgroundImage: "none",
           border: "1px solid",
@@ -184,7 +220,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
               <Box
                 sx={{
                   bgcolor: "rgba(23, 31, 45, 0.7)",
-                  borderRadius: 3,
+                  borderRadius: 1.5,
                   p: 2.25,
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                   display: "flex",
@@ -377,17 +413,74 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
               <Box
                 sx={{
                   bgcolor: "rgba(23, 31, 45, 0.7)",
-                  borderRadius: 3,
+                  borderRadius: 1.5,
                   p: 2,
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                 }}
               >
-                <Typography variant="caption" color="text.secondary" fontWeight={600} fontSize={11.5} display="block" mb={0.5}>
-                  About
-                </Typography>
-                <Typography fontSize={14} fontWeight={500} color="#FFFFFF">
-                  {aboutText}
-                </Typography>
+                <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.5 }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={600} fontSize={11.5}>
+                    About
+                  </Typography>
+                  {isSelf && !isEditingAbout && (
+                    <Button
+                      size="small"
+                      startIcon={<EditOutlinedIcon sx={{ fontSize: 13 }} />}
+                      onClick={() => {
+                        setAboutDraft(savedAbout);
+                        setIsEditingAbout(true);
+                      }}
+                      sx={{ textTransform: "none", fontSize: 11, py: 0, px: 0.75, minWidth: 0, color: "primary.main" }}
+                    >
+                      Edit
+                    </Button>
+                  )}
+                </Box>
+
+                {isEditingAbout ? (
+                  <Box sx={{ mt: 1 }}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      multiline
+                      minRows={2}
+                      maxRows={4}
+                      value={aboutDraft}
+                      inputProps={{ maxLength: 150 }}
+                      onChange={(e) => setAboutDraft(e.target.value.slice(0, 150))}
+                      placeholder="Hey, I'm using PeerChat 😊"
+                      helperText={`${aboutDraft.length}/150 characters`}
+                      sx={{
+                        "& .MuiOutlinedInput-root": {
+                          fontSize: 13.5,
+                          borderRadius: 1,
+                          bgcolor: "rgba(0,0,0,0.2)",
+                        },
+                      }}
+                    />
+                    <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 1 }}>
+                      <Button
+                        size="small"
+                        onClick={() => setIsEditingAbout(false)}
+                        sx={{ textTransform: "none", fontSize: 12, color: "text.secondary" }}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        size="small"
+                        variant="contained"
+                        onClick={handleSaveAbout}
+                        sx={{ textTransform: "none", fontSize: 12, fontWeight: 700 }}
+                      >
+                        Save
+                      </Button>
+                    </Stack>
+                  </Box>
+                ) : (
+                  <Typography fontSize={14} fontWeight={500} color="#FFFFFF">
+                    {savedAbout}
+                  </Typography>
+                )}
               </Box>
 
               {/* ── CARD 3: UNIFIED SHARED ITEMS ── */}

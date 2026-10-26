@@ -102,6 +102,7 @@ async function inv<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 }
 
 export const peerApi = {
+  clearTrayFlash: () => inv<void>('clear_tray_flash'),
   getProfile: () => inv<Profile | null>("get_profile"),
   setupProfile: (body: {
     displayName: string;
