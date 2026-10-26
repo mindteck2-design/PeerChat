@@ -2,17 +2,20 @@
 import { parseCalendarShare } from "../calendar/CalendarShareCard";
 import { useLayoutEffect, useState } from "react";
 import {
-  Box, Button, IconButton, List, ListItemButton, ListItemText, Paper,
+  Box, Button, Chip, IconButton, List, ListItemButton, ListItemText, Paper,
   Stack, TextField, Typography,
 } from "@mui/material";
 import AttachFileIcon from "@mui/icons-material/AttachFileRounded";
+import CampaignIcon from "@mui/icons-material/CampaignRounded";
 import CloseIcon from "@mui/icons-material/CloseRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import EditIcon from "@mui/icons-material/EditRounded";
 import EmojiEmotionsIcon from "@mui/icons-material/EmojiEmotionsRounded";
 import FolderZipIcon from "@mui/icons-material/FolderZipRounded";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFileRounded";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import PersonOffIcon from "@mui/icons-material/PersonOffRounded";
+import PollIcon from "@mui/icons-material/PollRounded";
 import ReplyIcon from "@mui/icons-material/ReplyRounded";
 import ScreenshotMonitorIcon from "@mui/icons-material/ScreenshotMonitorRounded";
 import SendIcon from "@mui/icons-material/SendRounded";
@@ -20,6 +23,7 @@ import Tooltip from "@mui/material/Tooltip";
 import { formatBytes, truncate } from "../../shared/format";
 import { messageAttachmentIds } from "../../shared/messageMeta";
 import { isImageFileName, isVideoFileName } from "../../MediaAlbum";
+import { canBroadcastRole } from "../profile/roles";
 import type { ChatScreenVm } from "./chatVm";
 
 function stagedExt(name: string) {
@@ -171,6 +175,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
     activeDmPeer,
     announceBusy,
     announceCompose,
+    canBroadcast,
     cancelEdit,
     clearStagedFiles,
     composerRef,
@@ -182,18 +187,21 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
     inGroup,
     isAnnounceBoard,
     membersLoaded,
+    myDesignation,
     notifyTyping,
     others,
     outgoingFile,
     pickAndStageFiles,
     plain,
     postAnnouncement,
+    profile,
     removeStagedFile,
     replyTo,
     runSlash,
     senderLabel,
     setAnnounceCompose,
     setEmojiAnchor,
+    setPollOpen,
     setReplyTo,
     setSlashIndex,
     setStatus,
@@ -317,88 +325,200 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
 
   return (
     <>
-        {active && inGroup && isAnnounceBoard && (
-          <Paper
-            square
-            elevation={0}
-            sx={{
-              flexShrink: 0,
-              px: 1.5,
-              py: 1.25,
-              borderTop: "1px solid",
-              borderColor: "divider",
-              display: "flex",
-              flexDirection: "column",
-              gap: 1,
-              bgcolor: "background.paper",
-              zIndex: 2,
-            }}
-          >
-            <Typography variant="caption" color="text.secondary">
-              One-way posts — others can react. Use the message menu to reply privately to the author.
-            </Typography>
-            <StagedStrip
-              stagedFiles={stagedFiles}
-              removeStagedFile={removeStagedFile}
-              clearStagedFiles={clearStagedFiles}
-            />
-            <TextField
-              size="small"
-              fullWidth
-              placeholder="Title"
-              value={announceCompose.title}
-              onChange={(e) => setAnnounceCompose((c) => ({ ...c, title: e.target.value }))}
-            />
-            <TextField
-              size="small"
-              fullWidth
-              multiline
-              minRows={2}
-              maxRows={6}
-              placeholder="Memo, circular, or update… (links are clickable)"
-              value={announceCompose.body}
-              onChange={(e) => setAnnounceCompose((c) => ({ ...c, body: e.target.value }))}
-            />
-            <Stack direction="row" spacing={1} justifyContent="flex-end" alignItems="center">
-              <Button
-                component="label"
+        {active && inGroup && isAnnounceBoard && (() => {
+          const canUserBroadcast = canBroadcast !== undefined ? canBroadcast : canBroadcastRole(myDesignation);
+          if (!canUserBroadcast) {
+            return (
+              <Paper
+                square
+                elevation={0}
+                sx={{
+                  flexShrink: 0,
+                  px: 2.5,
+                  py: 1.75,
+                  borderTop: "1px solid",
+                  borderColor: "divider",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  bgcolor: "background.paper",
+                  gap: 2,
+                  zIndex: 2,
+                }}
+              >
+                <Stack direction="row" spacing={1.5} alignItems="center" minWidth={0}>
+                  <Box
+                    sx={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: "50%",
+                      bgcolor: "action.hover",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "text.secondary",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <LockOutlinedIcon sx={{ fontSize: 18 }} />
+                  </Box>
+                  <Box minWidth={0}>
+                    <Typography variant="body2" fontWeight={600} color="text.primary">
+                      Read-only broadcast channel
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" display="block">
+                      Posting is restricted to Deputy Manager and above. You can vote on polls, react to posts, or reply privately to the author.
+                    </Typography>
+                  </Box>
+                </Stack>
+                {myDesignation && (
+                  <Chip
+                    size="small"
+                    label={myDesignation}
+                    variant="outlined"
+                    sx={{ fontSize: 11, fontWeight: 500, color: "text.secondary", flexShrink: 0 }}
+                  />
+                )}
+              </Paper>
+            );
+          }
+
+          return (
+            <Paper
+              square
+              elevation={0}
+              sx={{
+                flexShrink: 0,
+                px: 2,
+                py: 1.5,
+                borderTop: "1px solid",
+                borderColor: "divider",
+                display: "flex",
+                flexDirection: "column",
+                gap: 1.25,
+                bgcolor: "background.paper",
+                zIndex: 2,
+              }}
+            >
+              {/* Broadcast Action Chips + Manager Authority Header */}
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: 1,
+                }}
+              >
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Chip
+                    icon={<CampaignIcon sx={{ fontSize: 16 }} />}
+                    label="/announce"
+                    color="primary"
+                    size="small"
+                    sx={{ fontWeight: 700, px: 0.5 }}
+                  />
+                  <Chip
+                    icon={<PollIcon sx={{ fontSize: 16 }} />}
+                    label="/poll"
+                    variant="outlined"
+                    size="small"
+                    onClick={() => setPollOpen?.(true)}
+                    sx={{ fontWeight: 600, cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }}
+                  />
+                  <Chip
+                    icon={<AttachFileIcon sx={{ fontSize: 16 }} />}
+                    label="/send file"
+                    variant="outlined"
+                    size="small"
+                    onClick={() => void pickAndStageFiles?.()}
+                    sx={{ fontWeight: 600, cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }}
+                  />
+                </Stack>
+
+                <Typography variant="caption" color="text.secondary" sx={{ fontSize: 11.5, fontWeight: 500 }}>
+                  Posting as: <strong>{myDesignation || "Deputy Manager"}</strong> ⭐
+                </Typography>
+              </Box>
+
+              <StagedStrip
+                stagedFiles={stagedFiles}
+                removeStagedFile={removeStagedFile}
+                clearStagedFiles={clearStagedFiles}
+              />
+
+              <TextField
                 size="small"
-                startIcon={<AttachFileIcon />}
-                disabled={announceBusy || (!!outgoingFile && !outgoingFile.cancelled)}
-                sx={{ textTransform: "none", mr: "auto" }}
-              >
-                Attach file
-                <input
-                  hidden
-                  type="file"
+                fullWidth
+                placeholder="Announcement Title"
+                value={announceCompose.title}
+                onChange={(e) => setAnnounceCompose((c) => ({ ...c, title: e.target.value }))}
+                sx={{
+                  "& .MuiOutlinedInput-root": {
+                    fontWeight: 600,
+                    bgcolor: dark ? "rgba(255, 255, 255, 0.03)" : "action.hover",
+                  },
+                }}
+              />
+
+              <TextField
+                size="small"
+                fullWidth
+                multiline
+                minRows={2}
+                maxRows={6}
+                placeholder="Memo, circular, or update… (links are clickable)"
+                value={announceCompose.body}
+                onChange={(e) => setAnnounceCompose((c) => ({ ...c, body: e.target.value }))}
+                sx={{
+                  "& .MuiOutlinedInput-root": {
+                    bgcolor: dark ? "rgba(255, 255, 255, 0.03)" : "action.hover",
+                  },
+                }}
+              />
+
+              <Stack direction="row" spacing={1} justifyContent="space-between" alignItems="center">
+                <Button
+                  size="small"
+                  startIcon={<AttachFileIcon />}
                   disabled={announceBusy || (!!outgoingFile && !outgoingFile.cancelled)}
-                  onChange={(e) => {
-                    const files = Array.from(e.target.files || []);
-                    if (files.length) {
-                      // One attachment per announcement post.
-                      clearStagedFiles();
-                      stageFiles(files.slice(0, 1));
+                  onClick={() => void pickAndStageFiles?.()}
+                  sx={{ textTransform: "none" }}
+                >
+                  Attach file
+                </Button>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  {(announceCompose.title || announceCompose.body || stagedFiles.length > 0) && (
+                    <Button
+                      size="small"
+                      color="inherit"
+                      onClick={() => {
+                        setAnnounceCompose({ title: "", body: "" });
+                        clearStagedFiles();
+                      }}
+                      sx={{ textTransform: "none", color: "text.secondary" }}
+                    >
+                      Clear
+                    </Button>
+                  )}
+                  <Button
+                    variant="contained"
+                    disabled={
+                      announceBusy ||
+                      (!!outgoingFile && !outgoingFile.cancelled) ||
+                      !announceCompose.title.trim() ||
+                      !announceCompose.body.trim()
                     }
-                    e.target.value = "";
-                  }}
-                />
-              </Button>
-              <Button
-                variant="contained"
-                disabled={
-                  announceBusy ||
-                  (!!outgoingFile && !outgoingFile.cancelled) ||
-                  !announceCompose.title.trim() ||
-                  !announceCompose.body.trim()
-                }
-                onClick={() => void postAnnouncement()}
-                sx={{ textTransform: "none", fontWeight: 700 }}
-              >
-                Post
-              </Button>
-            </Stack>
-          </Paper>
-        )}
+                    onClick={() => void postAnnouncement()}
+                    sx={{ textTransform: "none", fontWeight: 700 }}
+                  >
+                    Post Broadcast
+                  </Button>
+                </Stack>
+              </Stack>
+            </Paper>
+          );
+        })()}
 
         {active && activeDmPeer?.blocked && (
           <Paper

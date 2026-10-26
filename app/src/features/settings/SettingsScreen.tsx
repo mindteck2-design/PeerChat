@@ -3,12 +3,15 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
+  Divider,
   FormControl,
   IconButton,
   InputAdornment,
   MenuItem,
   Paper,
   Select,
+  Stack,
   Switch,
   Tab,
   Tabs,
@@ -44,6 +47,7 @@ import {
   playNotificationSound,
   type NotificationSoundId,
 } from "../../shared/sound";
+import { ENTERPRISE_ROLES, canBroadcastRole } from "../profile/roles";
 
 function sanitizeNameOrTeam(val: string): string {
   return val.replace(/[^a-zA-Z0-9 _-]/g, "");
@@ -55,6 +59,7 @@ export function SettingsScreen(props: {
   version: string;
   onBack: () => void;
   onNameUpdated: (p: Profile) => void;
+  onDesignationUpdated?: (designation: string) => void;
 }) {
   const { mode, setMode } = useContext(ThemeMode);
   const theme = useTheme();
@@ -65,6 +70,8 @@ export function SettingsScreen(props: {
   const [name, setName] = useState(props.profile.display_name);
   const [team, setTeam] = useState(props.profile.team || "");
   const [designation, setDesignation] = useState("");
+  const [isCustomRole, setIsCustomRole] = useState(false);
+  const [customRoleText, setCustomRoleText] = useState("");
   const [empId, setEmpId] = useState("");
   const [presence, setPresence] = useState("Available");
   const [statusMsg, setStatusMsg] = useState("");
@@ -114,7 +121,28 @@ export function SettingsScreen(props: {
       })
       .catch(() => setNotifSoundPref("chime"));
 
-    peerApi.getAppSetting("profile_designation").then((v) => setDesignation(v || "")).catch(() => {});
+    peerApi
+      .getAppSetting("profile_designation")
+      .then((v) => {
+        const raw = (v || "").trim();
+        if (!raw) {
+          setDesignation("Senior Sf Engineer");
+          setIsCustomRole(false);
+          return;
+        }
+        const found = ENTERPRISE_ROLES.find(
+          (r) => r.label.toLowerCase() === raw.toLowerCase()
+        );
+        if (found) {
+          setDesignation(found.label);
+          setIsCustomRole(false);
+        } else {
+          setDesignation(raw);
+          setCustomRoleText(raw);
+          setIsCustomRole(true);
+        }
+      })
+      .catch(() => {});
     peerApi.getAppSetting("profile_emp_id").then((v) => setEmpId(v || "")).catch(() => {});
     peerApi.getAppSetting("profile_status").then((v) => setPresence(v || "Available")).catch(() => {});
     peerApi.getAppSetting("profile_status_msg").then((v) => setStatusMsg(v || "")).catch(() => {});
@@ -166,16 +194,18 @@ export function SettingsScreen(props: {
     const trimmed = name.trim();
     const teamTrimmed = team.trim();
     if (!trimmed) return;
+    const finalDesignation = (isCustomRole ? customRoleText : designation).trim();
     setSavingProfile(true);
     try {
       const p = await peerApi.updateDisplayName(trimmed, teamTrimmed);
       props.onNameUpdated(p);
       await Promise.all([
-        peerApi.setAppSetting("profile_designation", designation.trim()),
+        peerApi.setAppSetting("profile_designation", finalDesignation),
         peerApi.setAppSetting("profile_emp_id", empId.trim()),
         peerApi.setAppSetting("profile_status", presence),
         peerApi.setAppSetting("profile_status_msg", statusMsg.trim()),
       ]);
+      props.onDesignationUpdated?.(finalDesignation);
       setStatus("Profile updated successfully");
     } catch (err: any) {
       setStatus(err?.message || String(err));
@@ -397,17 +427,77 @@ export function SettingsScreen(props: {
               </Box>
 
               <Box>
-                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
-                  Designation / Role
-                </Typography>
-                <TextField
-                  size="small"
-                  fullWidth
-                  value={designation}
-                  placeholder="e.g. Senior Software Engineer"
-                  onChange={(e) => setDesignation(e.target.value)}
-                  sx={inputSx}
-                />
+                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 0.75 }}>
+                  <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500 }}>
+                    Designation / Role
+                  </Typography>
+                  {canBroadcastRole(isCustomRole ? customRoleText : designation) ? (
+                    <Chip
+                      size="small"
+                      label="⭐ Can Broadcast (Managerial)"
+                      color="primary"
+                      variant="outlined"
+                      sx={{ height: 20, fontSize: 10.5, fontWeight: 700 }}
+                    />
+                  ) : (
+                    <Typography variant="caption" sx={{ color: "text.secondary", fontSize: 11 }}>
+                      Subscriber (Read-only broadcast)
+                    </Typography>
+                  )}
+                </Box>
+
+                <FormControl size="small" fullWidth>
+                  <Select
+                    value={isCustomRole ? "__custom__" : (designation || "")}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === "__custom__") {
+                        setIsCustomRole(true);
+                      } else {
+                        setIsCustomRole(false);
+                        setDesignation(val);
+                      }
+                    }}
+                    displayEmpty
+                    sx={{ ...inputSx, borderRadius: 2 }}
+                  >
+                    <MenuItem value="" disabled>
+                      <em>Select enterprise role…</em>
+                    </MenuItem>
+                    {ENTERPRISE_ROLES.map((r, idx) => [
+                      idx === 8 && <Divider key="div-mgr" sx={{ my: 0.5 }} />,
+                      <MenuItem key={r.id} value={r.label}>
+                        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", gap: 1 }}>
+                          <span>{r.label}</span>
+                          {r.canBroadcast && (
+                            <Chip
+                              size="small"
+                              label="Managerial"
+                              color="primary"
+                              sx={{ height: 18, fontSize: 9.5, fontWeight: 700 }}
+                            />
+                          )}
+                        </Box>
+                      </MenuItem>
+                    ])}
+                    <Divider sx={{ my: 0.5 }} />
+                    <MenuItem value="__custom__">
+                      <em>+ Custom role / other…</em>
+                    </MenuItem>
+                  </Select>
+                </FormControl>
+
+                {isCustomRole && (
+                  <TextField
+                    size="small"
+                    fullWidth
+                    value={customRoleText}
+                    placeholder="Type custom designation…"
+                    onChange={(e) => setCustomRoleText(e.target.value)}
+                    helperText="Custom roles default to read-only unless matching managerial titles (Deputy Manager & above)."
+                    sx={{ ...inputSx, mt: 1 }}
+                  />
+                )}
               </Box>
 
               <Box>

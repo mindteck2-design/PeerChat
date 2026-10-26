@@ -165,6 +165,7 @@ import type {
   CalendarShareNotify,
 } from "../features/calendar/CalendarScreen";
 import { FEATURE_GAMES } from "../features";
+import { canBroadcastRole } from "../features/profile/roles";
 const GamesHub = lazy(() =>
   import("../games/games").then((m) => ({ default: m.GamesHub }))
 );
@@ -277,6 +278,13 @@ export function ChatScreen({
   const [announceBoards, setAnnounceBoards] = useState<Conversation[]>([]);
   const [announceCompose, setAnnounceCompose] = useState({ title: "", body: "" });
   const [announceBusy, setAnnounceBusy] = useState(false);
+  const [myDesignation, setMyDesignation] = useState<string>("");
+  useEffect(() => {
+    peerApi
+      .getAppSetting("profile_designation")
+      .then((v) => setMyDesignation((v || "").trim()))
+      .catch(() => {});
+  }, []);
   const [scanning, setScanning] = useState(false);
   const [transfers, setTransfers] = useState<TransferLog[]>([]);
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
@@ -503,6 +511,7 @@ export function ChatScreen({
     active?.kind !== "group" || !membersLoaded || members.some((m) => m.user_id === profile.id);
 
   const isAnnounceBoard = !!active && (active.id === "board:org" || active.id.startsWith("board:team:"));
+  const canBroadcast = isAnnounceBoard ? canBroadcastRole(myDesignation) : true;
 
   const canAddMembers =
     !!active &&
@@ -4167,6 +4176,9 @@ export function ChatScreen({
     canAddMembers,
     incomingFile,
     isAnnounceBoard,
+    canBroadcast,
+    myDesignation,
+    setPollOpen,
     lanHosts,
     lastPreviews,
     membersLoaded,
@@ -4394,10 +4406,17 @@ export function ChatScreen({
                 onBack={() => {
                   setNav("chats");
                   setTab(1);
+                  peerApi
+                    .getAppSetting("profile_designation")
+                    .then((v) => setMyDesignation((v || "").trim()))
+                    .catch(() => {});
                 }}
                 onNameUpdated={(p) => {
                   setProfile(p);
                   onProfileUpdated?.(p);
+                }}
+                onDesignationUpdated={(d) => {
+                  setMyDesignation(d);
                 }}
               />
             </Suspense>
