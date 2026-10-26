@@ -398,7 +398,7 @@ pub fn poll_calendar_due(app: tauri::AppHandle, state: State<'_, AppState>) -> R
             db::get_setting(&conn, "notification_sound")
                 .ok()
                 .flatten()
-                .map(|v| v != "0")
+                .map(|v| v != "0" && v != "off")
                 .unwrap_or(true)
         };
         let mut builder = app

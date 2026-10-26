@@ -236,7 +236,7 @@ import { useGroupAdmin } from "../features/groups/useGroupAdmin";
 import { useFileTransfer } from "../features/files/useFileTransfer";
 import { FilePreviewDialog } from "../features/files/FilePreviewDialog";
 import { publishTransferProgress } from "../features/files/transferProgressStore";
-import { playNotificationSound } from "../shared/sound";
+import { playNotificationSoundFromPref } from "../shared/sound";
 
 export function ChatScreen({
   profile: initialProfile,
@@ -816,10 +816,8 @@ export function ChatScreen({
         try {
           const isMuted = convsRef.current.find((c) => c.id === cid)?.muted;
           if (!isMuted) {
-            const soundPref = await peerApi.getAppSetting("notification_sound").catch(() => "1");
-            if (soundPref !== "0") {
-              playNotificationSound();
-            }
+            const soundPref = await peerApi.getAppSetting("notification_sound").catch(() => "chime");
+            playNotificationSoundFromPref(soundPref);
           }
         } catch {
           /* ignore sound errors */

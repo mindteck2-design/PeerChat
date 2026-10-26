@@ -298,7 +298,7 @@ fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
         db::get_setting(&conn, "notification_sound")
             .ok()
             .flatten()
-            .map(|v| v != "0")
+            .map(|v| v != "0" && v != "off")
             .unwrap_or(true)
     };
     let mut builder = app

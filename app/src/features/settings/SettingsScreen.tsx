@@ -37,7 +37,13 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { exportPublic, fingerprintPublic, type Identity } from "../../crypto";
 import { peerApi, type Profile } from "../../peer";
 import { ThemeMode } from "../../theme";
-import { playNotificationSound } from "../../shared/sound";
+import {
+  NOTIFICATION_SOUND_OPTIONS,
+  isNotificationSoundEnabled,
+  normalizeNotificationSoundId,
+  playNotificationSound,
+  type NotificationSoundId,
+} from "../../shared/sound";
 
 function sanitizeNameOrTeam(val: string): string {
   return val.replace(/[^a-zA-Z0-9 _-]/g, "");
@@ -73,7 +79,8 @@ export function SettingsScreen(props: {
   // Notifications tab state
   const [notifOn, setNotifOn] = useState(true);
   const [notifBusy, setNotifBusy] = useState(false);
-  const [notifSound, setNotifSound] = useState(true);
+  /** "0" = off; otherwise a NotificationSoundId (legacy "1" treated as chime). */
+  const [notifSoundPref, setNotifSoundPref] = useState("chime");
 
   // Network tab state
   const [scanFreq, setScanFreq] = useState("1m");
@@ -98,7 +105,14 @@ export function SettingsScreen(props: {
       .catch(() => setAutostartOn(true));
 
     peerApi.getAppSetting("scan_frequency").then((v) => setScanFreq(v || "1m")).catch(() => {});
-    peerApi.getAppSetting("notification_sound").then((v) => setNotifSound(v !== "0")).catch(() => {});
+    peerApi
+      .getAppSetting("notification_sound")
+      .then((v) => {
+        if (!v || v === "0" || v === "off") setNotifSoundPref("0");
+        else if (v === "1") setNotifSoundPref("chime");
+        else setNotifSoundPref(v);
+      })
+      .catch(() => setNotifSoundPref("chime"));
 
     peerApi.getAppSetting("profile_designation").then((v) => setDesignation(v || "")).catch(() => {});
     peerApi.getAppSetting("profile_emp_id").then((v) => setEmpId(v || "")).catch(() => {});
@@ -615,24 +629,38 @@ export function SettingsScreen(props: {
               />
             </Box>
 
-            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", py: 1, borderTop: 1, borderColor: "divider" }}>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
+            <Box
+              sx={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                py: 1.25,
+                borderTop: 1,
+                borderColor: "divider",
+                gap: 2,
+                flexWrap: "wrap",
+              }}
+            >
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, minWidth: 0, flex: 1 }}>
                 <VolumeUpRoundedIcon sx={{ color: mutedColor, fontSize: 20 }} />
-                <Box>
+                <Box minWidth={0}>
                   <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
-                    Play Sound
+                    Notification sound
                   </Typography>
                   <Typography sx={{ fontSize: "0.8125rem", color: mutedColor }}>
-                    Play an alert sound when receiving a message.
+                    Choose an in-app alert tone for new messages (muted chats stay silent).
                   </Typography>
                 </Box>
               </Box>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                {notifSound && (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexShrink: 0 }}>
+                {isNotificationSoundEnabled(notifSoundPref) && (
                   <Button
                     size="small"
                     variant="outlined"
-                    onClick={() => playNotificationSound(true)}
+                    onClick={() => {
+                      const id = normalizeNotificationSoundId(notifSoundPref);
+                      if (id) playNotificationSound(id, true);
+                    }}
                     sx={{
                       textTransform: "none",
                       fontSize: "0.75rem",
@@ -644,18 +672,34 @@ export function SettingsScreen(props: {
                       "&:hover": { borderColor: accent, color: titleColor },
                     }}
                   >
-                    Test sound
+                    Test
                   </Button>
                 )}
-                <Switch
-                  checked={notifSound}
-                  onChange={async (_, v) => {
-                    setNotifSound(v);
-                    await peerApi.setAppSetting("notification_sound", v ? "1" : "0");
-                    if (v) playNotificationSound(true);
-                  }}
-                  sx={switchSx}
-                />
+                <FormControl size="small" sx={{ minWidth: 148 }}>
+                  <Select
+                    value={
+                      notifSoundPref === "0" || notifSoundPref === "off"
+                        ? "0"
+                        : normalizeNotificationSoundId(notifSoundPref) || "chime"
+                    }
+                    onChange={async (e) => {
+                      const next = String(e.target.value);
+                      setNotifSoundPref(next);
+                      await peerApi.setAppSetting("notification_sound", next);
+                      if (next !== "0" && next !== "off") {
+                        playNotificationSound(next as NotificationSoundId, true);
+                      }
+                    }}
+                    sx={{ ...inputSx, borderRadius: 2 }}
+                  >
+                    <MenuItem value="0">Off</MenuItem>
+                    {NOTIFICATION_SOUND_OPTIONS.map((opt) => (
+                      <MenuItem key={opt.id} value={opt.id}>
+                        {opt.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
               </Box>
             </Box>
           </Paper>

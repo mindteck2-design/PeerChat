@@ -133,8 +133,16 @@ pub fn set_app_setting(state: State<AppState>, key: String, value: String) -> Re
             return Err("invalid scan_frequency value".into());
         }
     }
-    if key == "notification_sound" && value != "0" && value != "1" {
-        return Err(format!("{key} must be 0 or 1"));
+    if key == "notification_sound" {
+        let ok = matches!(
+            value.trim(),
+            "0" | "1" | "off" | "chime" | "ping" | "soft" | "bright"
+        );
+        if !ok {
+            return Err(
+                "notification_sound must be off/0 or one of: chime, ping, soft, bright".into(),
+            );
+        }
     }
     let conn = state.db.lock();
     db::set_setting(&conn, &key, value.trim())
