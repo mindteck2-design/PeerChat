@@ -995,8 +995,47 @@ pub fn cache_outgoing_plain(
     Ok(path_str)
 }
 
+fn is_executable_or_installer(path: &std::path::Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "exe"
+            | "msi"
+            | "bat"
+            | "cmd"
+            | "ps1"
+            | "psm1"
+            | "psd1"
+            | "vbs"
+            | "vbe"
+            | "js"
+            | "jse"
+            | "wsf"
+            | "wsh"
+            | "scr"
+            | "com"
+            | "pif"
+            | "cpl"
+            | "jar"
+            | "appx"
+            | "msix"
+            | "appxbundle"
+            | "msixbundle"
+            | "reg"
+            | "lnk"
+            | "iso"
+            | "img"
+            | "vhd"
+            | "vhdx"
+    )
+}
+
 #[tauri::command]
-pub fn open_local_file(state: State<AppState>, file_id: String) -> Result<(), String> {
+pub fn open_local_file(state: State<AppState>, file_id: String) -> Result<bool, String> {
     let path = {
         let conn = state.db.lock();
         let file = db::get_file(&conn, &file_id)?.ok_or("file metadata missing")?;
@@ -1011,6 +1050,35 @@ pub fn open_local_file(state: State<AppState>, file_id: String) -> Result<(), St
         let _ = db::set_file_local_path(&conn, &file_id, "");
         return Err("The local file has been moved or deleted".into());
     }
+
+    if is_executable_or_installer(&path) {
+        // Security: Never directly launch or execute installer/binary files on tap/click.
+        // Instead, open the file location in File Explorer with the file highlighted.
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            std::process::Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open")
+            .args(["-R", &path.display().to_string()])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(parent) = path.parent() {
+            std::process::Command::new("xdg-open")
+                .arg(parent)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(true);
+    }
+
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -1032,7 +1100,7 @@ pub fn open_local_file(state: State<AppState>, file_id: String) -> Result<(), St
         .arg(&path)
         .spawn()
         .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(false)
 }
 
 #[tauri::command]

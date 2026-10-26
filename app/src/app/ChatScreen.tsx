@@ -2696,8 +2696,8 @@ export function ChatScreen({
       }
       if (file.local_path) {
         try {
-          await peerApi.openLocalFile(fileId);
-          setStatus(`Opened ${name || "file"}`);
+          const revealed = await peerApi.openLocalFile(fileId);
+          setStatus(revealed ? `Shown in File Explorer: ${name || "file"}` : `Opened ${name || "file"}`);
           return;
         } catch {
           // Stale path — fall through to rebuild from staging / peer.
@@ -3339,8 +3339,8 @@ export function ChatScreen({
       }
       if (file.local_path) {
         try {
-          await peerApi.openLocalFile(fileId);
-          setStatus(`Opened ${name}`);
+          const revealed = await peerApi.openLocalFile(fileId);
+          setStatus(revealed ? `Shown in File Explorer: ${name}` : `Opened ${name}`);
           return;
         } catch {
           /* path gone — re-download */
@@ -3573,8 +3573,12 @@ export function ChatScreen({
       const verifyNote = check.verified ? "verified ✓" : "sender sent no hash";
       if (opts?.openAfter) {
         try {
-          await peerApi.openLocalFile(fileId);
-          setStatus(`Downloaded & opened (${verifyNote})`);
+          const revealed = await peerApi.openLocalFile(fileId);
+          setStatus(
+            revealed
+              ? `Downloaded & shown in File Explorer`
+              : `Downloaded & opened (${verifyNote})`
+          );
         } catch {
           setStatus(`Saved (${verifyNote}${scanNote ? ` · ${scanNote}` : ""}): ${path}`);
         }
@@ -3670,7 +3674,10 @@ export function ChatScreen({
     if (!filePreview) return;
     try {
       if (!filePreview.localPath) await savePreviewedFile();
-      await peerApi.openLocalFile(filePreview.fileId);
+      const revealed = await peerApi.openLocalFile(filePreview.fileId);
+      if (revealed) {
+        setStatus(`Shown in File Explorer: ${filePreview.name}`);
+      }
     } catch (err: any) {
       setStatus(err?.message || String(err));
     }

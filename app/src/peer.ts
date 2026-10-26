@@ -359,7 +359,7 @@ export const peerApi = {
       sourcePath,
       filename: filename ?? null,
     }),
-  openLocalFile: (fileId: string) => inv<void>("open_local_file", { fileId }),
+  openLocalFile: (fileId: string) => inv<boolean>("open_local_file", { fileId }),
   readLocalFile: (fileId: string) => inv<string>("read_local_file", { fileId }),
   getAppSetting: (key: string) => inv<string | null>("get_app_setting", { key }),
   setAppSetting: (key: string, value: string) => inv<void>("set_app_setting", { key, value }),
