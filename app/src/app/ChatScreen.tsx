@@ -236,6 +236,7 @@ import { useGroupAdmin } from "../features/groups/useGroupAdmin";
 import { useFileTransfer } from "../features/files/useFileTransfer";
 import { FilePreviewDialog } from "../features/files/FilePreviewDialog";
 import { publishTransferProgress } from "../features/files/transferProgressStore";
+import { playNotificationSound } from "../shared/sound";
 
 export function ChatScreen({
   profile: initialProfile,
@@ -810,6 +811,19 @@ export function ChatScreen({
         await refresh().catch(() => {});
         if (!cid || fromId === profile.id) return;
         if (kind === "reaction" || kind === "pin" || kind === "unpin" || kind === "deleted") return;
+
+        // Play in-app notification chime if sound is enabled and chat is not muted
+        try {
+          const isMuted = convsRef.current.find((c) => c.id === cid)?.muted;
+          if (!isMuted) {
+            const soundPref = await peerApi.getAppSetting("notification_sound").catch(() => "1");
+            if (soundPref !== "0") {
+              playNotificationSound();
+            }
+          }
+        } catch {
+          /* ignore sound errors */
+        }
 
         // Decrypt game_move for session + UI. Apply actionable payloads (move/reveal)
         // before result so the loser's board shows the winning move.

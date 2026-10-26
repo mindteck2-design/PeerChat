@@ -27,7 +27,6 @@ import FolderOpenRoundedIcon from "@mui/icons-material/FolderOpenRounded";
 import PowerSettingsNewRoundedIcon from "@mui/icons-material/PowerSettingsNewRounded";
 import DnsRoundedIcon from "@mui/icons-material/DnsRounded";
 import VolumeUpRoundedIcon from "@mui/icons-material/VolumeUpRounded";
-import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
 import SyncRoundedIcon from "@mui/icons-material/SyncRounded";
 import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
 import {
@@ -38,6 +37,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { exportPublic, fingerprintPublic, type Identity } from "../../crypto";
 import { peerApi, type Profile } from "../../peer";
 import { ThemeMode } from "../../theme";
+import { playNotificationSound } from "../../shared/sound";
 
 function sanitizeNameOrTeam(val: string): string {
   return val.replace(/[^a-zA-Z0-9 _-]/g, "");
@@ -74,7 +74,6 @@ export function SettingsScreen(props: {
   const [notifOn, setNotifOn] = useState(true);
   const [notifBusy, setNotifBusy] = useState(false);
   const [notifSound, setNotifSound] = useState(true);
-  const [notifPreview, setNotifPreview] = useState(true);
 
   // Network tab state
   const [scanFreq, setScanFreq] = useState("1m");
@@ -100,7 +99,6 @@ export function SettingsScreen(props: {
 
     peerApi.getAppSetting("scan_frequency").then((v) => setScanFreq(v || "1m")).catch(() => {});
     peerApi.getAppSetting("notification_sound").then((v) => setNotifSound(v !== "0")).catch(() => {});
-    peerApi.getAppSetting("notification_preview").then((v) => setNotifPreview(v !== "0")).catch(() => {});
 
     peerApi.getAppSetting("profile_designation").then((v) => setDesignation(v || "")).catch(() => {});
     peerApi.getAppSetting("profile_emp_id").then((v) => setEmpId(v || "")).catch(() => {});
@@ -629,36 +627,36 @@ export function SettingsScreen(props: {
                   </Typography>
                 </Box>
               </Box>
-              <Switch
-                checked={notifSound}
-                onChange={async (_, v) => {
-                  setNotifSound(v);
-                  await peerApi.setAppSetting("notification_sound", v ? "1" : "0");
-                }}
-                sx={switchSx}
-              />
-            </Box>
-
-            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", py: 1, borderTop: 1, borderColor: "divider" }}>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
-                <VisibilityRoundedIcon sx={{ color: mutedColor, fontSize: 20 }} />
-                <Box>
-                  <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
-                    Show Message Preview
-                  </Typography>
-                  <Typography sx={{ fontSize: "0.8125rem", color: mutedColor }}>
-                    Display sender name and message content in toast alert (uncheck for meeting privacy).
-                  </Typography>
-                </Box>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                {notifSound && (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() => playNotificationSound(true)}
+                    sx={{
+                      textTransform: "none",
+                      fontSize: "0.75rem",
+                      borderRadius: 1.5,
+                      py: 0.25,
+                      px: 1.25,
+                      borderColor: "divider",
+                      color: "text.secondary",
+                      "&:hover": { borderColor: accent, color: titleColor },
+                    }}
+                  >
+                    Test sound
+                  </Button>
+                )}
+                <Switch
+                  checked={notifSound}
+                  onChange={async (_, v) => {
+                    setNotifSound(v);
+                    await peerApi.setAppSetting("notification_sound", v ? "1" : "0");
+                    if (v) playNotificationSound(true);
+                  }}
+                  sx={switchSx}
+                />
               </Box>
-              <Switch
-                checked={notifPreview}
-                onChange={async (_, v) => {
-                  setNotifPreview(v);
-                  await peerApi.setAppSetting("notification_preview", v ? "1" : "0");
-                }}
-                sx={switchSx}
-              />
             </Box>
           </Paper>
         </Box>

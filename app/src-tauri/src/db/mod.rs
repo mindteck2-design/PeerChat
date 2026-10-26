@@ -259,6 +259,7 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_message_reactions_msg
               ON message_reactions(message_id);
             INSERT OR IGNORE INTO app_settings(key, value) VALUES ('notifications_enabled', '1');
+            INSERT OR IGNORE INTO app_settings(key, value) VALUES ('notification_sound', '1');
             "#,
         )
         .map_err(|e| e.to_string())?;

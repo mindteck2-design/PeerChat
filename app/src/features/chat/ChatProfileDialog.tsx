@@ -8,8 +8,6 @@ import {
   DialogContent,
   IconButton,
   Stack,
-  Tab,
-  Tabs,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -25,19 +23,11 @@ import ComputerRoundedIcon from "@mui/icons-material/ComputerRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
-import ArrowForwardRoundedIcon from "@mui/icons-material/ArrowForwardRounded";
-import PhotoLibraryRoundedIcon from "@mui/icons-material/PhotoLibraryRounded";
-import InsertDriveFileRoundedIcon from "@mui/icons-material/InsertDriveFileRounded";
-import LinkRoundedIcon from "@mui/icons-material/LinkRounded";
-import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 
-import {
-  extractChatMediaFilesLinks,
-  formatTimeOnly,
-  getFileThemeColor,
-} from "./ChatMediaUtils";
-import { ViewAllCategoryView } from "./ViewAllCategoryView";
-import { avatarColor, formatBytes } from "../../shared/format";
+import { extractChatMediaFilesLinks } from "./ChatMediaUtils";
+import { SharedItemsPreviewCard } from "./SharedItemsPreviewCard";
+import { ViewAllCategoryView, type SharedItemsCategory } from "./ViewAllCategoryView";
+import { avatarColor } from "../../shared/format";
 import { openExternalLink } from "../../panels";
 import type { ChatScreenVm } from "./chatVm";
 
@@ -61,8 +51,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
     stickToBottomRef,
   } = vm;
 
-  const [activeTab, setActiveTab] = useState<number>(0);
-  const [viewAllCategory, setViewAllCategory] = useState<"media" | "files" | "links" | null>(null);
+  const [viewAllCategory, setViewAllCategory] = useState<SharedItemsCategory | null>(null);
   const [copiedIp, setCopiedIp] = useState(false);
 
   const isOpen = chatInfoOpen && active?.kind === "dm";
@@ -401,280 +390,18 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                 </Typography>
               </Box>
 
-              {/* ── CARD 3: MEDIA, FILES, LINKS TABS & PREVIEW (Starts immediately below About) ── */}
-              <Box
-                sx={{
-                  bgcolor: "rgba(23, 31, 45, 0.7)",
-                  borderRadius: 3,
-                  p: 2,
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
+              {/* ── CARD 3: UNIFIED SHARED ITEMS ── */}
+              <SharedItemsPreviewCard
+                media={media}
+                files={files}
+                links={links}
+                onOpenAttachment={(fileId, senderId) => {
+                  void openAttachment(fileId, senderId);
                 }}
-              >
-                {/* Tab Header Row */}
-                <Box
-                  sx={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
-                    pb: 1,
-                  }}
-                >
-                  <Tabs
-                    value={activeTab}
-                    onChange={(_, v) => setActiveTab(v)}
-                    sx={{
-                      minHeight: 36,
-                      "& .MuiTabs-indicator": { height: 2.5, borderRadius: 2 },
-                    }}
-                  >
-                    <Tab
-                      icon={<PhotoLibraryRoundedIcon sx={{ fontSize: 17 }} />}
-                      iconPosition="start"
-                      label={`Media ${media.length}`}
-                      sx={{ minHeight: 36, py: 0.5, px: 1.5, fontSize: 13, textTransform: "none", fontWeight: 700 }}
-                    />
-                    <Tab
-                      icon={<InsertDriveFileRoundedIcon sx={{ fontSize: 17 }} />}
-                      iconPosition="start"
-                      label={`Files ${files.length}`}
-                      sx={{ minHeight: 36, py: 0.5, px: 1.5, fontSize: 13, textTransform: "none", fontWeight: 700 }}
-                    />
-                    <Tab
-                      icon={<LinkRoundedIcon sx={{ fontSize: 17 }} />}
-                      iconPosition="start"
-                      label={`Links ${links.length}`}
-                      sx={{ minHeight: 36, py: 0.5, px: 1.5, fontSize: 13, textTransform: "none", fontWeight: 700 }}
-                    />
-                  </Tabs>
-
-                  <Button
-                    size="small"
-                    endIcon={<ArrowForwardRoundedIcon sx={{ fontSize: "15px !important" }} />}
-                    onClick={() => {
-                      const cat = activeTab === 0 ? "media" : activeTab === 1 ? "files" : "links";
-                      setViewAllCategory(cat);
-                    }}
-                    sx={{
-                      textTransform: "none",
-                      fontSize: 12.5,
-                      fontWeight: 700,
-                      color: "primary.main",
-                      pr: 0.5,
-                    }}
-                  >
-                    View all
-                  </Button>
-                </Box>
-
-                {/* Preview Content: 2 rows */}
-                <Box sx={{ pt: 1.75 }}>
-                  {/* Media Tab Preview: 4 cols x 2 rows (8 items) */}
-                  {activeTab === 0 && (
-                    <>
-                      {!media.length ? (
-                        <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
-                          No media in this chat yet.
-                        </Typography>
-                      ) : (
-                        <Box
-                          sx={{
-                            display: "grid",
-                            gridTemplateColumns: "repeat(4, 1fr)",
-                            gap: 1.25,
-                          }}
-                        >
-                          {media.slice(0, 8).map((m) => (
-                            <Box
-                              key={m.key}
-                              onClick={() => void openAttachment(m.fileId, m.senderId)}
-                              sx={{
-                                position: "relative",
-                                aspectRatio: "1",
-                                borderRadius: 2,
-                                overflow: "hidden",
-                                bgcolor: "action.hover",
-                                border: "1px solid rgba(255, 255, 255, 0.08)",
-                                cursor: "pointer",
-                                transition: "transform 0.12s ease",
-                                "&:hover": { transform: "scale(1.03)" },
-                              }}
-                            >
-                              {m.thumb ? (
-                                <Box
-                                  component="img"
-                                  src={m.thumb}
-                                  alt={m.name}
-                                  sx={{ width: "100%", height: "100%", objectFit: "cover" }}
-                                />
-                              ) : (
-                                <Box
-                                  sx={{
-                                    width: "100%",
-                                    height: "100%",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    bgcolor: "action.selected",
-                                  }}
-                                >
-                                  <InsertDriveFileRoundedIcon sx={{ fontSize: 24, color: "text.secondary" }} />
-                                </Box>
-                              )}
-
-                              <Box
-                                sx={{
-                                  position: "absolute",
-                                  bottom: 0,
-                                  left: 0,
-                                  right: 0,
-                                  p: 0.5,
-                                  display: "flex",
-                                  alignItems: "center",
-                                  justifyContent: "space-between",
-                                  background:
-                                    "linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%)",
-                                }}
-                              >
-                                <Typography sx={{ fontSize: 9, color: "#FFFFFF", fontWeight: 600 }}>
-                                  {formatTimeOnly(m.at)}
-                                </Typography>
-                                {m.isVideo && (
-                                  <Box display="flex" alignItems="center" gap={0.25}>
-                                    <PlayArrowRoundedIcon sx={{ fontSize: 10, color: "#FFFFFF" }} />
-                                    <Typography sx={{ fontSize: 8.5, color: "#FFFFFF", fontWeight: 700 }}>
-                                      Video
-                                    </Typography>
-                                  </Box>
-                                )}
-                              </Box>
-                            </Box>
-                          ))}
-                        </Box>
-                      )}
-                    </>
-                  )}
-
-                  {/* Files Tab Preview: Compact recent files */}
-                  {activeTab === 1 && (
-                    <>
-                      {!files.length ? (
-                        <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
-                          No files in this chat yet.
-                        </Typography>
-                      ) : (
-                        <Stack spacing={0.75}>
-                          {files.slice(0, 4).map((f) => {
-                            const iconStyle = getFileThemeColor(f.ext);
-                            return (
-                              <Box
-                                key={f.key}
-                                onClick={() => void openAttachment(f.fileId, f.senderId)}
-                                sx={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 1.5,
-                                  p: 0.9,
-                                  borderRadius: 2,
-                                  bgcolor: "action.hover",
-                                  cursor: "pointer",
-                                  "&:hover": { bgcolor: "action.selected" },
-                                }}
-                              >
-                                <Box
-                                  sx={{
-                                    width: 34,
-                                    height: 34,
-                                    borderRadius: 1.5,
-                                    bgcolor: iconStyle.bg,
-                                    color: iconStyle.color,
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    flexShrink: 0,
-                                  }}
-                                >
-                                  <InsertDriveFileRoundedIcon sx={{ fontSize: 18 }} />
-                                </Box>
-                                <Box flex={1} minWidth={0}>
-                                  <Typography fontWeight={700} fontSize={13} noWrap color="#FFFFFF">
-                                    {f.name}
-                                  </Typography>
-                                  <Typography variant="caption" color="text.secondary" fontSize={11}>
-                                    {f.ext} · {formatBytes(f.size)}
-                                  </Typography>
-                                </Box>
-                                <Typography variant="caption" color="text.secondary" fontSize={11}>
-                                  {formatTimeOnly(f.at)}
-                                </Typography>
-                              </Box>
-                            );
-                          })}
-                        </Stack>
-                      )}
-                    </>
-                  )}
-
-                  {/* Links Tab Preview */}
-                  {activeTab === 2 && (
-                    <>
-                      {!links.length ? (
-                        <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
-                          No links in this chat yet.
-                        </Typography>
-                      ) : (
-                        <Stack spacing={0.75}>
-                          {links.slice(0, 3).map((l) => (
-                            <Box
-                              key={l.key}
-                              onClick={() => void openExternalLink(l.url)}
-                              sx={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 1.5,
-                                p: 0.9,
-                                borderRadius: 2,
-                                bgcolor: "action.hover",
-                                cursor: "pointer",
-                                "&:hover": { bgcolor: "action.selected" },
-                              }}
-                            >
-                              <Box
-                                sx={{
-                                  width: 34,
-                                  height: 34,
-                                  borderRadius: 1.5,
-                                  bgcolor: "rgba(130, 169, 248, 0.15)",
-                                  color: "primary.main",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  justifyContent: "center",
-                                  flexShrink: 0,
-                                }}
-                              >
-                                <LinkRoundedIcon sx={{ fontSize: 18 }} />
-                              </Box>
-                              <Box flex={1} minWidth={0}>
-                                <Typography fontWeight={700} fontSize={13} noWrap color="#FFFFFF">
-                                  {l.title}
-                                </Typography>
-                                <Typography
-                                  variant="caption"
-                                  sx={{ color: "primary.main", display: "block" }}
-                                  fontSize={11.5}
-                                  noWrap
-                                >
-                                  {l.url}
-                                </Typography>
-                              </Box>
-                            </Box>
-                          ))}
-                        </Stack>
-                      )}
-                    </>
-                  )}
-                </Box>
-              </Box>
+                onOpenLink={(url) => void openExternalLink(url)}
+                onViewAll={(tab) => setViewAllCategory(tab || "media")}
+                emptyLabel="No shared media, files, or links in this chat yet."
+              />
             </Stack>
           </DialogContent>
 

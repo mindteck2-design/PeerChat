@@ -6,7 +6,6 @@ pub(crate) const SETTING_KEYS: &[&str] = &[
     "download_dir",
     "scan_frequency",
     "notification_sound",
-    "notification_preview",
     "profile_designation",
     "profile_emp_id",
     "profile_status",
@@ -134,7 +133,7 @@ pub fn set_app_setting(state: State<AppState>, key: String, value: String) -> Re
             return Err("invalid scan_frequency value".into());
         }
     }
-    if (key == "notification_sound" || key == "notification_preview") && value != "0" && value != "1" {
+    if key == "notification_sound" && value != "0" && value != "1" {
         return Err(format!("{key} must be 0 or 1"));
     }
     let conn = state.db.lock();

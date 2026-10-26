@@ -19,8 +19,6 @@ import {
   MenuItem,
   Stack,
   Switch,
-  Tab,
-  Tabs,
   TextField,
   Tooltip,
   Typography,
@@ -39,23 +37,14 @@ import ChatBubbleOutlineRoundedIcon from "@mui/icons-material/ChatBubbleOutlineR
 import LogoutRoundedIcon from "@mui/icons-material/LogoutRounded";
 import DeleteForeverRoundedIcon from "@mui/icons-material/DeleteForeverRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
-import ArrowForwardRoundedIcon from "@mui/icons-material/ArrowForwardRounded";
-import PhotoLibraryRoundedIcon from "@mui/icons-material/PhotoLibraryRounded";
-import InsertDriveFileRoundedIcon from "@mui/icons-material/InsertDriveFileRounded";
-import LinkRoundedIcon from "@mui/icons-material/LinkRounded";
-import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
 import FilterListRoundedIcon from "@mui/icons-material/FilterListRounded";
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 
-import {
-  extractChatMediaFilesLinks,
-  formatFullDateTime,
-  formatTimeOnly,
-  getFileThemeColor,
-} from "../chat/ChatMediaUtils";
-import { ViewAllCategoryView } from "../chat/ViewAllCategoryView";
-import { avatarColor, formatBytes, lastSeenLabel } from "../../shared/format";
+import { extractChatMediaFilesLinks, formatFullDateTime } from "../chat/ChatMediaUtils";
+import { SharedItemsPreviewCard } from "../chat/SharedItemsPreviewCard";
+import { ViewAllCategoryView, type SharedItemsCategory } from "../chat/ViewAllCategoryView";
+import { avatarColor, lastSeenLabel } from "../../shared/format";
 import { openExternalLink } from "../../panels";
 import type { ChatScreenVm } from "../chat/chatVm";
 
@@ -95,8 +84,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
     stickToBottomRef,
   } = vm;
 
-  const [activeTab, setActiveTab] = useState<number>(0);
-  const [viewAllCategory, setViewAllCategory] = useState<"media" | "files" | "links" | null>(null);
+  const [viewAllCategory, setViewAllCategory] = useState<SharedItemsCategory | null>(null);
   const [addPeopleMode, setAddPeopleMode] = useState(false);
 
   // Rename mode
@@ -137,7 +125,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
     let list = members;
     if (memberSearch.trim()) {
       const q = memberSearch.toLowerCase();
-      list = list.filter((m) => m.display_name.toLowerCase().includes(q));
+      list = list.filter((m) => (m.display_name || "").toLowerCase().includes(q));
     }
     if (memberRoleFilter === "admin") {
       list = list.filter((m) => m.role === "admin");
@@ -161,8 +149,8 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
   const adminMember = members.find((m) => m.role === "admin");
   const creatorName = adminMember
     ? adminMember.user_id === profile.id
-      ? `${profile.display_name}`
-      : adminMember.display_name
+      ? `${profile.display_name || "You"}`
+      : adminMember.display_name || "Admin"
     : "Admin";
 
   const handleJumpToMessage = (messageId: string) => {
@@ -374,7 +362,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                 )}
               </Box>
 
-              {/* ── CARD 2: CONSOLIDATED TABS (Members, Media, Files, Links) ── */}
+              {/* ── CARD 2: MEMBERS ── */}
               <Box
                 sx={{
                   bgcolor: "rgba(23, 31, 45, 0.7)",
@@ -383,74 +371,15 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                   border: "1px solid rgba(255, 255, 255, 0.05)",
                 }}
               >
-                {/* Unified Tab Bar */}
-                <Box
-                  sx={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
-                    pb: 1,
-                  }}
-                >
-                  <Tabs
-                    value={activeTab}
-                    onChange={(_, v) => setActiveTab(v)}
-                    sx={{
-                      minHeight: 36,
-                      "& .MuiTabs-indicator": { height: 2.5, borderRadius: 2 },
-                    }}
-                  >
-                    <Tab
-                      icon={<GroupsRoundedIcon sx={{ fontSize: 18 }} />}
-                      iconPosition="start"
-                      label={`Members ${memberCount}`}
-                      sx={{ minHeight: 36, py: 0.5, px: 1.5, fontSize: 13, textTransform: "none", fontWeight: 700 }}
-                    />
-                    <Tab
-                      icon={<PhotoLibraryRoundedIcon sx={{ fontSize: 17 }} />}
-                      iconPosition="start"
-                      label={`Media ${media.length}`}
-                      sx={{ minHeight: 36, py: 0.5, px: 1.5, fontSize: 13, textTransform: "none", fontWeight: 700 }}
-                    />
-                    <Tab
-                      icon={<InsertDriveFileRoundedIcon sx={{ fontSize: 17 }} />}
-                      iconPosition="start"
-                      label={`Files ${files.length}`}
-                      sx={{ minHeight: 36, py: 0.5, px: 1.5, fontSize: 13, textTransform: "none", fontWeight: 700 }}
-                    />
-                    <Tab
-                      icon={<LinkRoundedIcon sx={{ fontSize: 17 }} />}
-                      iconPosition="start"
-                      label={`Links ${links.length}`}
-                      sx={{ minHeight: 36, py: 0.5, px: 1.5, fontSize: 13, textTransform: "none", fontWeight: 700 }}
-                    />
-                  </Tabs>
+                <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
+                  <GroupsRoundedIcon sx={{ fontSize: 18, color: "primary.main" }} />
+                  <Typography fontWeight={700} fontSize={14.5} color="#FFFFFF">
+                    Members {memberCount}
+                  </Typography>
+                </Stack>
 
-                  {activeTab !== 0 && (
-                    <Button
-                      size="small"
-                      endIcon={<ArrowForwardRoundedIcon sx={{ fontSize: "15px !important" }} />}
-                      onClick={() => {
-                        const cat = activeTab === 1 ? "media" : activeTab === 2 ? "files" : "links";
-                        setViewAllCategory(cat);
-                      }}
-                      sx={{
-                        textTransform: "none",
-                        fontSize: 12.5,
-                        fontWeight: 700,
-                        color: "primary.main",
-                        pr: 0.5,
-                      }}
-                    >
-                      View all
-                    </Button>
-                  )}
-                </Box>
-
-                {/* ── TAB 0: MEMBERS SECTION (SCALING TO 100+ MEMBERS) ── */}
-                {activeTab === 0 && (
-                  <Box sx={{ pt: 1.75 }}>
+                {/* ── MEMBERS SECTION (SCALING TO 100+ MEMBERS) ── */}
+                <Box>
                     {/* Sub-toolbar: Search members input + Filter dropdown + + Add people button */}
                     <Box
                       sx={{
@@ -669,7 +598,8 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                         filteredMembers.map((m) => {
                           const isSelf = m.user_id === profile.id;
                           const isMemberAdmin = m.role === "admin";
-                          const label = isSelf ? `${m.display_name} (you)` : m.display_name;
+                          const dName = m.display_name || "User";
+                          const label = isSelf ? `${dName} (you)` : dName;
 
                           const peer = peerMap.get(m.user_id);
                           const isMemberOnline = isSelf ? true : !!peer?.online;
@@ -692,14 +622,14 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                                   sx={{
                                     width: 38,
                                     height: 38,
-                                    bgcolor: avatarColor(m.display_name),
+                                    bgcolor: avatarColor(dName),
                                     color: "#FFFFFF",
                                     fontSize: 16,
                                     fontWeight: 700,
                                     flexShrink: 0,
                                   }}
                                 >
-                                  {m.display_name.slice(0, 1).toUpperCase()}
+                                  {dName.slice(0, 1).toUpperCase()}
                                 </Avatar>
 
                                 <Box minWidth={0} flex={1}>
@@ -760,212 +690,20 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                       )}
                     </Stack>
                   </Box>
-                )}
-
-                {/* ── TAB 1: MEDIA PREVIEW (4 cols x 2 rows) ── */}
-                {activeTab === 1 && (
-                  <Box sx={{ pt: 1.75 }}>
-                    {!media.length ? (
-                      <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
-                        No media in this group yet.
-                      </Typography>
-                    ) : (
-                      <Box
-                        sx={{
-                          display: "grid",
-                          gridTemplateColumns: "repeat(4, 1fr)",
-                          gap: 1.25,
-                        }}
-                      >
-                        {media.slice(0, 8).map((m) => (
-                          <Box
-                            key={m.key}
-                            onClick={() => void openAttachment(m.fileId, m.senderId)}
-                            sx={{
-                              position: "relative",
-                              aspectRatio: "1",
-                              borderRadius: 2,
-                              overflow: "hidden",
-                              bgcolor: "action.hover",
-                              border: "1px solid rgba(255, 255, 255, 0.08)",
-                              cursor: "pointer",
-                              transition: "transform 0.12s ease",
-                              "&:hover": { transform: "scale(1.03)" },
-                            }}
-                          >
-                            {m.thumb ? (
-                              <Box
-                                component="img"
-                                src={m.thumb}
-                                alt={m.name}
-                                sx={{ width: "100%", height: "100%", objectFit: "cover" }}
-                              />
-                            ) : (
-                              <Box
-                                sx={{
-                                  width: "100%",
-                                  height: "100%",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  justifyContent: "center",
-                                  bgcolor: "action.selected",
-                                }}
-                              >
-                                <InsertDriveFileRoundedIcon sx={{ fontSize: 24, color: "text.secondary" }} />
-                              </Box>
-                            )}
-
-                            <Box
-                              sx={{
-                                position: "absolute",
-                                bottom: 0,
-                                left: 0,
-                                right: 0,
-                                p: 0.5,
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "space-between",
-                                background: "linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%)",
-                              }}
-                            >
-                              <Typography sx={{ fontSize: 9, color: "#FFFFFF", fontWeight: 600 }}>
-                                {formatTimeOnly(m.at)}
-                              </Typography>
-                              {m.isVideo && (
-                                <Box display="flex" alignItems="center" gap={0.25}>
-                                  <PlayArrowRoundedIcon sx={{ fontSize: 10, color: "#FFFFFF" }} />
-                                  <Typography sx={{ fontSize: 8.5, color: "#FFFFFF", fontWeight: 700 }}>
-                                    Video
-                                  </Typography>
-                                </Box>
-                              )}
-                            </Box>
-                          </Box>
-                        ))}
-                      </Box>
-                    )}
-                  </Box>
-                )}
-
-                {/* ── TAB 2: FILES PREVIEW ── */}
-                {activeTab === 2 && (
-                  <Box sx={{ pt: 1.75 }}>
-                    {!files.length ? (
-                      <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
-                        No files in this group yet.
-                      </Typography>
-                    ) : (
-                      <Stack spacing={0.75}>
-                        {files.slice(0, 4).map((f) => {
-                          const iconStyle = getFileThemeColor(f.ext);
-                          return (
-                            <Box
-                              key={f.key}
-                              onClick={() => void openAttachment(f.fileId, f.senderId)}
-                              sx={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 1.5,
-                                p: 0.9,
-                                borderRadius: 2,
-                                bgcolor: "action.hover",
-                                cursor: "pointer",
-                                "&:hover": { bgcolor: "action.selected" },
-                              }}
-                            >
-                              <Box
-                                sx={{
-                                  width: 34,
-                                  height: 34,
-                                  borderRadius: 1.5,
-                                  bgcolor: iconStyle.bg,
-                                  color: iconStyle.color,
-                                  display: "flex",
-                                  alignItems: "center",
-                                  justifyContent: "center",
-                                  flexShrink: 0,
-                                }}
-                              >
-                                <InsertDriveFileRoundedIcon sx={{ fontSize: 18 }} />
-                              </Box>
-                              <Box flex={1} minWidth={0}>
-                                <Typography fontWeight={700} fontSize={13} noWrap color="#FFFFFF">
-                                  {f.name}
-                                </Typography>
-                                <Typography variant="caption" color="text.secondary" fontSize={11}>
-                                  {f.ext} · {formatBytes(f.size)}
-                                </Typography>
-                              </Box>
-                              <Typography variant="caption" color="text.secondary" fontSize={11}>
-                                {formatTimeOnly(f.at)}
-                              </Typography>
-                            </Box>
-                          );
-                        })}
-                      </Stack>
-                    )}
-                  </Box>
-                )}
-
-                {/* ── TAB 3: LINKS PREVIEW ── */}
-                {activeTab === 3 && (
-                  <Box sx={{ pt: 1.75 }}>
-                    {!links.length ? (
-                      <Typography color="text.secondary" variant="caption" display="block" py={2} textAlign="center">
-                        No links in this group yet.
-                      </Typography>
-                    ) : (
-                      <Stack spacing={0.75}>
-                        {links.slice(0, 3).map((l) => (
-                          <Box
-                            key={l.key}
-                            onClick={() => void openExternalLink(l.url)}
-                            sx={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 1.5,
-                              p: 0.9,
-                              borderRadius: 2,
-                              bgcolor: "action.hover",
-                              cursor: "pointer",
-                              "&:hover": { bgcolor: "action.selected" },
-                            }}
-                          >
-                            <Box
-                              sx={{
-                                width: 34,
-                                height: 34,
-                                borderRadius: 1.5,
-                                bgcolor: "rgba(130, 169, 248, 0.15)",
-                                color: "primary.main",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                flexShrink: 0,
-                              }}
-                            >
-                              <LinkRoundedIcon sx={{ fontSize: 18 }} />
-                            </Box>
-                            <Box flex={1} minWidth={0}>
-                              <Typography fontWeight={700} fontSize={13} noWrap color="#FFFFFF">
-                                {l.title}
-                              </Typography>
-                              <Typography
-                                variant="caption"
-                                sx={{ color: "primary.main", display: "block" }}
-                                fontSize={11.5}
-                                noWrap
-                              >
-                                {l.url}
-                              </Typography>
-                            </Box>
-                          </Box>
-                        ))}
-                      </Stack>
-                    )}
-                  </Box>
-                )}
               </Box>
+
+              {/* ── CARD 3: UNIFIED SHARED ITEMS ── */}
+              <SharedItemsPreviewCard
+                media={media}
+                files={files}
+                links={links}
+                onOpenAttachment={(fileId, senderId) => {
+                  void openAttachment(fileId, senderId);
+                }}
+                onOpenLink={(url) => void openExternalLink(url)}
+                onViewAll={(tab) => setViewAllCategory(tab || "media")}
+                emptyLabel="No shared media, files, or links in this group yet."
+              />
             </Stack>
           </DialogContent>
 
@@ -1083,44 +821,48 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
         onClose={() => setMemberMenuAnchor(null)}
         PaperProps={{ sx: { borderRadius: 2, minWidth: 160 } }}
       >
-        <MenuItem
-          onClick={() => {
-            const peer = others.find((p) => p.user_id === memberMenuAnchor?.member.user_id);
-            if (peer) openDm(peer);
-            setMemberMenuAnchor(null);
-            setMembersOpen(false);
-          }}
-        >
-          <ChatBubbleOutlineRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
-          Send direct message
-        </MenuItem>
-
-        {isAdmin && memberMenuAnchor?.member.user_id !== profile.id && (
+        {memberMenuAnchor?.member && (
           <>
             <MenuItem
               onClick={() => {
-                const newRole = memberMenuAnchor.member.role === "admin" ? "member" : "admin";
-                void handleSetMemberRole(memberMenuAnchor.member.user_id, newRole);
+                const peer = others.find((p) => p.user_id === memberMenuAnchor.member.user_id);
+                if (peer) openDm(peer);
                 setMemberMenuAnchor(null);
+                setMembersOpen(false);
               }}
             >
-              <AdminPanelSettingsRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
-              {memberMenuAnchor.member.role === "admin" ? "Dismiss as admin" : "Make admin"}
+              <ChatBubbleOutlineRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
+              Send direct message
             </MenuItem>
-            <Divider sx={{ my: 0.5 }} />
-            <MenuItem
-              onClick={() => {
-                void handleRemoveMember(
-                  memberMenuAnchor.member.user_id,
-                  memberMenuAnchor.member.display_name
-                );
-                setMemberMenuAnchor(null);
-              }}
-              sx={{ color: "error.main" }}
-            >
-              <PersonRemoveRoundedIcon sx={{ fontSize: 18, mr: 1.25 }} />
-              Remove from group
-            </MenuItem>
+
+            {isAdmin && memberMenuAnchor.member.user_id !== profile.id && (
+              <>
+                <MenuItem
+                  onClick={() => {
+                    const newRole = memberMenuAnchor.member.role === "admin" ? "member" : "admin";
+                    void handleSetMemberRole(memberMenuAnchor.member.user_id, newRole);
+                    setMemberMenuAnchor(null);
+                  }}
+                >
+                  <AdminPanelSettingsRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
+                  {memberMenuAnchor.member.role === "admin" ? "Dismiss as admin" : "Make admin"}
+                </MenuItem>
+                <Divider sx={{ my: 0.5 }} />
+                <MenuItem
+                  onClick={() => {
+                    void handleRemoveMember(
+                      memberMenuAnchor.member.user_id,
+                      memberMenuAnchor.member.display_name
+                    );
+                    setMemberMenuAnchor(null);
+                  }}
+                  sx={{ color: "error.main" }}
+                >
+                  <PersonRemoveRoundedIcon sx={{ fontSize: 18, mr: 1.25 }} />
+                  Remove from group
+                </MenuItem>
+              </>
+            )}
           </>
         )}
       </Menu>

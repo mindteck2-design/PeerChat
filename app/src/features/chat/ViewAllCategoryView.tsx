@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useState, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 import {
   Box,
   Button,
@@ -9,6 +9,8 @@ import {
   Menu,
   MenuItem,
   Stack,
+  Tab,
+  Tabs,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -27,6 +29,7 @@ import OpenInNewRoundedIcon from "@mui/icons-material/OpenInNewRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import ChatBubbleOutlineRoundedIcon from "@mui/icons-material/ChatBubbleOutlineRounded";
 import MoreVertRoundedIcon from "@mui/icons-material/MoreVertRounded";
+import PhotoLibraryRoundedIcon from "@mui/icons-material/PhotoLibraryRounded";
 
 import {
   type MediaItem,
@@ -39,8 +42,11 @@ import {
 import { formatBytes } from "../../shared/format";
 import { openExternalLink } from "../../panels";
 
+export type SharedItemsCategory = "media" | "files" | "links";
+
 interface ViewAllCategoryViewProps {
-  category: "media" | "files" | "links";
+  /** Initial tab; user can switch Media / Files / Links without going back. */
+  category: SharedItemsCategory;
   chatTitle: string;
   media: MediaItem[];
   files: FileItem[];
@@ -52,7 +58,7 @@ interface ViewAllCategoryViewProps {
 }
 
 export function ViewAllCategoryView({
-  category,
+  category: initialCategory,
   chatTitle,
   media,
   files,
@@ -62,11 +68,22 @@ export function ViewAllCategoryView({
   onOpenAttachment,
   onJumpToMessage,
 }: ViewAllCategoryViewProps) {
+  const [category, setCategory] = useState<SharedItemsCategory>(initialCategory);
+  useEffect(() => {
+    setCategory(initialCategory);
+  }, [initialCategory]);
+
   // Filter state
   const [mediaFilter, setMediaFilter] = useState<"all" | "images" | "videos">("all");
   const [fileFilter, setFileFilter] = useState<"all" | "documents" | "spreadsheets" | "others">("all");
   const [sortOrder, setSortOrder] = useState<"newest" | "oldest" | "name" | "size">("newest");
-  const [viewMode, setViewMode] = useState<"grid" | "list">(category === "media" ? "grid" : "list");
+  const [viewMode, setViewMode] = useState<"grid" | "list">(
+    initialCategory === "media" ? "grid" : "list"
+  );
+
+  useEffect(() => {
+    setViewMode(category === "media" ? "grid" : "list");
+  }, [category]);
 
   // Sort menu anchor
   const [sortAnchor, setSortAnchor] = useState<HTMLElement | null>(null);
@@ -122,13 +139,6 @@ export function ViewAllCategoryView({
     setTimeout(() => setCopiedUrl(null), 2000);
     setMenuAnchor(null);
   };
-
-  const categoryTitle =
-    category === "media"
-      ? `Media (${filteredMedia.length})`
-      : category === "files"
-      ? `Files (${filteredFiles.length})`
-      : `Links (${filteredLinks.length})`;
 
   const sortLabel =
     sortOrder === "newest"
@@ -194,12 +204,67 @@ export function ViewAllCategoryView({
             <ArrowBackRoundedIcon fontSize="small" />
           </IconButton>
           <Typography variant="h6" fontWeight={700} fontSize={17} noWrap>
-            {chatTitle} — {categoryTitle}
+            {chatTitle} — Shared items
           </Typography>
         </Stack>
         <IconButton size="small" onClick={onClose} sx={{ color: "text.secondary" }}>
           <CloseRoundedIcon fontSize="small" />
         </IconButton>
+      </Box>
+
+      {/* ── CATEGORY TABS ── */}
+      <Box sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider" }}>
+        <Tabs
+          value={category}
+          onChange={(_, v: SharedItemsCategory) => setCategory(v)}
+          sx={{
+            minHeight: 44,
+            "& .MuiTabs-indicator": { height: 2.5, borderRadius: 2 },
+          }}
+        >
+          <Tab
+            value="media"
+            icon={<PhotoLibraryRoundedIcon sx={{ fontSize: 17 }} />}
+            iconPosition="start"
+            label={`Media (${media.length})`}
+            sx={{
+              minHeight: 44,
+              py: 0.5,
+              px: 1.5,
+              fontSize: 13,
+              textTransform: "none",
+              fontWeight: 700,
+            }}
+          />
+          <Tab
+            value="files"
+            icon={<InsertDriveFileRoundedIcon sx={{ fontSize: 17 }} />}
+            iconPosition="start"
+            label={`Files (${files.length})`}
+            sx={{
+              minHeight: 44,
+              py: 0.5,
+              px: 1.5,
+              fontSize: 13,
+              textTransform: "none",
+              fontWeight: 700,
+            }}
+          />
+          <Tab
+            value="links"
+            icon={<LinkRoundedIcon sx={{ fontSize: 17 }} />}
+            iconPosition="start"
+            label={`Links (${links.length})`}
+            sx={{
+              minHeight: 44,
+              py: 0.5,
+              px: 1.5,
+              fontSize: 13,
+              textTransform: "none",
+              fontWeight: 700,
+            }}
+          />
+        </Tabs>
       </Box>
 
       {/* ── FILTERS & CONTROLS ROW ── */}
@@ -812,43 +877,47 @@ export function ViewAllCategoryView({
         onClose={() => setMenuAnchor(null)}
         PaperProps={{ sx: { borderRadius: 2, minWidth: 160 } }}
       >
-        {menuAnchor?.type === "link" ? (
+        {menuAnchor?.item && (
           <>
+            {menuAnchor.type === "link" ? (
+              <>
+                <MenuItem
+                  onClick={() => {
+                    void openExternalLink(menuAnchor.item.url);
+                    setMenuAnchor(null);
+                  }}
+                >
+                  <OpenInNewRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
+                  Open in browser
+                </MenuItem>
+                <MenuItem onClick={() => handleCopyLink(menuAnchor.item.url)}>
+                  <ContentCopyRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
+                  Copy link
+                </MenuItem>
+              </>
+            ) : (
+              <MenuItem
+                onClick={() => {
+                  onOpenAttachment(menuAnchor.item.fileId, menuAnchor.item.senderId);
+                  setMenuAnchor(null);
+                }}
+              >
+                <OpenInNewRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
+                Open file
+              </MenuItem>
+            )}
             <MenuItem
               onClick={() => {
-                void openExternalLink(menuAnchor.item.url);
+                onJumpToMessage(menuAnchor.item.messageId);
                 setMenuAnchor(null);
+                onClose();
               }}
             >
-              <OpenInNewRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
-              Open in browser
-            </MenuItem>
-            <MenuItem onClick={() => handleCopyLink(menuAnchor.item.url)}>
-              <ContentCopyRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
-              Copy link
+              <ChatBubbleOutlineRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
+              Jump to message
             </MenuItem>
           </>
-        ) : (
-          <MenuItem
-            onClick={() => {
-              onOpenAttachment(menuAnchor.item.fileId, menuAnchor.item.senderId);
-              setMenuAnchor(null);
-            }}
-          >
-            <OpenInNewRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
-            Open file
-          </MenuItem>
         )}
-        <MenuItem
-          onClick={() => {
-            onJumpToMessage(menuAnchor?.item.messageId);
-            setMenuAnchor(null);
-            onClose();
-          }}
-        >
-          <ChatBubbleOutlineRoundedIcon sx={{ fontSize: 18, mr: 1.25, color: "text.secondary" }} />
-          Jump to message
-        </MenuItem>
       </Menu>
     </Box>
   );

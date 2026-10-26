@@ -393,12 +393,23 @@ pub fn poll_calendar_due(app: tauri::AppHandle, state: State<'_, AppState>) -> R
         } else {
             format!("{kind} · {day} {time}")
         };
-        let _ = app
+        let sound_enabled = {
+            let conn = state.db.lock();
+            db::get_setting(&conn, "notification_sound")
+                .ok()
+                .flatten()
+                .map(|v| v != "0")
+                .unwrap_or(true)
+        };
+        let mut builder = app
             .notification()
             .builder()
             .title(title)
-            .body(&body)
-            .show();
+            .body(&body);
+        if sound_enabled {
+            builder = builder.sound("Reminder");
+        }
+        let _ = builder.show();
         {
             let conn = state.db.lock();
             let _ = db::mark_calendar_notified(&conn, id);
