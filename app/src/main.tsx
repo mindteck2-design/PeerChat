@@ -10,6 +10,7 @@ import "@fontsource/fraunces/600.css";
 import "@fontsource/fraunces/700.css";
 import "@fontsource/source-sans-3/400.css";
 import "@fontsource/source-sans-3/600.css";
+import "./index.css";
 
 void installAppLogging();
 
@@ -23,6 +24,11 @@ function Root() {
     setModeState(next);
     localStorage.setItem("peerchat.theme", next);
   }
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", mode);
+    document.body.setAttribute("data-theme", mode);
+  }, [mode]);
 
   useEffect(() => {
     document.title = "PeerChat";

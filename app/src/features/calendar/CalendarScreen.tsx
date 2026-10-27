@@ -96,15 +96,16 @@ export type CalendarShareNotify = {
 
 const timelineScrollSx = {
   scrollbarWidth: "thin" as const,
-  scrollbarColor: "rgba(255,255,255,0.2) transparent",
-  "&::-webkit-scrollbar": { width: 6 },
+  scrollbarColor: "var(--pc-scrollbar-thumb) transparent",
+  "&::-webkit-scrollbar": { width: 7 },
+  "&::-webkit-scrollbar-button": { display: "none" },
   "&::-webkit-scrollbar-track": { background: "transparent" },
   "&::-webkit-scrollbar-thumb": {
-    backgroundColor: "rgba(255,255,255,0.2)",
-    borderRadius: 8,
+    backgroundColor: "var(--pc-scrollbar-thumb)",
+    borderRadius: 999,
   },
   "&::-webkit-scrollbar-thumb:hover": {
-    backgroundColor: "rgba(255,255,255,0.35)",
+    backgroundColor: "var(--pc-scrollbar-thumb-hover)",
   },
 };
 

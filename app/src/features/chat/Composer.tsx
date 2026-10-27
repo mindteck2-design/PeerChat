@@ -92,10 +92,15 @@ function StagedStrip({
           pb: 0.35,
           scrollSnapType: "x mandatory",
           WebkitOverflowScrolling: "touch",
-          "&::-webkit-scrollbar": { height: 6 },
+          "&::-webkit-scrollbar": { height: 7 },
+          "&::-webkit-scrollbar-button": { display: "none" },
+          "&::-webkit-scrollbar-track": { background: "transparent" },
           "&::-webkit-scrollbar-thumb": {
-            bgcolor: "action.disabled",
+            backgroundColor: "var(--pc-scrollbar-thumb)",
             borderRadius: 999,
+          },
+          "&::-webkit-scrollbar-thumb:hover": {
+            backgroundColor: "var(--pc-scrollbar-thumb-hover)",
           },
         }}
       >
@@ -876,15 +881,16 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   "& textarea": {
                     overflowY: "auto !important",
                     scrollbarWidth: "thin",
-                    scrollbarColor: `${theme.palette.action.disabled} transparent`,
-                    "&::-webkit-scrollbar": { width: 6 },
+                    scrollbarColor: "var(--pc-scrollbar-thumb) transparent",
+                    "&::-webkit-scrollbar": { width: 7 },
+                    "&::-webkit-scrollbar-button": { display: "none" },
                     "&::-webkit-scrollbar-track": { background: "transparent" },
                     "&::-webkit-scrollbar-thumb": {
-                      backgroundColor: theme.palette.action.disabled,
+                      backgroundColor: "var(--pc-scrollbar-thumb)",
                       borderRadius: 999,
                     },
                     "&::-webkit-scrollbar-thumb:hover": {
-                      backgroundColor: theme.palette.action.active,
+                      backgroundColor: "var(--pc-scrollbar-thumb-hover)",
                     },
                   },
                 })}
