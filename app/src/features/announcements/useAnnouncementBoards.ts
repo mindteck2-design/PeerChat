@@ -21,13 +21,27 @@ export function useAnnouncementBoards(opts: {
       const boards = await peerApi.ensureAnnouncementBoards();
       setAnnounceBoards(boards);
       const myTeam = (profile.team || "").trim().toLowerCase();
+
+      // Gather all known peers (both online peers and persisted peers from SQLite)
+      let allPeers = peers;
+      try {
+        const persisted = await peerApi.listPeers();
+        const map = new Map<string, Peer>();
+        for (const p of persisted) if (p.user_id) map.set(p.user_id, p);
+        for (const p of peers) if (p.user_id) map.set(p.user_id, { ...map.get(p.user_id), ...p });
+        allPeers = Array.from(map.values());
+      } catch {
+        /* ignore */
+      }
+
       for (const board of boards) {
         try {
           const gk = await ensureGroupKey(board.id);
           if (!gk) continue;
           const pubs: Record<string, string> = {};
-          for (const p of peers) {
+          for (const p of allPeers) {
             if (p.user_id === profile.id) continue;
+            if (!p.x25519_public) continue;
             if (board.id === "board:org") {
               pubs[p.user_id] = p.x25519_public;
             } else if (myTeam && (p.team || "").trim().toLowerCase() === myTeam) {

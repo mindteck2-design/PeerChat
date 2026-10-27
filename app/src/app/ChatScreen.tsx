@@ -566,6 +566,25 @@ export function ChatScreen({
     setGroupKeyHistory,
   });
 
+  const { ensureAnnounceBoards } = useAnnouncementBoards({
+    profile,
+    identity,
+    peers,
+    ensureGroupKey,
+    setAnnounceBoards,
+    setStatus,
+  });
+
+  useEffect(() => {
+    void ensureAnnounceBoards();
+  }, [ensureAnnounceBoards]);
+
+  useEffect(() => {
+    if (peers.length > 0) {
+      void ensureAnnounceBoards();
+    }
+  }, [peers.length, ensureAnnounceBoards]);
+
   async function resolveMemberIds(conv: Conversation): Promise<string[]> {
     if (conv.kind === "dm" && conv.peer_id) return [conv.peer_id, profile.id];
     return peerApi.memberIds(conv.id);
@@ -1043,6 +1062,9 @@ export function ChatScreen({
       if (conv.kind === "group") {
         try {
           if (!cancel) {
+            if (conv.id === "board:org" || conv.id.startsWith("board:")) {
+              await ensureAnnounceBoards();
+            }
             await ensureGroupKey(conv.id);
             await syncGroupKeyIfRotated(conv.id);
           }
@@ -2178,9 +2200,11 @@ export function ChatScreen({
     } else {
       const gk = await ensureGroupKey(active.id);
       if (!gk) {
+        setText(body.trim());
         setStatus("Waiting for group encryption key...");
         return;
       }
+      setStatus("");
       const enc = await encryptWithGroupKey(body.trim(), active.id, profile.id, gk, identity);
       message = {
         kind,
@@ -2310,9 +2334,11 @@ export function ChatScreen({
     } else {
       const gk = await ensureGroupKey(active.id);
       if (!gk) {
+        setText(body.trim());
         setStatus("Waiting for group encryption key...");
         return;
       }
+      setStatus("");
       const enc = await encryptWithGroupKey(body.trim(), active.id, profile.id, gk, identity);
       message = {
         kind: "text",
@@ -2356,7 +2382,13 @@ export function ChatScreen({
     }
     setEditingMessage(null);
     if (!files.length) {
-      if (body) await sendText(body, replyId);
+      if (body) {
+        try {
+          await sendText(body, replyId);
+        } catch {
+          setText(body);
+        }
+      }
       return;
     }
     // Scan the complete selection before uploading anything. This prevents one
@@ -3849,15 +3881,6 @@ export function ChatScreen({
     }
   }
 
-  const { ensureAnnounceBoards } = useAnnouncementBoards({
-    profile,
-    identity,
-    peers,
-    ensureGroupKey,
-    setAnnounceBoards,
-    setStatus,
-  });
-
   async function postAnnouncement() {
     if (!active) return;
     const title = announceCompose.title.trim();
@@ -3873,7 +3896,12 @@ export function ChatScreen({
     }
     setAnnounceBusy(true);
     try {
-      await ensureGroupKey(active.id);
+      const gk = await ensureGroupKey(active.id);
+      if (!gk) {
+        setStatus("Waiting for group encryption key...");
+        return;
+      }
+      setStatus("");
       let fileId: string | undefined;
       let fileLabel: string | undefined;
       if (files.length) {

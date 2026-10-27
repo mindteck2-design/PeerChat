@@ -7,6 +7,7 @@ import {
 } from "react";
 import {
   b64,
+  createGroupKey,
   decryptWithGroupKey,
   exportPublic,
   fromB64,
@@ -304,7 +305,27 @@ export function useGroupCrypto(opts: {
         let gk = await tryUnwrap();
         if (gk) return gk;
 
-        // Do not generate a rogue key — request sync and briefly poll for the wrap.
+        const isAnnouncementBoard = convId === "board:org" || convId.startsWith("board:");
+
+        // For system announcement / broadcast channels, if no other peers are online to sync from,
+        // bootstrap the channel's group key immediately without polling delays.
+        const onlineOthers = peersRef.current.filter(
+          (p) => p.user_id !== profileIdRef.current && p.online
+        );
+        if (isAnnouncementBoard && onlineOthers.length === 0) {
+          const newGk = createGroupKey();
+          groupKeysRef.current = { ...groupKeysRef.current, [convId]: newGk };
+          setGroupKeys((g) => ({ ...g, [convId]: newGk }));
+          await persistMyGroupWrap(convId, newGk);
+          appLog("info", "[GroupCrypto:ensureGroupKey:bootstrapped_board_key:offline]", {
+            group_id: convId,
+            member_id: profileIdRef.current,
+            key_id: keyId(newGk),
+          });
+          return newGk;
+        }
+
+        // Do not generate a rogue key for normal groups — request sync and briefly poll for the wrap.
         appLog("warn", "[GroupCrypto:ensureGroupKey:missing_key]", {
           group_id: convId,
           member_id: profileIdRef.current,
@@ -327,6 +348,21 @@ export function useGroupCrypto(opts: {
           if (gk) return gk;
         }
 
+        if (isAnnouncementBoard) {
+          // If no peer on LAN provided a wrap for this broadcast channel,
+          // bootstrap the channel key now so the broadcaster can post.
+          const newGk = createGroupKey();
+          groupKeysRef.current = { ...groupKeysRef.current, [convId]: newGk };
+          setGroupKeys((g) => ({ ...g, [convId]: newGk }));
+          await persistMyGroupWrap(convId, newGk);
+          appLog("info", "[GroupCrypto:ensureGroupKey:bootstrapped_board_key:poll_timeout]", {
+            group_id: convId,
+            member_id: profileIdRef.current,
+            key_id: keyId(newGk),
+          });
+          return newGk;
+        }
+
         appLog("warn", "[GroupCrypto:ensureGroupKey:still_missing]", {
           group_id: convId,
           member_id: profileIdRef.current,
@@ -345,6 +381,7 @@ export function useGroupCrypto(opts: {
       groupKeyHistoryRef,
       groupKeysRef,
       loadPersistedKeyHistory,
+      persistMyGroupWrap,
       setGroupKeyHistory,
       setGroupKeys,
     ]
