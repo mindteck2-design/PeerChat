@@ -5112,21 +5112,6 @@ export function ChatScreen({
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
       >
-        <Box sx={{ display: "flex", gap: 0.25, px: 1, py: 0.5 }}>
-          {QUICK_REACTIONS.map((e) => (
-            <IconButton
-              key={e}
-              size="small"
-              onClick={() => {
-                if (msgMenu) reactToMessage(msgMenu.message, e);
-                setMsgMenu(null);
-              }}
-            >
-              <Typography fontSize={18}>{e}</Typography>
-            </IconButton>
-          ))}
-        </Box>
-        <Divider />
         {(!isAnnounceBoard || !msgMenu) && (
           <MenuItem onClick={() => msgMenu && startReply(msgMenu.message)}>
             <ListItemIcon>

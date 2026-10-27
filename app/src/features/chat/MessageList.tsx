@@ -2,9 +2,10 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useIncomingTransfer, useOutgoingTransfer } from "../files/transferProgressStore";
 import {
-  Avatar, Box, Chip, Fade, Grow, IconButton,
-  Paper, Stack, Tooltip, Typography,
+  Avatar, Box, Chip, Fade, Grow, IconButton, InputBase, List,
+  Paper, Popover, Stack, Tooltip, Typography,
 } from "@mui/material";
+import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import DoneIcon from "@mui/icons-material/DoneRounded";
 import DoneAllIcon from "@mui/icons-material/DoneAllRounded";
@@ -13,6 +14,8 @@ import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownR
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
 import PushPinIcon from "@mui/icons-material/PushPinRounded";
 import ReplyIcon from "@mui/icons-material/ReplyRounded";
+import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
+import SentimentSatisfiedAltOutlinedIcon from "@mui/icons-material/SentimentSatisfiedAltOutlined";
 import { MediaAlbum, isGridMediaName, isImageFileName, type AlbumItem } from "../../MediaAlbum";
 import { CircularTransferControl } from "../files/CircularTransferControl";
 import { LinkifiedText } from "../../panels";
@@ -26,11 +29,49 @@ import {
 import { emojiOnlyCount, emojiOnlyFontSize } from "../../emoji";
 import { FEATURE_GAMES } from "../../features";
 import { messageAttachmentIds } from "../../shared/messageMeta";
-import { formatClock, truncate } from "../../shared/format";
+import { avatarColor, formatClock, truncate } from "../../shared/format";
 import { peerApi } from "../../peer";
 import type { ChatScreenVm } from "./chatVm";
 
 const MESSAGE_COLLAPSED_MAX_HEIGHT = 120;
+
+const EMOJI_LIST: { emoji: string; keywords: string }[] = [
+  { emoji: "👍", keywords: "thumbs up like yes agree ok" },
+  { emoji: "❤️", keywords: "heart love red like" },
+  { emoji: "😂", keywords: "laugh joy crying haha lol rofl" },
+  { emoji: "😮", keywords: "surprised wow gasp omg open mouth" },
+  { emoji: "😢", keywords: "sad cry tear unhappy" },
+  { emoji: "🙏", keywords: "pray please thanks thank you namaste" },
+  { emoji: "🎉", keywords: "party celebrate tada congratulations celebration" },
+  { emoji: "✅", keywords: "check tick correct mark done success" },
+  { emoji: "❌", keywords: "cross wrong cancel fail reject" },
+  { emoji: "🔥", keywords: "fire flame lit hot awesome" },
+  { emoji: "👏", keywords: "clap applause bravo praise" },
+  { emoji: "👨‍💻", keywords: "coder developer programmer engineer tech" },
+  { emoji: "💡", keywords: "idea bulb smart light solution" },
+  { emoji: "👀", keywords: "eyes look seeing watching" },
+  { emoji: "🚀", keywords: "rocket fast launch speed blast" },
+  { emoji: "💯", keywords: "100 hundred perfect score full" },
+  { emoji: "🎯", keywords: "target bullseye hit direct accurate goal" },
+  { emoji: "🥰", keywords: "love smiling face with hearts adore cute" },
+  { emoji: "🤔", keywords: "thinking ponder hmm wonder" },
+  { emoji: "👎", keywords: "thumbs down dislike bad no" },
+  { emoji: "✨", keywords: "sparkles shine clean magic new" },
+  { emoji: "😍", keywords: "heart eyes love wonderful adore" },
+  { emoji: "🙌", keywords: "hands raise hooray celebrating praise" },
+  { emoji: "🥳", keywords: "partying celebrate hat horns birthday" },
+  { emoji: "😎", keywords: "cool sunglasses smile confident" },
+  { emoji: "🤝", keywords: "handshake deal agreement partner meet" },
+  { emoji: "💪", keywords: "muscle flex strong power gym" },
+  { emoji: "⭐", keywords: "star favorite rating gold" },
+  { emoji: "☕", keywords: "coffee tea cafe drink break morning" },
+  { emoji: "🫡", keywords: "salute respect yes sir acknowledged" },
+  { emoji: "🤩", keywords: "star struck excited amazed awesome" },
+  { emoji: "🤫", keywords: "shh quiet silence secret hush" },
+  { emoji: "😁", keywords: "grin smile happy beam" },
+  { emoji: "😭", keywords: "sob crying sad bawling" },
+  { emoji: "🤯", keywords: "mind blown explosion shocked" },
+];
 
 /** WhatsApp-style inline expansion for long message text. */
 function ExpandableMessageText({
@@ -161,6 +202,27 @@ function ExpandableMessageText({
 }
 
 function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
+  const [emojiPickerAnchor, setEmojiPickerAnchor] = useState<{
+    anchor: HTMLElement;
+    message: any;
+    mine: boolean;
+  } | null>(null);
+  const [emojiSearch, setEmojiSearch] = useState("");
+
+  const [reactionDetails, setReactionDetails] = useState<{
+    anchor: HTMLElement;
+    reaction: any;
+    message: any;
+  } | null>(null);
+
+  const filteredEmojis = useMemo(() => {
+    const q = emojiSearch.trim().toLowerCase();
+    if (!q) return EMOJI_LIST;
+    return EMOJI_LIST.filter(
+      (e) => e.emoji.includes(q) || e.keywords.includes(q)
+    );
+  }, [emojiSearch]);
+
   const {
     abortIncomingTransfer,
     abortOutgoingTransfer,
@@ -428,11 +490,14 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
     const highlighted = highlightMsgId === m.id;
     // Soft fade for albums — Grow scales large grids and feels jumpy.
     const MsgEnter = hasAttachments ? Fade : Grow;
+    const displayedReactions = (m.reactions || []).slice(0, 3);
+    const overflowCount = (m.reactions || []).length > 3 ? (m.reactions || []).length - 3 : 0;
 
     return (
       <MsgEnter in key={m.id} timeout={hasAttachments ? 160 : 180}>
         <Box
           id={`msg-${m.id}`}
+          className="msg-row"
           sx={{
             alignSelf: mine ? "flex-end" : "flex-start",
             maxWidth: messageAttachmentIds(m).some((fid) =>
@@ -441,25 +506,84 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
               ? "min(78%, 360px)"
               : "min(72%, 460px)",
             display: "flex",
-            flexDirection: "column",
-            alignItems: mine ? "flex-end" : "flex-start",
+            flexDirection: "row",
+            alignItems: "flex-end",
+            gap: 0.75,
+            position: "relative",
+            mb: m.reactions?.length ? 1.6 : 0.4,
+            "&:hover .msg-reaction-trigger": {
+              opacity: 0.65,
+              pointerEvents: "auto",
+            },
           }}
         >
-          <Paper
-            elevation={0}
-            onContextMenu={(e) => {
-              if (m.kind === "deleted") return;
-              e.preventDefault();
-              setMsgMenu({ anchor: e.currentTarget as HTMLElement, message: m });
-            }}
-            sx={{
-              width: "fit-content",
-              minWidth: 0,
-              maxWidth: "100%",
-              display: "flow-root",
-              pl: bigEmoji ? 0.5 : 1,
-              pr: bigEmoji ? 0.5 : 1.75,
-              py: bigEmoji ? 0.25 : 0.45,
+          {/* Left Reaction Trigger Icon for SENT messages (no background/container) */}
+          {mine && m.kind !== "deleted" && (
+            <IconButton
+              className="msg-reaction-trigger"
+              size="small"
+              aria-label="Add reaction"
+              onClick={(e) => {
+                e.stopPropagation();
+                setEmojiSearch("");
+                setEmojiPickerAnchor({ anchor: e.currentTarget, message: m, mine: true });
+              }}
+              sx={{
+                opacity: 0,
+                pointerEvents: "none",
+                transition: "opacity 0.15s ease-in-out, transform 0.15s ease-in-out",
+                p: 0.5,
+                color: "text.secondary",
+                bgcolor: "transparent !important",
+                boxShadow: "none !important",
+                border: "none !important",
+                mb: 0.25,
+                "&:hover": {
+                  opacity: "1 !important",
+                  color: "text.primary",
+                  bgcolor: "transparent !important",
+                  transform: "scale(1.15)",
+                },
+              }}
+            >
+              <SentimentSatisfiedAltOutlinedIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          )}
+
+          {/* Left Avatar for RECEIVED messages */}
+          {!mine && (
+            <Avatar
+              sx={{
+                width: 28,
+                height: 28,
+                fontSize: 12,
+                fontWeight: 700,
+                bgcolor: avatarColor(label),
+                flexShrink: 0,
+                mb: 0.25,
+              }}
+            >
+              {label[0]?.toUpperCase() || "?"}
+            </Avatar>
+          )}
+
+          {/* Bubble wrapper with attached reactions */}
+          <Box sx={{ position: "relative", maxWidth: "100%", minWidth: 0 }}>
+            <Paper
+              elevation={0}
+              onContextMenu={(e) => {
+                if (m.kind === "deleted") return;
+                e.preventDefault();
+                setMsgMenu({ anchor: e.currentTarget as HTMLElement, message: m });
+              }}
+              sx={{
+                width: "fit-content",
+                minWidth: mine ? 84 : 70,
+                maxWidth: "100%",
+                display: "flow-root",
+                pl: bigEmoji ? 0.5 : 1.25,
+                pr: bigEmoji ? 0.5 : 1.25,
+                py: bigEmoji ? 0.25 : 0.65,
               bgcolor: bigEmoji
                 ? highlighted
                   ? dark
@@ -939,46 +1063,161 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             )}
           </Paper>
 
+          {/* Attached Reactions Badge */}
           {!!m.reactions?.length && (
-            <Stack
-              direction="row"
-              spacing={0.5}
+            <Box
               sx={{
-                mt: 0.5,
-                flexWrap: "wrap",
-                justifyContent: mine ? "flex-end" : "flex-start",
+                position: "absolute",
+                bottom: -10,
+                [mine ? "right" : "left"]: 8,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.4,
+                zIndex: 2,
+                userSelect: "none",
               }}
             >
-              {m.reactions.map((r) => (
-                <Chip
-                  key={r.emoji}
-                  size="small"
-                  label={`${r.emoji} ${r.count}`}
-                  onClick={() => reactToMessage(m, r.emoji)}
-                  variant={r.users.includes(profile.id) ? "filled" : "outlined"}
-                  color={r.users.includes(profile.id) ? "primary" : "default"}
-                  sx={{
-                    height: 28,
-                    fontSize: 14,
-                    fontWeight: 700,
-                    px: 0.35,
-                    bgcolor: r.users.includes(profile.id)
-                      ? undefined
-                      : dark
-                        ? "chat.input"
-                        : "background.paper",
-                    borderWidth: 1.5,
-                    boxShadow: dark
-                      ? "0 1px 3px rgba(0,0,0,0.28)"
-                      : "0 1px 2px rgba(20,32,28,0.1)",
-                    "& .MuiChip-label": { px: 0.85 },
+              {displayedReactions.map((r) => {
+                const isMineReaction = r.users.includes(profile.id);
+                return (
+                  <Box
+                    key={r.emoji}
+                    component="button"
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setReactionDetails({
+                        anchor: e.currentTarget,
+                        reaction: r,
+                        message: m,
+                      });
+                    }}
+                    sx={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 0.35,
+                      height: 20,
+                      px: 0.65,
+                      borderRadius: "999px",
+                      border: "1px solid",
+                      borderColor: isMineReaction
+                        ? "primary.main"
+                        : dark
+                          ? "rgba(255, 255, 255, 0.15)"
+                          : "rgba(0, 0, 0, 0.12)",
+                      bgcolor: isMineReaction
+                        ? dark
+                          ? "rgba(59, 130, 246, 0.25)"
+                          : "rgba(15, 107, 92, 0.18)"
+                        : dark
+                          ? "#1a2333"
+                          : "#ffffff",
+                      boxShadow: dark
+                        ? "0 2px 4px rgba(0,0,0,0.35)"
+                        : "0 1px 3px rgba(0,0,0,0.12)",
+                      cursor: "pointer",
+                      transition: "transform 0.15s ease, border-color 0.15s ease",
+                      "&:hover": {
+                        transform: "scale(1.08)",
+                        borderColor: "primary.main",
+                      },
+                    }}
+                  >
+                    <Box component="span" sx={{ fontSize: 12, lineHeight: 1 }}>
+                      {r.emoji}
+                    </Box>
+                    <Box
+                      component="span"
+                      sx={{
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        color: isMineReaction ? "primary.main" : "text.primary",
+                        lineHeight: 1,
+                      }}
+                    >
+                      {r.count}
+                    </Box>
+                  </Box>
+                );
+              })}
+              {overflowCount > 0 && (
+                <Box
+                  component="button"
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setReactionDetails({
+                      anchor: e.currentTarget,
+                      reaction: m.reactions![0],
+                      message: m,
+                    });
                   }}
-                />
-              ))}
-            </Stack>
+                  sx={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    height: 20,
+                    px: 0.65,
+                    borderRadius: "999px",
+                    border: "1px solid",
+                    borderColor: dark
+                      ? "rgba(255, 255, 255, 0.15)"
+                      : "rgba(0, 0, 0, 0.12)",
+                    bgcolor: dark ? "#1a2333" : "#ffffff",
+                    boxShadow: dark
+                      ? "0 2px 4px rgba(0,0,0,0.35)"
+                      : "0 1px 3px rgba(0,0,0,0.12)",
+                    cursor: "pointer",
+                    fontSize: 10.5,
+                    fontWeight: 700,
+                    color: "text.secondary",
+                    "&:hover": {
+                      color: "primary.main",
+                      borderColor: "primary.main",
+                    },
+                  }}
+                >
+                  +{overflowCount}
+                </Box>
+              )}
+            </Box>
           )}
         </Box>
-      </MsgEnter>
+
+        {/* Right Reaction Trigger Icon for RECEIVED messages */}
+        {!mine && m.kind !== "deleted" && (
+          <IconButton
+            className="msg-reaction-trigger"
+            size="small"
+            aria-label="Add reaction"
+            onClick={(e) => {
+              e.stopPropagation();
+              setEmojiSearch("");
+              setEmojiPickerAnchor({ anchor: e.currentTarget, message: m, mine: false });
+            }}
+            sx={{
+              opacity: 0,
+              pointerEvents: "none",
+              transition: "opacity 0.15s ease-in-out, transform 0.15s ease-in-out",
+              p: 0.5,
+              color: "text.secondary",
+              bgcolor: "transparent !important",
+              boxShadow: "none !important",
+              border: "none !important",
+              mb: 0.25,
+              "&:hover": {
+                opacity: "1 !important",
+                color: "text.primary",
+                bgcolor: "transparent !important",
+                transform: "scale(1.15)",
+              },
+            }}
+          >
+            <SentimentSatisfiedAltOutlinedIcon sx={{ fontSize: 18 }} />
+          </IconButton>
+        )}
+      </Box>
+    </MsgEnter>
     );
   };
 
@@ -1066,6 +1305,214 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           </Paper>
         </Fade>
       )}
+
+      {/* ── Emoji Picker Popover (Rule 3 & 4) ── */}
+      <Popover
+        open={Boolean(emojiPickerAnchor)}
+        anchorEl={emojiPickerAnchor?.anchor}
+        onClose={() => setEmojiPickerAnchor(null)}
+        anchorOrigin={{
+          vertical: "top",
+          horizontal: emojiPickerAnchor?.mine ? "left" : "right",
+        }}
+        transformOrigin={{
+          vertical: "bottom",
+          horizontal: emojiPickerAnchor?.mine ? "right" : "left",
+        }}
+        PaperProps={{
+          sx: {
+            p: 1.5,
+            width: 290,
+            borderRadius: 2.5,
+            bgcolor: dark ? "#111827" : "#ffffff",
+            backgroundImage: "none",
+            border: "1px solid",
+            borderColor: dark ? "rgba(255, 255, 255, 0.1)" : "divider",
+            boxShadow: dark ? "0 16px 36px rgba(0, 0, 0, 0.6)" : "0 12px 28px rgba(0, 0, 0, 0.15)",
+          },
+        }}
+      >
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 1,
+            px: 1.25,
+            py: 0.6,
+            mb: 1.25,
+            borderRadius: 1.5,
+            bgcolor: dark ? "rgba(255, 255, 255, 0.05)" : "rgba(0, 0, 0, 0.04)",
+            border: "1px solid",
+            borderColor: dark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.08)",
+          }}
+        >
+          <SearchRoundedIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+          <InputBase
+            fullWidth
+            autoFocus
+            placeholder="Search emoji..."
+            value={emojiSearch}
+            onChange={(e) => setEmojiSearch(e.target.value)}
+            sx={{ fontSize: 13, color: "text.primary" }}
+          />
+        </Box>
+
+        <Box
+          sx={{
+            display: "grid",
+            gridTemplateColumns: "repeat(7, 1fr)",
+            gap: 0.5,
+            maxHeight: 220,
+            overflowY: "auto",
+          }}
+        >
+          {filteredEmojis.map((item) => (
+            <IconButton
+              key={item.emoji}
+              size="small"
+              onClick={() => {
+                if (emojiPickerAnchor?.message) {
+                  reactToMessage(emojiPickerAnchor.message, item.emoji);
+                }
+                setEmojiPickerAnchor(null);
+              }}
+              sx={{
+                width: 34,
+                height: 34,
+                fontSize: 18,
+                borderRadius: 1.5,
+                transition: "transform 0.1s ease, background-color 0.15s ease",
+                "&:hover": {
+                  bgcolor: dark ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.06)",
+                  transform: "scale(1.2)",
+                },
+              }}
+            >
+              {item.emoji}
+            </IconButton>
+          ))}
+          {filteredEmojis.length === 0 && (
+            <Box sx={{ gridColumn: "span 7", textAlign: "center", py: 2 }}>
+              <Typography sx={{ fontSize: 12, color: "text.secondary" }}>
+                No emojis found
+              </Typography>
+            </Box>
+          )}
+        </Box>
+      </Popover>
+
+      {/* ── Reaction Details Popover (Rule 5) ── */}
+      <Popover
+        open={Boolean(reactionDetails)}
+        anchorEl={reactionDetails?.anchor}
+        onClose={() => setReactionDetails(null)}
+        anchorOrigin={{
+          vertical: "bottom",
+          horizontal: "left",
+        }}
+        transformOrigin={{
+          vertical: "top",
+          horizontal: "left",
+        }}
+        PaperProps={{
+          sx: {
+            width: 270,
+            borderRadius: 2.5,
+            bgcolor: dark ? "#111827" : "#ffffff",
+            backgroundImage: "none",
+            border: "1px solid",
+            borderColor: dark ? "rgba(255, 255, 255, 0.1)" : "divider",
+            boxShadow: dark ? "0 16px 36px rgba(0,0,0,0.6)" : "0 8px 24px rgba(0,0,0,0.12)",
+            p: 1.5,
+          },
+        }}
+      >
+        {reactionDetails && (
+          <Box>
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                pb: 1,
+                borderBottom: "1px solid",
+                borderColor: dark ? "rgba(255, 255, 255, 0.08)" : "divider",
+                mb: 1,
+              }}
+            >
+              <Typography sx={{ fontSize: 13, fontWeight: 700, color: "text.primary" }}>
+                {reactionDetails.reaction.count}{" "}
+                {reactionDetails.reaction.count === 1 ? "person" : "people"} reacted with{" "}
+                {reactionDetails.reaction.emoji}
+              </Typography>
+              <IconButton
+                size="small"
+                onClick={() => setReactionDetails(null)}
+                sx={{
+                  p: 0.25,
+                  color: "text.secondary",
+                  "&:hover": { color: "text.primary" },
+                }}
+              >
+                <CloseRoundedIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Box>
+
+            <List dense disablePadding sx={{ maxHeight: 220, overflowY: "auto" }}>
+              {reactionDetails.reaction.users.map((uid) => {
+                const isMe = uid === profile.id;
+                const dName = isMe ? `${profile.display_name} (You)` : senderLabel(uid);
+                return (
+                  <Box
+                    key={uid}
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 1.25,
+                      py: 0.75,
+                      px: 0.5,
+                      borderRadius: 1.5,
+                      cursor: isMe ? "pointer" : "default",
+                      "&:hover": {
+                        bgcolor: isMe ? "action.hover" : "transparent",
+                      },
+                    }}
+                    onClick={() => {
+                      if (isMe) {
+                        reactToMessage(reactionDetails.message, reactionDetails.reaction.emoji);
+                        setReactionDetails(null);
+                      }
+                    }}
+                  >
+                    <Avatar
+                      sx={{
+                        width: 28,
+                        height: 28,
+                        fontSize: 12,
+                        fontWeight: 700,
+                        bgcolor: avatarColor(dName),
+                      }}
+                    >
+                      {dName[0]?.toUpperCase() || "?"}
+                    </Avatar>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ fontSize: 13, fontWeight: 600, color: "text.primary" }} noWrap>
+                        {dName}
+                      </Typography>
+                      {isMe && (
+                        <Typography sx={{ fontSize: 10.5, color: "primary.main" }}>
+                          Tap to remove
+                        </Typography>
+                      )}
+                    </Box>
+                  </Box>
+                );
+              })}
+            </List>
+          </Box>
+        )}
+      </Popover>
+
       <Box ref={bottomSentinelRef} aria-hidden sx={{ height: 1, width: "100%", flexShrink: 0 }} />
     </>
   );
