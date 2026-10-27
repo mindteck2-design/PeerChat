@@ -5498,8 +5498,8 @@ export function ChatScreen({
       <PollDialog
         open={pollOpen}
         onClose={() => setPollOpen(false)}
-        onSend={async (question, options) => {
-          await sendEncrypted("poll", JSON.stringify({ question, options, votes: {} }));
+        onSend={async (question, options, settings) => {
+          await sendEncrypted("poll", JSON.stringify({ question, options, votes: {}, ...(settings || {}) }));
           setPollOpen(false);
         }}
       />

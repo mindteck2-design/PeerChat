@@ -1,4 +1,4 @@
-import { Box, Button, Stack, Typography } from "@mui/material";
+import { Box, Button, Chip, Stack, Typography } from "@mui/material";
 import DownloadIcon from "@mui/icons-material/DownloadRounded";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFileRounded";
 import type { Message } from "../../peer";
@@ -36,16 +36,35 @@ export function RichCard({
   if (kind === "poll" && parsed?.question && Array.isArray(parsed.options)) {
     const tally = new Map<string, number>();
     const seen = new Set<string>();
+    const isMultiple = parsed.voting_type === "multiple";
     for (const vote of votes) {
-      if (seen.has(vote.sender_id)) continue;
-      seen.add(vote.sender_id);
       const choice = plain[vote.id];
       if (!choice) continue;
+      const key = isMultiple ? `${vote.sender_id}:${choice}` : vote.sender_id;
+      if (seen.has(key)) continue;
+      seen.add(key);
       tally.set(choice, (tally.get(choice) || 0) + 1);
     }
+    const uniqueVoters = new Set(votes.map((v) => v.sender_id).filter(Boolean));
     return (
       <Box sx={{ pr: 1 }}>
-        <Typography variant="overline" color="primary">Poll</Typography>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+          <Typography variant="overline" color="primary">Poll</Typography>
+          {parsed.voting_type && (
+            <Chip
+              size="small"
+              label={parsed.voting_type === "multiple" ? "Multiple choice" : "Single choice"}
+              sx={{ height: 18, fontSize: "0.68rem", bgcolor: "rgba(59, 130, 246, 0.12)", color: "#60a5fa" }}
+            />
+          )}
+          {parsed.duration && parsed.duration !== "No end date" && (
+            <Chip
+              size="small"
+              label={parsed.duration}
+              sx={{ height: 18, fontSize: "0.68rem", bgcolor: "rgba(255, 255, 255, 0.06)", color: "text.secondary" }}
+            />
+          )}
+        </Stack>
         <Typography fontWeight={700} sx={{ mb: 0.5 }}>{parsed.question}</Typography>
         <Stack spacing={0.5}>
           {parsed.options.map((option: string) => (
@@ -55,7 +74,9 @@ export function RichCard({
             </Button>
           ))}
         </Stack>
-        <Typography variant="caption" color="text.secondary">{seen.size} vote{seen.size === 1 ? "" : "s"} received on this computer</Typography>
+        <Typography variant="caption" color="text.secondary">
+          {uniqueVoters.size} voter{uniqueVoters.size === 1 ? "" : "s"} ({seen.size} vote{seen.size === 1 ? "" : "s"}) received on this computer
+        </Typography>
       </Box>
     );
   }

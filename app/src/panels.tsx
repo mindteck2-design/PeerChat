@@ -9,8 +9,11 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Divider,
+  FormControl,
   IconButton,
   InputAdornment,
+  InputBase,
   LinearProgress,
   Link,
   List,
@@ -19,7 +22,9 @@ import {
   ListItemText,
   Menu,
   MenuItem,
+  Select,
   Stack,
+  Switch,
   Tab,
   Tabs,
   TextField,
@@ -34,6 +39,18 @@ import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFileRounded";
 import MoreVertIcon from "@mui/icons-material/MoreVertRounded";
 import ReplayIcon from "@mui/icons-material/ReplayRounded";
 import SearchIcon from "@mui/icons-material/SearchRounded";
+import BarChartRoundedIcon from "@mui/icons-material/BarChartRounded";
+import DragIndicatorRoundedIcon from "@mui/icons-material/DragIndicatorRounded";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import RadioButtonCheckedRoundedIcon from "@mui/icons-material/RadioButtonCheckedRounded";
+import RadioButtonUncheckedRoundedIcon from "@mui/icons-material/RadioButtonUncheckedRounded";
+import CheckBoxRoundedIcon from "@mui/icons-material/CheckBoxRounded";
+import CheckBoxOutlineBlankRoundedIcon from "@mui/icons-material/CheckBoxOutlineBlankRounded";
+import AccessTimeRoundedIcon from "@mui/icons-material/AccessTimeRounded";
+import CalendarTodayRoundedIcon from "@mui/icons-material/CalendarTodayRounded";
+import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
+import PeopleAltOutlinedIcon from "@mui/icons-material/PeopleAltOutlined";
+import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { SavedItem, TransferLog } from "./peer";
 import { peerApi } from "./peer";
@@ -720,6 +737,13 @@ export function AnnounceDialog({
   );
 }
 
+export interface PollSettings {
+  voting_type: "single" | "multiple";
+  duration: string;
+  show_voter_names: boolean;
+  allow_vote_change: boolean;
+}
+
 export function PollDialog({
   open: isOpen,
   onClose,
@@ -727,41 +751,551 @@ export function PollDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  onSend: (question: string, options: string[]) => Promise<void>;
+  onSend: (question: string, options: string[], settings?: PollSettings) => Promise<void>;
 }) {
   const [question, setQuestion] = useState("");
-  const [options, setOptions] = useState("Yes\nNo");
-  const parsed = useMemo(
-    () => options.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 8),
+  const [options, setOptions] = useState<string[]>(["", ""]);
+  const [votingType, setVotingType] = useState<"single" | "multiple">("single");
+  const [duration, setDuration] = useState("No end date");
+  const [showVoterNames, setShowVoterNames] = useState(true);
+  const [allowVoteChange, setAllowVoteChange] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setQuestion("");
+      setOptions(["", ""]);
+      setVotingType("single");
+      setDuration("No end date");
+      setShowVoterNames(true);
+      setAllowVoteChange(true);
+      setIsSubmitting(false);
+    }
+  }, [isOpen]);
+
+  const handleOptionChange = (idx: number, val: string) => {
+    setOptions((prev) => {
+      const next = [...prev];
+      next[idx] = val;
+      return next;
+    });
+  };
+
+  const handleAddOption = () => {
+    if (options.length < 10) {
+      setOptions((prev) => [...prev, ""]);
+    }
+  };
+
+  const handleRemoveOption = (idx: number) => {
+    if (options.length > 2) {
+      setOptions((prev) => prev.filter((_, i) => i !== idx));
+    }
+  };
+
+  const handleAttachOptionImage = async (_idx: number) => {
+    try {
+      await open({
+        multiple: false,
+        directory: false,
+        title: "Select option image",
+        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  const validOptions = useMemo(
+    () => options.map((s) => s.trim()).filter(Boolean),
     [options]
   );
+
+  const canCreate = Boolean(question.trim()) && validOptions.length >= 2 && !isSubmitting;
+
+  const handleCreate = async () => {
+    if (!canCreate) return;
+    setIsSubmitting(true);
+    try {
+      await onSend(question.trim(), validOptions, {
+        voting_type: votingType,
+        duration,
+        show_voter_names: showVoterNames,
+        allow_vote_change: allowVoteChange,
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   return (
-    <Dialog open={isOpen} onClose={onClose} fullWidth maxWidth="xs">
-      <DialogTitle>Group poll</DialogTitle>
-      <DialogContent>
-        <TextField fullWidth label="Question" value={question} onChange={(e) => setQuestion(e.target.value)} sx={{ mt: 1, mb: 1.5 }} />
-        <TextField
-          fullWidth
-          multiline
-          minRows={4}
-          label="Options, one per line"
-          value={options}
-          onChange={(e) => setOptions(e.target.value)}
-        />
-        <Typography variant="caption" color="text.secondary">
-          {parsed.length} options. Votes sync as encrypted messages. Results show only votes this computer has received.
+    <Dialog
+      open={isOpen}
+      onClose={onClose}
+      fullWidth
+      maxWidth="sm"
+      PaperProps={{
+        sx: {
+          maxWidth: 580,
+          borderRadius: 2.5,
+          bgcolor: "#0d131f",
+          backgroundImage: "none",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+          boxShadow: "0 24px 48px -12px rgba(0, 0, 0, 0.75)",
+          p: 1.5,
+          overflowY: "auto",
+        },
+      }}
+    >
+      {/* Header */}
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 2, pt: 1, pb: 2 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
+          <BarChartRoundedIcon sx={{ color: "#3b82f6", fontSize: 26 }} />
+          <Typography sx={{ fontWeight: 700, fontSize: "1.15rem", color: "#f8fafc" }}>
+            Create a poll
+          </Typography>
+        </Box>
+        <IconButton
+          onClick={onClose}
+          size="small"
+          sx={{
+            color: "rgba(255, 255, 255, 0.5)",
+            "&:hover": { color: "#fff", bgcolor: "rgba(255, 255, 255, 0.08)" },
+          }}
+        >
+          <CloseIcon sx={{ fontSize: 20 }} />
+        </IconButton>
+      </Box>
+
+      {/* Body */}
+      <Box sx={{ px: 2, pb: 1 }}>
+        {/* Question card */}
+        <Box
+          sx={{
+            bgcolor: "#080d16",
+            border: "1px solid rgba(255, 255, 255, 0.08)",
+            borderRadius: 2,
+            p: 2,
+            mb: 2.5,
+            transition: "border-color 0.15s ease",
+            "&:focus-within": {
+              borderColor: "#3b82f6",
+            },
+          }}
+        >
+          <Typography sx={{ fontSize: "0.88rem", fontWeight: 600, color: "#f8fafc", mb: 0.5 }}>
+            Question
+          </Typography>
+          <InputBase
+            fullWidth
+            multiline
+            minRows={2}
+            maxRows={4}
+            placeholder="Type your question here..."
+            value={question}
+            onChange={(e) => {
+              if (e.target.value.length <= 200) {
+                setQuestion(e.target.value);
+              }
+            }}
+            sx={{
+              fontSize: "0.95rem",
+              color: "#f8fafc",
+              "& ::placeholder": { color: "rgba(255, 255, 255, 0.35)", opacity: 1 },
+            }}
+          />
+          <Box sx={{ display: "flex", justifyContent: "flex-end", mt: 0.5 }}>
+            <Typography sx={{ fontSize: "0.78rem", color: "rgba(255, 255, 255, 0.4)" }}>
+              {question.length}/200
+            </Typography>
+          </Box>
+        </Box>
+
+        {/* Options section */}
+        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.25 }}>
+          <Typography sx={{ fontSize: "0.92rem", fontWeight: 700, color: "#f8fafc" }}>
+            Options
+          </Typography>
+          <Typography sx={{ fontSize: "0.8rem", color: "rgba(255, 255, 255, 0.45)" }}>
+            Options (2–10)
+          </Typography>
+        </Box>
+
+        <Stack spacing={1.25} sx={{ mb: 1.5 }}>
+          {options.map((opt, idx) => (
+            <Box
+              key={idx}
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 1.25,
+              }}
+            >
+              <DragIndicatorRoundedIcon
+                sx={{
+                  color: "rgba(255, 255, 255, 0.3)",
+                  fontSize: 20,
+                  flexShrink: 0,
+                  cursor: "grab",
+                }}
+              />
+              <Box
+                sx={{
+                  flex: 1,
+                  display: "flex",
+                  alignItems: "center",
+                  bgcolor: "#080d16",
+                  border: "1px solid rgba(255, 255, 255, 0.08)",
+                  borderRadius: 2,
+                  px: 1.75,
+                  py: 0.85,
+                  transition: "border-color 0.15s ease",
+                  "&:focus-within": {
+                    borderColor: "#3b82f6",
+                  },
+                }}
+              >
+                <InputBase
+                  fullWidth
+                  placeholder={`Option ${idx + 1}`}
+                  value={opt}
+                  onChange={(e) => handleOptionChange(idx, e.target.value)}
+                  sx={{
+                    fontSize: "0.9rem",
+                    color: "#f8fafc",
+                    "& ::placeholder": { color: "rgba(255, 255, 255, 0.35)", opacity: 1 },
+                  }}
+                />
+                <Tooltip title="Attach image (optional)">
+                  <IconButton
+                    size="small"
+                    onClick={() => handleAttachOptionImage(idx)}
+                    sx={{
+                      color: "rgba(255, 255, 255, 0.35)",
+                      p: 0.5,
+                      ml: 0.5,
+                      "&:hover": { color: "#3b82f6" },
+                    }}
+                  >
+                    <ImageOutlinedIcon sx={{ fontSize: 18 }} />
+                  </IconButton>
+                </Tooltip>
+              </Box>
+              <IconButton
+                size="small"
+                disabled={options.length <= 2}
+                onClick={() => handleRemoveOption(idx)}
+                sx={{
+                  color: "rgba(255, 255, 255, 0.4)",
+                  bgcolor: "rgba(255, 255, 255, 0.03)",
+                  border: "1px solid rgba(255, 255, 255, 0.06)",
+                  p: 0.75,
+                  opacity: options.length <= 2 ? 0.25 : 0.85,
+                  "&:hover": {
+                    bgcolor: "rgba(239, 68, 68, 0.15)",
+                    color: "#f87171",
+                    borderColor: "rgba(239, 68, 68, 0.3)",
+                  },
+                }}
+              >
+                <CloseIcon sx={{ fontSize: 15 }} />
+              </IconButton>
+            </Box>
+          ))}
+        </Stack>
+
+        {/* Add option button */}
+        {options.length < 10 && (
+          <Button
+            fullWidth
+            onClick={handleAddOption}
+            startIcon={<AddRoundedIcon sx={{ fontSize: 18 }} />}
+            sx={{
+              py: 1.25,
+              mb: 2.75,
+              color: "#3b82f6",
+              border: "1px dashed rgba(59, 130, 246, 0.4)",
+              borderRadius: 2,
+              bgcolor: "rgba(59, 130, 246, 0.03)",
+              fontWeight: 600,
+              fontSize: "0.88rem",
+              textTransform: "none",
+              "&:hover": {
+                bgcolor: "rgba(59, 130, 246, 0.08)",
+                border: "1px dashed #3b82f6",
+              },
+            }}
+          >
+            Add option
+          </Button>
+        )}
+
+        {/* Poll settings section */}
+        <Typography sx={{ fontSize: "0.92rem", fontWeight: 700, color: "#f8fafc", mb: 1.25 }}>
+          Poll settings
         </Typography>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
+
+        <Box
+          sx={{
+            bgcolor: "#080d16",
+            border: "1px solid rgba(255, 255, 255, 0.08)",
+            borderRadius: 2.5,
+            p: 2.25,
+          }}
+        >
+          {/* Top row: Voting type + Poll duration */}
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: { xs: "column", sm: "row" },
+              gap: 2.5,
+            }}
+          >
+            {/* Voting type */}
+            <Box sx={{ flex: 1.25 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1.25 }}>
+                <BarChartRoundedIcon sx={{ color: "#3b82f6", fontSize: 19 }} />
+                <Typography sx={{ fontSize: "0.88rem", fontWeight: 600, color: "#f8fafc" }}>
+                  Voting type
+                </Typography>
+              </Box>
+              <Stack direction="row" spacing={1.25}>
+                {/* Single choice card */}
+                <Box
+                  onClick={() => setVotingType("single")}
+                  sx={{
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 1,
+                    p: 1.25,
+                    borderRadius: 2,
+                    cursor: "pointer",
+                    transition: "all 0.15s ease",
+                    border: votingType === "single" ? "1.5px solid #3b82f6" : "1px solid rgba(255, 255, 255, 0.08)",
+                    bgcolor: votingType === "single" ? "rgba(37, 99, 235, 0.16)" : "transparent",
+                    boxShadow: votingType === "single" ? "0 0 10px rgba(59, 130, 246, 0.15)" : "none",
+                    "&:hover": {
+                      borderColor: votingType === "single" ? "#3b82f6" : "rgba(255, 255, 255, 0.15)",
+                      bgcolor: votingType === "single" ? "rgba(37, 99, 235, 0.2)" : "rgba(255, 255, 255, 0.02)",
+                    },
+                  }}
+                >
+                  {votingType === "single" ? (
+                    <RadioButtonCheckedRoundedIcon sx={{ color: "#3b82f6", fontSize: 18, mt: 0.2 }} />
+                  ) : (
+                    <RadioButtonUncheckedRoundedIcon sx={{ color: "rgba(255, 255, 255, 0.35)", fontSize: 18, mt: 0.2 }} />
+                  )}
+                  <Box>
+                    <Typography sx={{ fontSize: "0.82rem", fontWeight: 600, color: "#f8fafc", lineHeight: 1.2 }}>
+                      Single choice
+                    </Typography>
+                    <Typography sx={{ fontSize: "0.72rem", color: "rgba(255, 255, 255, 0.45)", mt: 0.25 }}>
+                      One option per vote
+                    </Typography>
+                  </Box>
+                </Box>
+
+                {/* Multiple choice card */}
+                <Box
+                  onClick={() => setVotingType("multiple")}
+                  sx={{
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 1,
+                    p: 1.25,
+                    borderRadius: 2,
+                    cursor: "pointer",
+                    transition: "all 0.15s ease",
+                    border: votingType === "multiple" ? "1.5px solid #3b82f6" : "1px solid rgba(255, 255, 255, 0.08)",
+                    bgcolor: votingType === "multiple" ? "rgba(37, 99, 235, 0.16)" : "transparent",
+                    boxShadow: votingType === "multiple" ? "0 0 10px rgba(59, 130, 246, 0.15)" : "none",
+                    "&:hover": {
+                      borderColor: votingType === "multiple" ? "#3b82f6" : "rgba(255, 255, 255, 0.15)",
+                      bgcolor: votingType === "multiple" ? "rgba(37, 99, 235, 0.2)" : "rgba(255, 255, 255, 0.02)",
+                    },
+                  }}
+                >
+                  {votingType === "multiple" ? (
+                    <CheckBoxRoundedIcon sx={{ color: "#3b82f6", fontSize: 18, mt: 0.2 }} />
+                  ) : (
+                    <CheckBoxOutlineBlankRoundedIcon sx={{ color: "rgba(255, 255, 255, 0.35)", fontSize: 18, mt: 0.2 }} />
+                  )}
+                  <Box>
+                    <Typography sx={{ fontSize: "0.82rem", fontWeight: 600, color: "#f8fafc", lineHeight: 1.2 }}>
+                      Multiple choice
+                    </Typography>
+                    <Typography sx={{ fontSize: "0.72rem", color: "rgba(255, 255, 255, 0.45)", mt: 0.25 }}>
+                      Multiple options allowed
+                    </Typography>
+                  </Box>
+                </Box>
+              </Stack>
+            </Box>
+
+            {/* Poll duration */}
+            <Box sx={{ flex: 0.95 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1.25 }}>
+                <AccessTimeRoundedIcon sx={{ color: "#3b82f6", fontSize: 19 }} />
+                <Typography sx={{ fontSize: "0.88rem", fontWeight: 600, color: "#f8fafc" }}>
+                  Poll duration{" "}
+                  <Box component="span" sx={{ color: "rgba(255, 255, 255, 0.45)", fontWeight: 400, fontSize: "0.8rem" }}>
+                    (optional)
+                  </Box>
+                </Typography>
+              </Box>
+              <FormControl fullWidth size="small">
+                <Select
+                  value={duration}
+                  onChange={(e) => setDuration(e.target.value)}
+                  startAdornment={
+                    <CalendarTodayRoundedIcon
+                      sx={{ color: "rgba(255, 255, 255, 0.45)", fontSize: 17, mr: 1, ml: 0.5 }}
+                    />
+                  }
+                  sx={{
+                    bgcolor: "transparent",
+                    color: "#f8fafc",
+                    fontSize: "0.85rem",
+                    borderRadius: 2,
+                    border: "1px solid rgba(255, 255, 255, 0.08)",
+                    "& .MuiOutlinedInput-notchedOutline": { border: "none" },
+                    "& .MuiSelect-select": { py: 1.2, display: "flex", alignItems: "center" },
+                    "& .MuiSvgIcon-root": { color: "rgba(255, 255, 255, 0.5)" },
+                    "&:hover": { border: "1px solid rgba(255, 255, 255, 0.15)" },
+                    "&.Mui-focused": { border: "1px solid #3b82f6" },
+                  }}
+                  MenuProps={{
+                    PaperProps: {
+                      sx: {
+                        bgcolor: "#0b101b",
+                        border: "1px solid rgba(255, 255, 255, 0.1)",
+                        borderRadius: 2,
+                        color: "#f8fafc",
+                      },
+                    },
+                  }}
+                >
+                  <MenuItem value="No end date">No end date</MenuItem>
+                  <MenuItem value="1 hour">1 hour</MenuItem>
+                  <MenuItem value="6 hours">6 hours</MenuItem>
+                  <MenuItem value="24 hours">24 hours</MenuItem>
+                  <MenuItem value="3 days">3 days</MenuItem>
+                  <MenuItem value="1 week">1 week</MenuItem>
+                </Select>
+              </FormControl>
+            </Box>
+          </Box>
+
+          <Divider sx={{ borderColor: "rgba(255, 255, 255, 0.06)", my: 2 }} />
+
+          {/* Toggle 1: Show voter names */}
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+              <VisibilityOutlinedIcon sx={{ color: "#3b82f6", fontSize: 22 }} />
+              <Box>
+                <Typography sx={{ fontSize: "0.88rem", fontWeight: 600, color: "#f8fafc" }}>
+                  Show voter names
+                </Typography>
+                <Typography sx={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.45)" }}>
+                  Everyone can see who voted for each option
+                </Typography>
+              </Box>
+            </Box>
+            <Switch
+              checked={showVoterNames}
+              onChange={(e) => setShowVoterNames(e.target.checked)}
+              sx={{
+                "& .MuiSwitch-switchBase.Mui-checked": {
+                  color: "#fff",
+                  "& + .MuiSwitch-track": {
+                    backgroundColor: "#2563eb",
+                    opacity: 1,
+                  },
+                },
+              }}
+            />
+          </Box>
+
+          <Divider sx={{ borderColor: "rgba(255, 255, 255, 0.06)", my: 2 }} />
+
+          {/* Toggle 2: Allow vote change */}
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+              <PeopleAltOutlinedIcon sx={{ color: "#3b82f6", fontSize: 22 }} />
+              <Box>
+                <Typography sx={{ fontSize: "0.88rem", fontWeight: 600, color: "#f8fafc" }}>
+                  Allow vote change
+                </Typography>
+                <Typography sx={{ fontSize: "0.75rem", color: "rgba(255, 255, 255, 0.45)" }}>
+                  Members can change their vote
+                </Typography>
+              </Box>
+            </Box>
+            <Switch
+              checked={allowVoteChange}
+              onChange={(e) => setAllowVoteChange(e.target.checked)}
+              sx={{
+                "& .MuiSwitch-switchBase.Mui-checked": {
+                  color: "#fff",
+                  "& + .MuiSwitch-track": {
+                    backgroundColor: "#2563eb",
+                    opacity: 1,
+                  },
+                },
+              }}
+            />
+          </Box>
+        </Box>
+      </Box>
+
+      {/* Footer Actions */}
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 1.5, px: 2, pt: 2.5, pb: 1 }}>
+        <Button
+          onClick={onClose}
+          sx={{
+            color: "rgba(255, 255, 255, 0.8)",
+            bgcolor: "rgba(255, 255, 255, 0.04)",
+            border: "1px solid rgba(255, 255, 255, 0.08)",
+            borderRadius: 2,
+            px: 3,
+            py: 1,
+            fontSize: "0.9rem",
+            fontWeight: 600,
+            textTransform: "none",
+            "&:hover": {
+              bgcolor: "rgba(255, 255, 255, 0.08)",
+              color: "#fff",
+            },
+          }}
+        >
+          Cancel
+        </Button>
         <Button
           variant="contained"
-          disabled={!question.trim() || parsed.length < 2}
-          onClick={() => onSend(question.trim(), parsed)}
+          disabled={!canCreate}
+          onClick={handleCreate}
+          sx={{
+            bgcolor: "#2563eb",
+            "&:hover": { bgcolor: "#1d4ed8" },
+            color: "#fff",
+            borderRadius: 2,
+            px: 3,
+            py: 1,
+            fontSize: "0.9rem",
+            fontWeight: 600,
+            textTransform: "none",
+            boxShadow: "0 4px 12px rgba(37, 99, 235, 0.3)",
+            "&.Mui-disabled": {
+              bgcolor: "rgba(37, 99, 235, 0.3)",
+              color: "rgba(255, 255, 255, 0.4)",
+            },
+          }}
         >
-          Create poll
+          {isSubmitting ? "Creating..." : "Create poll"}
         </Button>
-      </DialogActions>
+      </Box>
     </Dialog>
   );
 }
