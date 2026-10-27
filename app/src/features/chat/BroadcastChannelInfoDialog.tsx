@@ -9,6 +9,7 @@ import {
   Stack,
   Tooltip,
   Typography,
+  useTheme,
 } from "@mui/material";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import ArrowBackIosNewRoundedIcon from "@mui/icons-material/ArrowBackIosNewRounded";
@@ -103,6 +104,9 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
     setHighlightMsgId(messageId);
   };
 
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+
   return (
     <Dialog
       open={isOpen}
@@ -115,7 +119,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
       PaperProps={{
         sx: {
           borderRadius: 2,
-          bgcolor: "#141c2b",
+          bgcolor: "background.paper",
           backgroundImage: "none",
           border: "1px solid",
           borderColor: "divider",
@@ -157,18 +161,18 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
               <IconButton
                 size="small"
                 onClick={() => setBroadcastInfoOpen(false)}
-                sx={{ color: "#FFFFFF", p: 0.5, mr: 0.25 }}
+                sx={{ color: "text.primary", p: 0.5, mr: 0.25, "&:hover": { bgcolor: "action.hover" } }}
               >
                 <ArrowBackIosNewRoundedIcon sx={{ fontSize: 16 }} />
               </IconButton>
-              <Typography variant="h6" fontWeight={700} fontSize={18} color="#FFFFFF">
+              <Typography variant="h6" fontWeight={700} fontSize={18} color="text.primary">
                 Channel Info
               </Typography>
             </Stack>
             <IconButton
               size="small"
               onClick={() => setBroadcastInfoOpen(false)}
-              sx={{ color: "text.secondary" }}
+              sx={{ color: "text.secondary", "&:hover": { color: "text.primary" } }}
             >
               <CloseRoundedIcon fontSize="small" />
             </IconButton>
@@ -179,10 +183,11 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
               {/* CARD 1: Identity & Action Bar */}
               <Box
                 sx={{
-                  bgcolor: "rgba(23, 31, 45, 0.7)",
+                  bgcolor: isDark ? "rgba(23, 31, 45, 0.7)" : "action.hover",
                   borderRadius: 1.5,
                   p: 2.25,
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
+                  border: "1px solid",
+                  borderColor: "divider",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
@@ -205,7 +210,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
                   </Avatar>
 
                   <Box minWidth={0} flex={1}>
-                    <Typography fontWeight={700} fontSize={18} color="#FFFFFF" noWrap>
+                    <Typography fontWeight={700} fontSize={18} color="text.primary" noWrap>
                       {channelTitle}
                     </Typography>
 
@@ -213,7 +218,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
                       <Typography
                         variant="caption"
                         sx={{
-                          color: "primary.light",
+                          color: "primary.main",
                           fontWeight: 600,
                           fontSize: 12,
                         }}
@@ -250,8 +255,8 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
                       sx={{
                         width: 42,
                         height: 42,
-                        bgcolor: "rgba(255, 255, 255, 0.06)",
-                        color: "#FFFFFF",
+                        bgcolor: isDark ? "rgba(255, 255, 255, 0.06)" : "action.selected",
+                        color: "text.primary",
                         "&:hover": { bgcolor: "action.hover" },
                       }}
                     >
@@ -269,8 +274,10 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
                       sx={{
                         width: 42,
                         height: 42,
-                        bgcolor: isPinned ? "rgba(130, 169, 248, 0.18)" : "rgba(255, 255, 255, 0.06)",
-                        color: isPinned ? "primary.main" : "#FFFFFF",
+                        bgcolor: isPinned
+                          ? isDark ? "rgba(130, 169, 248, 0.18)" : "rgba(37, 99, 235, 0.12)"
+                          : isDark ? "rgba(255, 255, 255, 0.06)" : "action.selected",
+                        color: isPinned ? "primary.main" : "text.primary",
                         "&:hover": { bgcolor: "action.hover" },
                       }}
                     >
@@ -292,8 +299,10 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
                       sx={{
                         width: 42,
                         height: 42,
-                        bgcolor: isMuted ? "rgba(240, 120, 120, 0.15)" : "rgba(255, 255, 255, 0.06)",
-                        color: isMuted ? "error.main" : "#FFFFFF",
+                        bgcolor: isMuted
+                          ? isDark ? "rgba(240, 120, 120, 0.15)" : "rgba(239, 68, 68, 0.12)"
+                          : isDark ? "rgba(255, 255, 255, 0.06)" : "action.selected",
+                        color: isMuted ? "error.main" : "text.primary",
                         "&:hover": { bgcolor: "action.hover" },
                       }}
                     >
@@ -313,10 +322,11 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
               {/* CARD 2: Channel Purpose & Scope */}
               <Box
                 sx={{
-                  bgcolor: "rgba(23, 31, 45, 0.7)",
+                  bgcolor: isDark ? "rgba(23, 31, 45, 0.7)" : "action.hover",
                   borderRadius: 1.5,
                   p: 2,
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
+                  border: "1px solid",
+                  borderColor: "divider",
                 }}
               >
                 <Stack direction="row" spacing={0.75} alignItems="center" mb={0.75}>
@@ -325,7 +335,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
                     About Channel
                   </Typography>
                 </Stack>
-                <Typography fontSize={13.5} fontWeight={400} color="#FFFFFF" lineHeight={1.5}>
+                <Typography fontSize={13.5} fontWeight={400} color="text.primary" lineHeight={1.5}>
                   {channelPurpose}
                 </Typography>
               </Box>
@@ -333,10 +343,11 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
               {/* CARD 3: Audience & Policy Summary */}
               <Box
                 sx={{
-                  bgcolor: "rgba(23, 31, 45, 0.7)",
+                  bgcolor: isDark ? "rgba(23, 31, 45, 0.7)" : "action.hover",
                   borderRadius: 1.5,
                   p: 2,
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
+                  border: "1px solid",
+                  borderColor: "divider",
                 }}
               >
                 <Stack direction="row" spacing={0.75} alignItems="center" mb={1.25}>
@@ -351,7 +362,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
                     <Typography variant="caption" color="text.secondary" fontSize={12}>
                       Audience Scope
                     </Typography>
-                    <Typography variant="caption" color="#FFFFFF" fontWeight={600} fontSize={12}>
+                    <Typography variant="caption" color="text.primary" fontWeight={600} fontSize={12}>
                       {audienceLabel}
                     </Typography>
                   </Box>
@@ -359,7 +370,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
                     <Typography variant="caption" color="text.secondary" fontSize={12}>
                       Subscribers
                     </Typography>
-                    <Typography variant="caption" color="#FFFFFF" fontWeight={600} fontSize={12}>
+                    <Typography variant="caption" color="text.primary" fontWeight={600} fontSize={12}>
                       {subscriberCount} member{subscriberCount === 1 ? "" : "s"} on LAN
                     </Typography>
                   </Box>
@@ -367,7 +378,7 @@ export function BroadcastChannelInfoDialog({ vm }: { vm: ChatScreenVm }) {
                     <Typography variant="caption" color="text.secondary" fontSize={12}>
                       Broadcasting Authority
                     </Typography>
-                    <Typography variant="caption" color="primary.light" fontWeight={600} fontSize={12}>
+                    <Typography variant="caption" color="primary.main" fontWeight={600} fontSize={12}>
                       Deputy Manager and above
                     </Typography>
                   </Box>

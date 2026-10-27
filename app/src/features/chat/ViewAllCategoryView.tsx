@@ -276,7 +276,7 @@ export function ViewAllCategoryView({
           px: 2.5,
           py: 1.5,
           borderBottom: "1px solid",
-          borderColor: "rgba(255, 255, 255, 0.05)",
+          borderColor: "divider",
           flexWrap: "wrap",
           gap: 1.5,
         }}

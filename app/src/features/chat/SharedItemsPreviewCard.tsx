@@ -118,10 +118,11 @@ export function SharedItemsPreviewCard({
   return (
     <Box
       sx={{
-        bgcolor: "rgba(23, 31, 45, 0.7)",
+        bgcolor: (theme) => theme.palette.mode === "dark" ? "rgba(23, 31, 45, 0.7)" : "action.hover",
         borderRadius: 1.5,
         p: 2,
-        border: "1px solid rgba(255, 255, 255, 0.05)",
+        border: "1px solid",
+        borderColor: "divider",
       }}
     >
       <Stack direction="row" alignItems="flex-start" justifyContent="space-between" spacing={1} mb={1.25}>
@@ -141,7 +142,7 @@ export function SharedItemsPreviewCard({
             <PhotoLibraryRoundedIcon sx={{ fontSize: 20 }} />
           </Box>
           <Box minWidth={0}>
-            <Typography fontWeight={700} fontSize={14.5} color="#FFFFFF" noWrap>
+            <Typography fontWeight={700} fontSize={14.5} color="text.primary" noWrap>
               Media, files and links
             </Typography>
             <Typography variant="caption" color="text.secondary" fontSize={12} display="block">
@@ -306,8 +307,9 @@ export function SharedItemsPreviewCard({
                   aspectRatio: "1",
                   borderRadius: 1,
                   overflow: "hidden",
-                  bgcolor: "rgba(130, 169, 248, 0.12)",
-                  border: "1px solid rgba(130, 169, 248, 0.25)",
+                  bgcolor: (theme) => theme.palette.mode === "dark" ? "rgba(130, 169, 248, 0.12)" : "rgba(37, 99, 235, 0.08)",
+                  border: "1px solid",
+                  borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(130, 169, 248, 0.25)" : "rgba(37, 99, 235, 0.2)",
                   cursor: "pointer",
                   transition: "transform 0.12s ease",
                   "&:hover": { transform: "scale(1.03)" },
@@ -324,7 +326,7 @@ export function SharedItemsPreviewCard({
                   sx={{
                     fontSize: 9.5,
                     fontWeight: 700,
-                    color: "#FFFFFF",
+                    color: "text.primary",
                     textAlign: "center",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
@@ -357,7 +359,8 @@ export function SharedItemsPreviewCard({
                 aspectRatio: "1",
                 borderRadius: 1,
                 overflow: "hidden",
-                border: "1px solid rgba(255, 255, 255, 0.1)",
+                border: "1px solid",
+                borderColor: "divider",
                 cursor: "pointer",
                 position: "relative",
                 bgcolor: "action.hover",
@@ -385,7 +388,7 @@ export function SharedItemsPreviewCard({
                   position: "relative",
                   fontSize: 18,
                   fontWeight: 800,
-                  color: "#FFFFFF",
+                  color: "text.primary",
                   letterSpacing: 0.3,
                 }}
               >

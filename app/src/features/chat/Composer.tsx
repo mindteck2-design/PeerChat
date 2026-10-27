@@ -2,7 +2,7 @@
 import { parseCalendarShare } from "../calendar/CalendarShareCard";
 import { useLayoutEffect, useState } from "react";
 import {
-  Box, Button, Chip, IconButton, List, ListItemButton, ListItemText, Paper,
+  Box, Button, Chip, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Paper,
   Stack, TextField, Typography,
 } from "@mui/material";
 import AttachFileIcon from "@mui/icons-material/AttachFileRounded";
@@ -19,12 +19,41 @@ import PollIcon from "@mui/icons-material/PollRounded";
 import ReplyIcon from "@mui/icons-material/ReplyRounded";
 import ScreenshotMonitorIcon from "@mui/icons-material/ScreenshotMonitorRounded";
 import SendIcon from "@mui/icons-material/SendRounded";
+import CodeRoundedIcon from "@mui/icons-material/CodeRounded";
+import CalendarTodayRoundedIcon from "@mui/icons-material/CalendarTodayRounded";
+import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
+import HelpOutlineRoundedIcon from "@mui/icons-material/HelpOutlineRounded";
+import PeopleAltOutlinedIcon from "@mui/icons-material/PeopleAltOutlined";
 import Tooltip from "@mui/material/Tooltip";
 import { formatBytes, truncate } from "../../shared/format";
 import { messageAttachmentIds } from "../../shared/messageMeta";
 import { isImageFileName, isVideoFileName } from "../../MediaAlbum";
 import { canBroadcastRole } from "../profile/roles";
+import { SLASH_COMMANDS, type CommandContext } from "../../commands";
 import type { ChatScreenVm } from "./chatVm";
+
+function getCommandIcon(cmdName: string) {
+  switch (cmdName) {
+    case "/poll":
+      return <PollIcon fontSize="small" />;
+    case "/announce":
+      return <CampaignIcon fontSize="small" />;
+    case "/snippet":
+      return <CodeRoundedIcon fontSize="small" />;
+    case "/bundle":
+      return <FolderZipIcon fontSize="small" />;
+    case "/send":
+      return <AttachFileIcon fontSize="small" />;
+    case "/calendar":
+      return <CalendarTodayRoundedIcon fontSize="small" />;
+    case "/peers":
+      return <PeopleAltOutlinedIcon fontSize="small" />;
+    case "/search":
+      return <SearchRoundedIcon fontSize="small" />;
+    default:
+      return <HelpOutlineRoundedIcon fontSize="small" />;
+  }
+}
 
 function stagedExt(name: string) {
   const i = name.lastIndexOf(".");
@@ -218,6 +247,15 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
   } = vm;
 
   const [broadcastMode, setBroadcastMode] = useState<"text" | "announcement">("text");
+  const [slashMenuAnchor, setSlashMenuAnchor] = useState<HTMLElement | null>(null);
+
+  const isGroup = active?.kind === "group";
+  const commandCtx: CommandContext = {
+    hasConversation: !!active,
+    isGroup: !!isGroup,
+    hasMessageSelection: !!replyTo,
+  };
+  const availableCommands = SLASH_COMMANDS.filter((c) => c.available(commandCtx));
   const canUserBroadcast = !isAnnounceBoard || (canBroadcast !== undefined ? canBroadcast : canBroadcastRole(myDesignation));
 
   // Single-line → horizontal pill; multi-line → softer radius + toolbar under text.
@@ -248,6 +286,35 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
 
   const toolButtons = (
     <Stack direction="row" spacing={0.15} alignItems="center" sx={{ flexShrink: 0 }}>
+      <Tooltip title="Commands & shortcuts (/poll, /announce, ...)">
+        <IconButton
+          aria-label="Commands"
+          size="small"
+          onClick={(e) => setSlashMenuAnchor(e.currentTarget)}
+          sx={{
+            color: "text.secondary",
+            "&:hover": { color: "primary.main", bgcolor: "action.hover" },
+          }}
+        >
+          <Box
+            sx={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 22,
+              height: 22,
+              borderRadius: "50%",
+              border: "1.5px solid currentColor",
+              fontWeight: 800,
+              fontSize: 12.5,
+              lineHeight: 1,
+              fontFamily: "monospace",
+            }}
+          >
+            /
+          </Box>
+        </IconButton>
+      </Tooltip>
       <IconButton
         aria-label="Emoji picker"
         onClick={(e) => setEmojiAnchor(e.currentTarget)}
@@ -561,6 +628,55 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                 />
               </Stack>
             )}
+            {active?.kind === "group" && !isAnnounceBoard && !editingMessage && (
+              <Stack direction="row" spacing={0.85} alignItems="center" sx={{ mb: 0.5, flexWrap: "wrap", gap: 0.65 }}>
+                <Chip
+                  icon={<PollIcon sx={{ fontSize: 16 }} />}
+                  label="/poll"
+                  size="small"
+                  variant="outlined"
+                  onClick={() => void runSlash("/poll")}
+                  sx={{
+                    fontWeight: 600,
+                    fontSize: 12,
+                    cursor: "pointer",
+                    borderColor: "divider",
+                    bgcolor: (theme) => theme.palette.mode === "dark" ? "rgba(255, 255, 255, 0.03)" : "action.hover",
+                    "&:hover": { bgcolor: "action.selected", borderColor: "primary.main" },
+                  }}
+                />
+                <Chip
+                  icon={<CampaignIcon sx={{ fontSize: 16 }} />}
+                  label="/announce"
+                  size="small"
+                  variant="outlined"
+                  onClick={() => void runSlash("/announce")}
+                  sx={{
+                    fontWeight: 600,
+                    fontSize: 12,
+                    cursor: "pointer",
+                    borderColor: "divider",
+                    bgcolor: (theme) => theme.palette.mode === "dark" ? "rgba(255, 255, 255, 0.03)" : "action.hover",
+                    "&:hover": { bgcolor: "action.selected", borderColor: "primary.main" },
+                  }}
+                />
+                <Chip
+                  label="More / commands…"
+                  size="small"
+                  variant="outlined"
+                  onClick={(e) => setSlashMenuAnchor(e.currentTarget)}
+                  sx={{
+                    fontWeight: 500,
+                    fontSize: 11.5,
+                    cursor: "pointer",
+                    borderColor: "divider",
+                    color: "text.secondary",
+                    bgcolor: (theme) => theme.palette.mode === "dark" ? "rgba(255, 255, 255, 0.02)" : "transparent",
+                    "&:hover": { bgcolor: "action.hover", color: "text.primary" },
+                  }}
+                />
+              </Stack>
+            )}
             {editingMessage && (
               <Box
                 sx={{
@@ -701,7 +817,9 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                       ? "Edit message… (Esc to cancel)"
                       : isAnnounceBoard
                         ? "Broadcast a message… (Shift+Enter for new line)"
-                        : "Type a message…"
+                        : active?.kind === "group"
+                          ? "Type a message or '/' for commands (/poll, /announce)…"
+                          : "Type a message or '/' for commands…"
                 }
                 value={text}
                 variant="standard"
@@ -817,6 +935,63 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
           </Paper>
         )}
 
+      {/* Quick Slash Commands Popover Menu */}
+      <Menu
+        anchorEl={slashMenuAnchor}
+        open={Boolean(slashMenuAnchor)}
+        onClose={() => setSlashMenuAnchor(null)}
+        PaperProps={{
+          sx: {
+            borderRadius: 2,
+            minWidth: 260,
+            maxWidth: 320,
+            py: 0.5,
+            bgcolor: "background.paper",
+            border: "1px solid",
+            borderColor: "divider",
+            boxShadow: (theme) =>
+              theme.palette.mode === "dark"
+                ? "0 12px 32px rgba(0,0,0,0.5)"
+                : "0 8px 24px rgba(0,0,0,0.12)",
+          },
+        }}
+      >
+        <Box sx={{ px: 2, py: 1, borderBottom: "1px solid", borderColor: "divider" }}>
+          <Typography
+            sx={{
+              fontSize: "0.76rem",
+              fontWeight: 700,
+              color: "text.secondary",
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+            }}
+          >
+            Commands & shortcuts
+          </Typography>
+        </Box>
+        {availableCommands.map((cmd) => (
+          <MenuItem
+            key={cmd.name}
+            onClick={() => {
+              setSlashMenuAnchor(null);
+              void runSlash(cmd.name);
+            }}
+            sx={{ py: 1, px: 2, gap: 1.5 }}
+          >
+            <ListItemIcon sx={{ minWidth: 28, color: "primary.main" }}>
+              {getCommandIcon(cmd.name)}
+            </ListItemIcon>
+            <Box sx={{ minWidth: 0, flex: 1 }}>
+              <Typography sx={{ fontSize: "0.86rem", fontWeight: 700, color: "text.primary" }}>
+                {cmd.name}
+              </Typography>
+              <Typography sx={{ fontSize: "0.75rem", color: "text.secondary", whiteSpace: "normal" }}>
+                {cmd.hint}
+              </Typography>
+            </Box>
+          </MenuItem>
+        ))}
+      </Menu>
     </>
   );
 }

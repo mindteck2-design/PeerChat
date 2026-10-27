@@ -11,6 +11,7 @@ import {
   TextField,
   Tooltip,
   Typography,
+  useTheme,
 } from "@mui/material";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import ArrowBackIosNewRoundedIcon from "@mui/icons-material/ArrowBackIosNewRounded";
@@ -143,6 +144,9 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
     setHighlightMsgId(messageId);
   };
 
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+
   return (
     <Dialog
       open={isOpen}
@@ -155,7 +159,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
       PaperProps={{
         sx: {
           borderRadius: 2,
-          bgcolor: "#141c2b",
+          bgcolor: "background.paper",
           backgroundImage: "none",
           border: "1px solid",
           borderColor: "divider",
@@ -197,18 +201,18 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
               <IconButton
                 size="small"
                 onClick={() => setChatInfoOpen(false)}
-                sx={{ color: "#FFFFFF", p: 0.5, mr: 0.25 }}
+                sx={{ color: "text.primary", p: 0.5, mr: 0.25, "&:hover": { bgcolor: "action.hover" } }}
               >
                 <ArrowBackIosNewRoundedIcon sx={{ fontSize: 16 }} />
               </IconButton>
-              <Typography variant="h6" fontWeight={700} fontSize={18} color="#FFFFFF">
+              <Typography variant="h6" fontWeight={700} fontSize={18} color="text.primary">
                 {displayName}
               </Typography>
             </Stack>
             <IconButton
               size="small"
               onClick={() => setChatInfoOpen(false)}
-              sx={{ color: "text.secondary" }}
+              sx={{ color: "text.secondary", "&:hover": { color: "text.primary" } }}
             >
               <CloseRoundedIcon fontSize="small" />
             </IconButton>
@@ -219,10 +223,11 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
               {/* ── CARD 1: TOP PROFILE HEADER ── */}
               <Box
                 sx={{
-                  bgcolor: "rgba(23, 31, 45, 0.7)",
+                  bgcolor: isDark ? "rgba(23, 31, 45, 0.7)" : "action.hover",
                   borderRadius: 1.5,
                   p: 2.25,
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
+                  border: "1px solid",
+                  borderColor: "divider",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
@@ -252,14 +257,16 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                         width: 14,
                         height: 14,
                         borderRadius: "50%",
-                        border: "2.5px solid #141c2b",
+                        border: 2.5,
+                        borderStyle: "solid",
+                        borderColor: "background.paper",
                         bgcolor: isOnline ? "success.main" : "grey.500",
                       }}
                     />
                   </Box>
 
                   <Box minWidth={0} flex={1}>
-                    <Typography fontWeight={700} fontSize={18.5} color="#FFFFFF" noWrap>
+                    <Typography fontWeight={700} fontSize={18.5} color="text.primary" noWrap>
                       {displayName}
                     </Typography>
 
@@ -294,7 +301,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                         variant="caption"
                         sx={{
                           fontSize: 12,
-                          color: "#FFFFFF",
+                          color: "text.primary",
                           fontWeight: 600,
                           fontFamily: "monospace",
                         }}
@@ -305,7 +312,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                         <IconButton
                           size="small"
                           onClick={handleCopyIp}
-                          sx={{ p: 0.3, color: "text.secondary", "&:hover": { color: "#FFFFFF" } }}
+                          sx={{ p: 0.3, color: "text.secondary", "&:hover": { color: "text.primary" } }}
                         >
                           {copiedIp ? (
                             <CheckRoundedIcon sx={{ fontSize: 13, color: "success.main" }} />
@@ -327,8 +334,8 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                       sx={{
                         width: 42,
                         height: 42,
-                        bgcolor: "rgba(255, 255, 255, 0.06)",
-                        color: "#FFFFFF",
+                        bgcolor: isDark ? "rgba(255, 255, 255, 0.06)" : "action.selected",
+                        color: "text.primary",
                         "&:hover": { bgcolor: "action.hover" },
                       }}
                     >
@@ -349,8 +356,8 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                       sx={{
                         width: 42,
                         height: 42,
-                        bgcolor: "rgba(255, 255, 255, 0.06)",
-                        color: "#FFFFFF",
+                        bgcolor: isDark ? "rgba(255, 255, 255, 0.06)" : "action.selected",
+                        color: "text.primary",
                         "&:hover": { bgcolor: "action.hover" },
                       }}
                     >
@@ -368,8 +375,10 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                       sx={{
                         width: 42,
                         height: 42,
-                        bgcolor: isPinned ? "rgba(130, 169, 248, 0.18)" : "rgba(255, 255, 255, 0.06)",
-                        color: isPinned ? "primary.main" : "#FFFFFF",
+                        bgcolor: isPinned
+                          ? isDark ? "rgba(130, 169, 248, 0.18)" : "rgba(37, 99, 235, 0.12)"
+                          : isDark ? "rgba(255, 255, 255, 0.06)" : "action.selected",
+                        color: isPinned ? "primary.main" : "text.primary",
                         "&:hover": { bgcolor: "action.hover" },
                       }}
                     >
@@ -391,8 +400,10 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                       sx={{
                         width: 42,
                         height: 42,
-                        bgcolor: isMuted ? "rgba(240, 120, 120, 0.15)" : "rgba(255, 255, 255, 0.06)",
-                        color: isMuted ? "error.main" : "#FFFFFF",
+                        bgcolor: isMuted
+                          ? isDark ? "rgba(240, 120, 120, 0.15)" : "rgba(239, 68, 68, 0.12)"
+                          : isDark ? "rgba(255, 255, 255, 0.06)" : "action.selected",
+                        color: isMuted ? "error.main" : "text.primary",
                         "&:hover": { bgcolor: "action.hover" },
                       }}
                     >
@@ -412,10 +423,11 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
               {/* ── CARD 2: ABOUT SECTION ── */}
               <Box
                 sx={{
-                  bgcolor: "rgba(23, 31, 45, 0.7)",
+                  bgcolor: isDark ? "rgba(23, 31, 45, 0.7)" : "action.hover",
                   borderRadius: 1.5,
                   p: 2,
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
+                  border: "1px solid",
+                  borderColor: "divider",
                 }}
               >
                 <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.5 }}>
@@ -454,7 +466,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                         "& .MuiOutlinedInput-root": {
                           fontSize: 13.5,
                           borderRadius: 1,
-                          bgcolor: "rgba(0,0,0,0.2)",
+                          bgcolor: isDark ? "rgba(0,0,0,0.2)" : "background.paper",
                         },
                       }}
                     />
@@ -477,7 +489,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                     </Stack>
                   </Box>
                 ) : (
-                  <Typography fontSize={14} fontWeight={500} color="#FFFFFF">
+                  <Typography fontSize={14} fontWeight={500} color="text.primary">
                     {savedAbout}
                   </Typography>
                 )}
@@ -521,7 +533,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                 textTransform: "none",
                 fontWeight: 700,
                 fontSize: 13.5,
-                color: "#F07878",
+                color: "error.main",
                 "&:hover": { bgcolor: "rgba(240, 120, 120, 0.1)" },
               }}
             >
@@ -539,7 +551,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                 fontWeight: 700,
                 fontSize: 13.5,
                 bgcolor: "action.hover",
-                color: "#FFFFFF",
+                color: "text.primary",
                 boxShadow: "none",
                 "&:hover": { bgcolor: "action.selected", boxShadow: "none" },
               }}

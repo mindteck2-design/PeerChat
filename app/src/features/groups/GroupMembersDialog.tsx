@@ -22,6 +22,7 @@ import {
   TextField,
   Tooltip,
   Typography,
+  useTheme,
 } from "@mui/material";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import GroupsRoundedIcon from "@mui/icons-material/GroupsRounded";
@@ -168,6 +169,9 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
 
   const availableOthers = others.filter((p) => !members.some((m) => m.user_id === p.user_id));
 
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+
   return (
     <Dialog
       open={isOpen}
@@ -183,7 +187,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
       PaperProps={{
         sx: {
           borderRadius: 2,
-          bgcolor: "#141c2b",
+          bgcolor: "background.paper",
           backgroundImage: "none",
           border: "1px solid",
           borderColor: "divider",
@@ -221,13 +225,13 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
               pb: 1.5,
             }}
           >
-            <Typography variant="h6" fontWeight={700} fontSize={18} color="#FFFFFF">
+            <Typography variant="h6" fontWeight={700} fontSize={18} color="text.primary">
               {groupTitle}
             </Typography>
             <IconButton
               size="small"
               onClick={() => setMembersOpen(false)}
-              sx={{ color: "text.secondary" }}
+              sx={{ color: "text.secondary", "&:hover": { color: "text.primary" } }}
             >
               <CloseRoundedIcon fontSize="small" />
             </IconButton>
@@ -238,10 +242,11 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
               {/* ── CARD 1: GROUP HEADER ── */}
               <Box
                 sx={{
-                  bgcolor: "rgba(23, 31, 45, 0.7)",
+                  bgcolor: isDark ? "rgba(23, 31, 45, 0.7)" : "action.hover",
                   borderRadius: 1.5,
                   p: 2.25,
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
+                  border: "1px solid",
+                  borderColor: "divider",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
@@ -253,7 +258,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                     sx={{
                       width: 64,
                       height: 64,
-                      bgcolor: "rgba(130, 169, 248, 0.2)",
+                      bgcolor: isDark ? "rgba(130, 169, 248, 0.2)" : "rgba(37, 99, 235, 0.12)",
                       color: "primary.main",
                       flexShrink: 0,
                     }}
@@ -271,10 +276,10 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                           onChange={(e) => setRenameDraft(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && void handleSaveRename()}
                           style={{
-                            backgroundColor: "rgba(255, 255, 255, 0.08)",
-                            border: "1px solid rgba(255, 255, 255, 0.2)",
+                            backgroundColor: isDark ? "rgba(255, 255, 255, 0.08)" : "#FFFFFF",
+                            border: isDark ? "1px solid rgba(255, 255, 255, 0.2)" : "1px solid rgba(0, 0, 0, 0.2)",
                             borderRadius: 6,
-                            color: "#FFFFFF",
+                            color: isDark ? "#FFFFFF" : "#111827",
                             fontSize: 16,
                             fontWeight: 700,
                             padding: "4px 8px",
@@ -289,7 +294,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                       </Box>
                     ) : (
                       <Box display="flex" alignItems="center" gap={0.75}>
-                        <Typography fontWeight={700} fontSize={18.5} color="#FFFFFF" noWrap>
+                        <Typography fontWeight={700} fontSize={18.5} color="text.primary" noWrap>
                           {groupTitle}
                         </Typography>
                         {isAdmin && (
@@ -299,7 +304,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                               setRenameDraft(groupTitle);
                               setIsRenaming(true);
                             }}
-                            sx={{ p: 0.3, color: "text.secondary", "&:hover": { color: "#FFFFFF" } }}
+                            sx={{ p: 0.3, color: "text.secondary", "&:hover": { color: "text.primary" } }}
                           >
                             <EditOutlinedIcon sx={{ fontSize: 16 }} />
                           </IconButton>
@@ -318,7 +323,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                           display: "inline-flex",
                           alignItems: "center",
                           gap: 0.75,
-                          bgcolor: "rgba(255, 255, 255, 0.05)",
+                          bgcolor: isDark ? "rgba(255, 255, 255, 0.05)" : "action.selected",
                           borderRadius: 2,
                           px: 1.25,
                           py: 0.4,
@@ -335,7 +340,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                           display: "inline-flex",
                           alignItems: "center",
                           gap: 0.75,
-                          bgcolor: "rgba(255, 255, 255, 0.05)",
+                          bgcolor: isDark ? "rgba(255, 255, 255, 0.05)" : "action.selected",
                           borderRadius: 2,
                           px: 1.25,
                           py: 0.4,
@@ -355,7 +360,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                   <IconButton
                     size="small"
                     onClick={(e) => setGroupSettingsAnchor(e.currentTarget)}
-                    sx={{ color: "text.secondary", "&:hover": { color: "#FFFFFF" } }}
+                    sx={{ color: "text.secondary", "&:hover": { color: "text.primary" } }}
                   >
                     <MoreVertRoundedIcon />
                   </IconButton>
@@ -365,15 +370,16 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
               {/* ── CARD 2: MEMBERS ── */}
               <Box
                 sx={{
-                  bgcolor: "rgba(23, 31, 45, 0.7)",
+                  bgcolor: isDark ? "rgba(23, 31, 45, 0.7)" : "action.hover",
                   borderRadius: 1.5,
                   p: 2,
-                  border: "1px solid rgba(255, 255, 255, 0.05)",
+                  border: "1px solid",
+                  borderColor: "divider",
                 }}
               >
                 <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
                   <GroupsRoundedIcon sx={{ fontSize: 18, color: "primary.main" }} />
-                  <Typography fontWeight={700} fontSize={14.5} color="#FFFFFF">
+                  <Typography fontWeight={700} fontSize={14.5} color="text.primary">
                     Members {memberCount}
                   </Typography>
                 </Stack>
@@ -409,8 +415,8 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                           "& .MuiOutlinedInput-root": {
                             borderRadius: 1.25,
                             fontSize: 13,
-                            bgcolor: "rgba(255, 255, 255, 0.04)",
-                            "& fieldset": { borderColor: "rgba(255, 255, 255, 0.08)" },
+                            bgcolor: isDark ? "rgba(255, 255, 255, 0.04)" : "background.paper",
+                            "& fieldset": { borderColor: "divider" },
                           },
                         }}
                       />
@@ -427,8 +433,8 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                           textTransform: "none",
                           fontSize: 12.5,
                           fontWeight: 600,
-                          color: "text.secondary",
-                          bgcolor: "rgba(255, 255, 255, 0.05)",
+                          color: "text.primary",
+                          bgcolor: isDark ? "rgba(255, 255, 255, 0.05)" : "action.selected",
                           "&:hover": { bgcolor: "action.hover" },
                         }}
                       >
@@ -443,7 +449,15 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                         anchorEl={filterMenuAnchor}
                         open={!!filterMenuAnchor}
                         onClose={() => setFilterMenuAnchor(null)}
-                        PaperProps={{ sx: { borderRadius: 1.25, minWidth: 120 } }}
+                        PaperProps={{
+                          sx: {
+                            borderRadius: 1.25,
+                            minWidth: 120,
+                            bgcolor: "background.paper",
+                            border: "1px solid",
+                            borderColor: "divider",
+                          },
+                        }}
                       >
                         <MenuItem
                           selected={memberRoleFilter === "all"}
@@ -492,7 +506,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                             fontWeight: 700,
                             fontSize: 12.5,
                             bgcolor: "primary.main",
-                            color: "#FFFFFF",
+                            color: "primary.contrastText",
                             boxShadow: "none",
                             "&:hover": { bgcolor: "primary.dark", boxShadow: "none" },
                           }}
@@ -509,12 +523,13 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                           p: 1.5,
                           mb: 1.5,
                           borderRadius: 1.25,
-                          bgcolor: "action.hover",
-                          border: "1px dashed rgba(255, 255, 255, 0.15)",
+                          bgcolor: isDark ? "rgba(255, 255, 255, 0.03)" : "action.hover",
+                          border: "1px dashed",
+                          borderColor: "divider",
                         }}
                       >
                         <Box display="flex" alignItems="center" justifyContent="space-between" mb={1}>
-                          <Typography fontSize={13} fontWeight={700} color="#FFFFFF">
+                          <Typography fontSize={13} fontWeight={700} color="text.primary">
                             Select people on LAN to add
                           </Typography>
                           <Button
@@ -633,7 +648,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                                 </Avatar>
 
                                 <Box minWidth={0} flex={1}>
-                                  <Typography fontWeight={700} fontSize={14} color="#FFFFFF" noWrap>
+                                  <Typography fontWeight={700} fontSize={14} color="text.primary" noWrap>
                                     {label}
                                   </Typography>
                                   <Typography variant="caption" color="text.secondary" fontSize={12}>
@@ -802,7 +817,7 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
                   fontWeight: 700,
                   fontSize: 13.5,
                   bgcolor: "action.hover",
-                  color: "#FFFFFF",
+                  color: "text.primary",
                   boxShadow: "none",
                   "&:hover": { bgcolor: "action.selected", boxShadow: "none" },
                 }}
@@ -819,7 +834,15 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
         anchorEl={memberMenuAnchor?.el}
         open={!!memberMenuAnchor}
         onClose={() => setMemberMenuAnchor(null)}
-        PaperProps={{ sx: { borderRadius: 1.25, minWidth: 160 } }}
+        PaperProps={{
+          sx: {
+            borderRadius: 1.25,
+            minWidth: 160,
+            bgcolor: "background.paper",
+            border: "1px solid",
+            borderColor: "divider",
+          },
+        }}
       >
         {memberMenuAnchor?.member && (
           <>
@@ -872,10 +895,19 @@ export function GroupMembersDialog({ vm }: { vm: ChatScreenVm }) {
         anchorEl={groupSettingsAnchor}
         open={!!groupSettingsAnchor}
         onClose={() => setGroupSettingsAnchor(null)}
-        PaperProps={{ sx: { borderRadius: 1.25, minWidth: 220, p: 1 } }}
+        PaperProps={{
+          sx: {
+            borderRadius: 1.25,
+            minWidth: 220,
+            p: 1,
+            bgcolor: "background.paper",
+            border: "1px solid",
+            borderColor: "divider",
+          },
+        }}
       >
         <Box display="flex" alignItems="center" justifyContent="space-between" px={1} py={0.5}>
-          <Typography fontSize={13} fontWeight={600} color="#FFFFFF">
+          <Typography fontSize={13} fontWeight={600} color="text.primary">
             Members can add others
           </Typography>
           <Switch
