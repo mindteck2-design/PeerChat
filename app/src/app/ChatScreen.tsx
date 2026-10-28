@@ -134,6 +134,7 @@ import {
   type Identity,
 } from "../crypto";
 import { EMOJI_SET, QUICK_REACTIONS, emojiOnlyCount, emojiOnlyFontSize } from "../emoji";
+import { EmojiPicker } from "../features/chat/EmojiPicker";
 import { getOrCreateIdentity, loadLocal } from "../storage";
 import { TaskbarPinTipDialog } from "../features/setup/TaskbarPinTipDialog";
 import { matchingCommands, SLASH_COMMANDS, type CommandContext } from "../commands";
@@ -4973,31 +4974,12 @@ export function ChatScreen({
           }}
         />
         </Box>
-      <Popover
+      <EmojiPicker
         open={!!emojiAnchor}
         anchorEl={emojiAnchor}
         onClose={() => setEmojiAnchor(null)}
-        anchorOrigin={{ vertical: "top", horizontal: "left" }}
-        transformOrigin={{ vertical: "bottom", horizontal: "left" }}
-      >
-        <Box
-          sx={{
-            p: 1,
-            width: 280,
-            display: "grid",
-            gridTemplateColumns: "repeat(8, 1fr)",
-            gap: 0.25,
-            maxHeight: 240,
-            overflow: "auto",
-          }}
-        >
-          {EMOJI_SET.map((e, idx) => (
-            <IconButton key={`${e}-${idx}`} size="small" onClick={() => setText((t) => t + e)}>
-              <Typography fontSize={18}>{e}</Typography>
-            </IconButton>
-          ))}
-        </Box>
-      </Popover>
+        onSelectEmoji={(e) => setText((t) => t + e)}
+      />
 
       <Menu
         anchorEl={convMenu?.anchor ?? null}

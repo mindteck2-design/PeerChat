@@ -14,7 +14,6 @@ import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownR
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
 import PushPinIcon from "@mui/icons-material/PushPinRounded";
 import ReplyIcon from "@mui/icons-material/ReplyRounded";
-import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
 import SentimentSatisfiedAltOutlinedIcon from "@mui/icons-material/SentimentSatisfiedAltOutlined";
 import { MediaAlbum, isGridMediaName, isImageFileName, type AlbumItem } from "../../MediaAlbum";
 import { CircularTransferControl } from "../files/CircularTransferControl";
@@ -26,7 +25,7 @@ import {
   CalendarShareCard,
   parseCalendarShare,
 } from "../calendar/CalendarShareCard";
-import { emojiOnlyCount, emojiOnlyFontSize } from "../../emoji";
+import { QUICK_REACTIONS, emojiOnlyCount, emojiOnlyFontSize } from "../../emoji";
 import { FEATURE_GAMES } from "../../features";
 import { messageAttachmentIds } from "../../shared/messageMeta";
 import { avatarColor, formatClock, truncate } from "../../shared/format";
@@ -34,44 +33,6 @@ import { peerApi } from "../../peer";
 import type { ChatScreenVm } from "./chatVm";
 
 const MESSAGE_COLLAPSED_MAX_HEIGHT = 120;
-
-const EMOJI_LIST: { emoji: string; keywords: string }[] = [
-  { emoji: "👍", keywords: "thumbs up like yes agree ok" },
-  { emoji: "❤️", keywords: "heart love red like" },
-  { emoji: "😂", keywords: "laugh joy crying haha lol rofl" },
-  { emoji: "😮", keywords: "surprised wow gasp omg open mouth" },
-  { emoji: "😢", keywords: "sad cry tear unhappy" },
-  { emoji: "🙏", keywords: "pray please thanks thank you namaste" },
-  { emoji: "🎉", keywords: "party celebrate tada congratulations celebration" },
-  { emoji: "✅", keywords: "check tick correct mark done success" },
-  { emoji: "❌", keywords: "cross wrong cancel fail reject" },
-  { emoji: "🔥", keywords: "fire flame lit hot awesome" },
-  { emoji: "👏", keywords: "clap applause bravo praise" },
-  { emoji: "👨‍💻", keywords: "coder developer programmer engineer tech" },
-  { emoji: "💡", keywords: "idea bulb smart light solution" },
-  { emoji: "👀", keywords: "eyes look seeing watching" },
-  { emoji: "🚀", keywords: "rocket fast launch speed blast" },
-  { emoji: "💯", keywords: "100 hundred perfect score full" },
-  { emoji: "🎯", keywords: "target bullseye hit direct accurate goal" },
-  { emoji: "🥰", keywords: "love smiling face with hearts adore cute" },
-  { emoji: "🤔", keywords: "thinking ponder hmm wonder" },
-  { emoji: "👎", keywords: "thumbs down dislike bad no" },
-  { emoji: "✨", keywords: "sparkles shine clean magic new" },
-  { emoji: "😍", keywords: "heart eyes love wonderful adore" },
-  { emoji: "🙌", keywords: "hands raise hooray celebrating praise" },
-  { emoji: "🥳", keywords: "partying celebrate hat horns birthday" },
-  { emoji: "😎", keywords: "cool sunglasses smile confident" },
-  { emoji: "🤝", keywords: "handshake deal agreement partner meet" },
-  { emoji: "💪", keywords: "muscle flex strong power gym" },
-  { emoji: "⭐", keywords: "star favorite rating gold" },
-  { emoji: "☕", keywords: "coffee tea cafe drink break morning" },
-  { emoji: "🫡", keywords: "salute respect yes sir acknowledged" },
-  { emoji: "🤩", keywords: "star struck excited amazed awesome" },
-  { emoji: "🤫", keywords: "shh quiet silence secret hush" },
-  { emoji: "😁", keywords: "grin smile happy beam" },
-  { emoji: "😭", keywords: "sob crying sad bawling" },
-  { emoji: "🤯", keywords: "mind blown explosion shocked" },
-];
 
 /** WhatsApp-style inline expansion for long message text. */
 function ExpandableMessageText({
@@ -207,21 +168,12 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
     message: any;
     mine: boolean;
   } | null>(null);
-  const [emojiSearch, setEmojiSearch] = useState("");
 
   const [reactionDetails, setReactionDetails] = useState<{
     anchor: HTMLElement;
     reaction: any;
     message: any;
   } | null>(null);
-
-  const filteredEmojis = useMemo(() => {
-    const q = emojiSearch.trim().toLowerCase();
-    if (!q) return EMOJI_LIST;
-    return EMOJI_LIST.filter(
-      (e) => e.emoji.includes(q) || e.keywords.includes(q)
-    );
-  }, [emojiSearch]);
 
   const {
     abortIncomingTransfer,
@@ -525,7 +477,6 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
               aria-label="Add reaction"
               onClick={(e) => {
                 e.stopPropagation();
-                setEmojiSearch("");
                 setEmojiPickerAnchor({ anchor: e.currentTarget, message: m, mine: true });
               }}
               sx={{
@@ -1192,7 +1143,6 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             aria-label="Add reaction"
             onClick={(e) => {
               e.stopPropagation();
-              setEmojiSearch("");
               setEmojiPickerAnchor({ anchor: e.currentTarget, message: m, mine: false });
             }}
             sx={{
@@ -1306,7 +1256,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
         </Fade>
       )}
 
-      {/* ── Emoji Picker Popover (Rule 3 & 4) ── */}
+      {/* ── Quick Reactions Popover (Compact) ── */}
       <Popover
         open={Boolean(emojiPickerAnchor)}
         anchorEl={emojiPickerAnchor?.anchor}
@@ -1320,15 +1270,17 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           horizontal: emojiPickerAnchor?.mine ? "right" : "left",
         }}
         PaperProps={{
+          elevation: 0,
           sx: {
-            p: 1.5,
-            width: 290,
-            borderRadius: 2.5,
-            bgcolor: dark ? "#111827" : "#ffffff",
+            p: "4px 6px",
+            borderRadius: "24px",
+            bgcolor: dark ? "#1a222d" : "#ffffff",
             backgroundImage: "none",
             border: "1px solid",
-            borderColor: dark ? "rgba(255, 255, 255, 0.1)" : "divider",
-            boxShadow: dark ? "0 16px 36px rgba(0, 0, 0, 0.6)" : "0 12px 28px rgba(0, 0, 0, 0.15)",
+            borderColor: dark ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.08)",
+            boxShadow: dark
+              ? "0 8px 24px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4)"
+              : "0 6px 20px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.05)",
           },
         }}
       >
@@ -1336,68 +1288,34 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           sx={{
             display: "flex",
             alignItems: "center",
-            gap: 1,
-            px: 1.25,
-            py: 0.6,
-            mb: 1.25,
-            borderRadius: 1.5,
-            bgcolor: dark ? "rgba(255, 255, 255, 0.05)" : "rgba(0, 0, 0, 0.04)",
-            border: "1px solid",
-            borderColor: dark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.08)",
-          }}
-        >
-          <SearchRoundedIcon sx={{ fontSize: 18, color: "text.secondary" }} />
-          <InputBase
-            fullWidth
-            autoFocus
-            placeholder="Search emoji..."
-            value={emojiSearch}
-            onChange={(e) => setEmojiSearch(e.target.value)}
-            sx={{ fontSize: 13, color: "text.primary" }}
-          />
-        </Box>
-
-        <Box
-          sx={{
-            display: "grid",
-            gridTemplateColumns: "repeat(7, 1fr)",
             gap: 0.5,
-            maxHeight: 220,
-            overflowY: "auto",
           }}
         >
-          {filteredEmojis.map((item) => (
+          {QUICK_REACTIONS.map((emoji) => (
             <IconButton
-              key={item.emoji}
+              key={emoji}
               size="small"
               onClick={() => {
                 if (emojiPickerAnchor?.message) {
-                  reactToMessage(emojiPickerAnchor.message, item.emoji);
+                  reactToMessage(emojiPickerAnchor.message, emoji);
                 }
                 setEmojiPickerAnchor(null);
               }}
               sx={{
-                width: 34,
-                height: 34,
-                fontSize: 18,
-                borderRadius: 1.5,
-                transition: "transform 0.1s ease, background-color 0.15s ease",
+                width: 36,
+                height: 36,
+                fontSize: 22,
+                borderRadius: "50%",
+                transition: "transform 0.12s ease, background-color 0.15s ease",
                 "&:hover": {
-                  bgcolor: dark ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.06)",
-                  transform: "scale(1.2)",
+                  bgcolor: dark ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.06)",
+                  transform: "scale(1.25)",
                 },
               }}
             >
-              {item.emoji}
+              {emoji}
             </IconButton>
           ))}
-          {filteredEmojis.length === 0 && (
-            <Box sx={{ gridColumn: "span 7", textAlign: "center", py: 2 }}>
-              <Typography sx={{ fontSize: 12, color: "text.secondary" }}>
-                No emojis found
-              </Typography>
-            </Box>
-          )}
         </Box>
       </Popover>
 
