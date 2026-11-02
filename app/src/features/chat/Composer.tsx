@@ -2,7 +2,7 @@
 import { parseCalendarShare } from "../calendar/CalendarShareCard";
 import { useLayoutEffect, useState } from "react";
 import {
-  Box, Button, Chip, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Paper,
+  Box, Button, Chip, CircularProgress, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Paper,
   Stack, TextField, Typography,
 } from "@mui/material";
 import AttachFileIcon from "@mui/icons-material/AttachFileRounded";
@@ -71,11 +71,17 @@ function StagedStrip({
   clearStagedFiles: ChatScreenVm["clearStagedFiles"];
 }) {
   if (!stagedFiles.length) return null;
+  const isAnyScanning = stagedFiles.some((f) => f.scanning);
+
   return (
     <Box sx={{ minWidth: 0 }}>
       <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.65, px: 0.25 }}>
-        <Typography variant="caption" fontWeight={700} color="text.secondary">
-          {stagedFiles.length} selected
+        <Typography
+          variant="caption"
+          fontWeight={700}
+          color={isAnyScanning ? "primary.main" : "text.secondary"}
+        >
+          {isAnyScanning ? "Scanning attachments…" : `${stagedFiles.length} selected`}
         </Typography>
         <Button
           size="small"
@@ -125,7 +131,7 @@ function StagedStrip({
                   borderRadius: 2,
                   overflow: "hidden",
                   border: "1px solid",
-                  borderColor: "divider",
+                  borderColor: sf.scanning ? "primary.main" : "divider",
                   bgcolor: "action.hover",
                   display: "grid",
                   placeItems: "center",
@@ -139,7 +145,21 @@ function StagedStrip({
                     sx={{ width: "100%", height: "100%", objectFit: "cover" }}
                   />
                 ) : sf.isDir ? (
-                  <FolderZipIcon color="primary" />
+                  sf.scanning ? (
+                    <Stack alignItems="center" justifyContent="center" spacing={0.5}>
+                      <CircularProgress size={26} thickness={4} color="primary" />
+                      <Typography
+                        variant="caption"
+                        fontWeight={800}
+                        color="primary"
+                        sx={{ fontSize: 8.5, letterSpacing: 0.5, lineHeight: 1 }}
+                      >
+                        SCANNING
+                      </Typography>
+                    </Stack>
+                  ) : (
+                    <FolderZipIcon color="primary" sx={{ fontSize: 32 }} />
+                  )
                 ) : isImg || isVid ? (
                   <Typography variant="caption" fontWeight={800} color="text.secondary">
                     {stagedExt(sf.name)}
@@ -170,11 +190,22 @@ function StagedStrip({
               </Tooltip>
               <Typography
                 variant="caption"
-                color="text.secondary"
+                color={sf.scanning ? "primary.main" : "text.secondary"}
                 display="block"
-                sx={{ fontSize: 9.5, px: 0.15, lineHeight: 1.1 }}
+                sx={{
+                  fontSize: 9.5,
+                  px: 0.15,
+                  lineHeight: 1.1,
+                  fontWeight: sf.scanning ? 700 : 400,
+                }}
               >
-                {sf.isDir && sf.totalFiles != null ? `${sf.totalFiles.toLocaleString()} files · ${formatBytes(sf.size)}` : formatBytes(sf.size)}
+                {sf.scanning
+                  ? sf.totalFiles && sf.totalFiles > 0
+                    ? `${sf.totalFiles.toLocaleString()} files…`
+                    : "Scanning…"
+                  : sf.isDir && sf.totalFiles != null
+                    ? `${sf.totalFiles.toLocaleString()} files · ${formatBytes(sf.size)}`
+                    : formatBytes(sf.size)}
               </Typography>
               <IconButton
                 size="small"
@@ -372,31 +403,38 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
     </Stack>
   );
 
+  const isAnyScanning = stagedFiles.some((f) => f.scanning);
+
   const sendButton = (
-    <IconButton
-      color="primary"
-      disabled={
-        (!!editingMessage && !text.trim()) ||
-        (!text.trim() &&
-          (!stagedFiles.length || (!!outgoingFile && !outgoingFile.cancelled)))
-      }
-      onClick={submitComposer}
-      aria-label={editingMessage ? "Save edit" : "Send"}
-      sx={{
-        bgcolor: "primary.main",
-        color: "primary.contrastText",
-        width: 36,
-        height: 36,
-        flexShrink: 0,
-        "&:hover": { bgcolor: "primary.dark" },
-        "&.Mui-disabled": {
-          bgcolor: "action.disabledBackground",
-          color: "action.disabled",
-        },
-      }}
-    >
-      {editingMessage ? <EditIcon fontSize="small" /> : <SendIcon fontSize="small" />}
-    </IconButton>
+    <Tooltip title={isAnyScanning ? "Scanning attachments in progress…" : ""}>
+      <span>
+        <IconButton
+          color="primary"
+          disabled={
+            isAnyScanning ||
+            (!!editingMessage && !text.trim()) ||
+            (!text.trim() &&
+              (!stagedFiles.length || (!!outgoingFile && !outgoingFile.cancelled)))
+          }
+          onClick={submitComposer}
+          aria-label={editingMessage ? "Save edit" : "Send"}
+          sx={{
+            bgcolor: "primary.main",
+            color: "primary.contrastText",
+            width: 36,
+            height: 36,
+            flexShrink: 0,
+            "&:hover": { bgcolor: "primary.dark" },
+            "&.Mui-disabled": {
+              bgcolor: "action.disabledBackground",
+              color: "action.disabled",
+            },
+          }}
+        >
+          {editingMessage ? <EditIcon fontSize="small" /> : <SendIcon fontSize="small" />}
+        </IconButton>
+      </span>
+    </Tooltip>
   );
 
   return (
@@ -541,6 +579,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   variant="contained"
                   disabled={
                     announceBusy ||
+                    isAnyScanning ||
                     (!!outgoingFile && !outgoingFile.cancelled) ||
                     !announceCompose.title.trim() ||
                     !announceCompose.body.trim()
@@ -857,6 +896,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
+                    if (isAnyScanning) return;
                     if (outgoingFile && !outgoingFile.cancelled && !text.trim()) return;
                     submitComposer();
                   } else if (e.key === "Escape" && slashSuggestions.length) {

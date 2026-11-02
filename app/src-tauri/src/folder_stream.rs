@@ -18,7 +18,7 @@ pub struct FolderMeta {
     pub total_bytes: u64,
 }
 
-pub fn scan_folder_meta(path_str: &str) -> Result<FolderMeta, String> {
+pub fn scan_folder_meta(app: Option<&AppHandle>, path_str: &str) -> Result<FolderMeta, String> {
     let root = Path::new(path_str);
     if !root.exists() {
         return Err("Folder does not exist".into());
@@ -40,18 +40,45 @@ pub fn scan_folder_meta(path_str: &str) -> Result<FolderMeta, String> {
 
     let mut total_files = 0u64;
     let mut total_bytes = 0u64;
+    let mut last_emit = Instant::now();
 
     for entry in walkdir::WalkDir::new(&root_path)
         .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        if let Ok(meta) = entry.metadata() {
-            if meta.is_file() {
+        let ft = entry.file_type();
+        if ft.is_file() {
+            if let Ok(meta) = entry.metadata() {
                 total_files += 1;
                 total_bytes += meta.len();
+
+                if total_files % 1000 == 0 || last_emit.elapsed() >= std::time::Duration::from_millis(200) {
+                    last_emit = Instant::now();
+                    if let Some(app) = app {
+                        let _ = app.emit(
+                            "folder-scan-progress",
+                            json!({
+                                "path": path_str,
+                                "total_files": total_files,
+                                "total_bytes": total_bytes,
+                            }),
+                        );
+                    }
+                }
             }
         }
+    }
+
+    if let Some(app) = app {
+        let _ = app.emit(
+            "folder-scan-progress",
+            json!({
+                "path": path_str,
+                "total_files": total_files,
+                "total_bytes": total_bytes,
+            }),
+        );
     }
 
     Ok(FolderMeta {

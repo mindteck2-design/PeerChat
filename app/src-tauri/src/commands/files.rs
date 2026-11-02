@@ -296,8 +296,8 @@ pub async fn stage_outgoing_from_path(
 }
 
 #[tauri::command]
-pub async fn scan_folder_meta(path: String) -> Result<folder_stream::FolderMeta, String> {
-    tokio::task::spawn_blocking(move || folder_stream::scan_folder_meta(&path))
+pub async fn scan_folder_meta(app: AppHandle, path: String) -> Result<folder_stream::FolderMeta, String> {
+    tokio::task::spawn_blocking(move || folder_stream::scan_folder_meta(Some(&app), &path))
         .await
         .map_err(|e| e.to_string())?
 }

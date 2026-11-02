@@ -506,6 +506,8 @@ export function ChatScreen({
   const activeRef = useRef<Conversation | null>(null);
   const textRef = useRef("");
   const draftsRef = useRef<Record<string, string>>({});
+  const stagedFilesRef = useRef<StagedFile[]>([]);
+  const stagedDraftsRef = useRef<Record<string, StagedFile[]>>({});
   const typingDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const typingTtlRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -514,6 +516,12 @@ export function ChatScreen({
   useEffect(() => {
     textRef.current = text;
   }, [text]);
+  useEffect(() => {
+    stagedFilesRef.current = stagedFiles;
+    if (activeRef.current?.id) {
+      stagedDraftsRef.current[activeRef.current.id] = stagedFiles;
+    }
+  }, [stagedFiles]);
 
   const others = useMemo(
     () => peers.filter((p) => p.user_id !== profile.id && !p.blocked),
@@ -1608,6 +1616,49 @@ export function ChatScreen({
     };
   }, []);
 
+  // Listen for live progress when scanning large folders (e.g. node_modules)
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ path: string; total_files: number; total_bytes: number }>(
+      "folder-scan-progress",
+      (ev) => {
+        const { path, total_files, total_bytes } = ev.payload;
+        for (const [cid, files] of Object.entries(stagedDraftsRef.current)) {
+          let modified = false;
+          const updated = files.map((f) => {
+            if (
+              f.isDir &&
+              !(f.source instanceof File) &&
+              f.source.path === path &&
+              f.scanning
+            ) {
+              modified = true;
+              return {
+                ...f,
+                size: total_bytes,
+                totalFiles: total_files,
+              };
+            }
+            return f;
+          });
+          if (modified) {
+            stagedDraftsRef.current[cid] = updated;
+            if (activeRef.current?.id === cid) {
+              setStagedFiles(updated);
+            }
+          }
+        }
+      }
+    )
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   // When pendingShareFiles arrives, stage them on the active conversation.
   useEffect(() => {
     if (!pendingShareFiles.length || !active) return;
@@ -1626,6 +1677,7 @@ export function ChatScreen({
     const prev = activeRef.current;
     if (prev && prev.id !== c.id) {
       draftsRef.current[prev.id] = textRef.current;
+      stagedDraftsRef.current[prev.id] = stagedFilesRef.current;
     }
     setMessages([]);
     // Keep any plaintext already in the module cache so returning to a chat
@@ -1641,7 +1693,7 @@ export function ChatScreen({
     setEditingMessage(null);
     setTypingLabel(null);
     setText(draftsRef.current[c.id] ?? "");
-    clearStagedFiles();
+    setStagedFiles(stagedDraftsRef.current[c.id] ?? []);
     setInChatSearchOpen(false);
     setInChatQuery("");
     setActive(c);
@@ -1716,14 +1768,23 @@ export function ChatScreen({
   }
 
   function stageFiles(files: File[]) {
+    const targetConvId = activeRef.current?.id;
     const next: StagedFile[] = files.map((file) => ({
       id: `${file.name}-${file.size}-${Math.random().toString(16).slice(2)}`,
       source: file,
       name: file.name,
       size: file.size,
       isDir: false,
+      scanning: false,
       previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
+      conversationId: targetConvId,
     }));
+    if (targetConvId) {
+      stagedDraftsRef.current[targetConvId] = [
+        ...(stagedDraftsRef.current[targetConvId] ?? []),
+        ...next,
+      ];
+    }
     setStagedFiles((prev) => [...prev, ...next]);
     requestAnimationFrame(() => composerRef.current?.focus());
   }
@@ -1766,29 +1827,29 @@ export function ChatScreen({
   }
 
   async function stageDiskPaths(paths: string[]) {
+    const targetConvId = activeRef.current?.id;
+    if (!targetConvId) return;
+
     const next: StagedFile[] = [];
+    const dirsToScan: Array<{ id: string; path: string; name: string }> = [];
+
     for (const path of paths) {
       try {
         const meta = await peerApi.localPathMeta(path);
         if (meta.is_dir) {
-          let folderBytes = meta.size;
-          let folderFiles = 0;
-          try {
-            const scan = await peerApi.scanFolderMeta(path);
-            folderBytes = scan.total_bytes;
-            folderFiles = scan.total_files;
-          } catch {
-            /* keep defaults if scan fails */
-          }
+          const stagedId = `${meta.name}-dir-${Math.random().toString(16).slice(2)}`;
           next.push({
-            id: `${meta.name}-dir-${Math.random().toString(16).slice(2)}`,
-            source: { path: meta.path, name: meta.name, size: folderBytes },
+            id: stagedId,
+            source: { path: meta.path, name: meta.name, size: 0 },
             name: `${meta.name}/`,
-            size: folderBytes,
+            size: 0,
             isDir: true,
-            totalFiles: folderFiles,
+            scanning: true,
+            totalFiles: 0,
             previewUrl: null,
+            conversationId: targetConvId,
           });
+          dirsToScan.push({ id: stagedId, path: meta.path, name: meta.name });
         } else {
           next.push({
             id: `${meta.name}-${meta.size}-${Math.random().toString(16).slice(2)}`,
@@ -1796,33 +1857,92 @@ export function ChatScreen({
             name: meta.name,
             size: meta.size,
             isDir: false,
+            scanning: false,
             previewUrl: isImageFileName(meta.name) ? convertFileSrc(meta.path) : null,
+            conversationId: targetConvId,
           });
         }
       } catch (err: any) {
         setStatus(err?.message || `Can't read ${path}`);
       }
     }
+
     if (next.length) {
-      setStagedFiles((prev) => [...prev, ...next]);
-      requestAnimationFrame(() => composerRef.current?.focus());
+      stagedDraftsRef.current[targetConvId] = [
+        ...(stagedDraftsRef.current[targetConvId] ?? []),
+        ...next,
+      ];
+      if (activeRef.current?.id === targetConvId) {
+        setStagedFiles((prev) => [...prev, ...next]);
+        requestAnimationFrame(() => composerRef.current?.focus());
+      }
+    }
+
+    for (const d of dirsToScan) {
+      void (async () => {
+        try {
+          const scan = await peerApi.scanFolderMeta(d.path);
+          const updateItem = (item: StagedFile): StagedFile => {
+            if (item.id === d.id) {
+              return {
+                ...item,
+                size: scan.total_bytes,
+                totalFiles: scan.total_files,
+                scanning: false,
+                source: { path: d.path, name: d.name, size: scan.total_bytes },
+              };
+            }
+            return item;
+          };
+
+          const currentDraft = stagedDraftsRef.current[targetConvId] || [];
+          stagedDraftsRef.current[targetConvId] = currentDraft.map(updateItem);
+
+          if (activeRef.current?.id === targetConvId) {
+            setStagedFiles((prev) => prev.map(updateItem));
+          }
+        } catch (err: any) {
+          console.error(`Folder scan failed for ${d.path}`, err);
+          const markFailed = (item: StagedFile): StagedFile => {
+            if (item.id === d.id) {
+              return { ...item, scanning: false };
+            }
+            return item;
+          };
+          const currentDraft = stagedDraftsRef.current[targetConvId] || [];
+          stagedDraftsRef.current[targetConvId] = currentDraft.map(markFailed);
+          if (activeRef.current?.id === targetConvId) {
+            setStagedFiles((prev) => prev.map(markFailed));
+            setStatus(`Folder scan error: ${err?.message || String(err)}`);
+          }
+        }
+      })();
     }
   }
 
   async function sendFolderDirectly(
     folderPath: string,
     folderName: string,
-    opts?: { skipNotice?: boolean }
+    opts?: { skipNotice?: boolean; knownMeta?: { total_files: number; total_bytes: number } }
   ): Promise<string | undefined> {
     const cleanName = folderName.replace(/[\\/]/g, "").trim() || "folder";
     const archiveFileName = `${cleanName}.pcfolder`;
-    setStatus("Scanning folder…");
     let folderMeta: { path: string; name: string; total_files: number; total_bytes: number };
-    try {
-      folderMeta = await peerApi.scanFolderMeta(folderPath);
-    } catch (err: any) {
-      setStatus(`Failed to read folder: ${err?.message || err}`);
-      return undefined;
+    if (opts?.knownMeta && opts.knownMeta.total_files > 0) {
+      folderMeta = {
+        path: folderPath,
+        name: cleanName,
+        total_files: opts.knownMeta.total_files,
+        total_bytes: opts.knownMeta.total_bytes,
+      };
+    } else {
+      setStatus("Scanning folder…");
+      try {
+        folderMeta = await peerApi.scanFolderMeta(folderPath);
+      } catch (err: any) {
+        setStatus(`Failed to read folder: ${err?.message || err}`);
+        return undefined;
+      }
     }
 
     if (folderMeta.total_files === 0) {
@@ -2030,7 +2150,11 @@ export function ChatScreen({
       const found = prev.find((f) => f.id === id);
       if (found?.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(found.previewUrl);
       discardStagedCapture(found);
-      return prev.filter((f) => f.id !== id);
+      const next = prev.filter((f) => f.id !== id);
+      if (activeRef.current?.id) {
+        stagedDraftsRef.current[activeRef.current.id] = next;
+      }
+      return next;
     });
   }
 
@@ -2042,6 +2166,9 @@ export function ChatScreen({
       }
       return [];
     });
+    if (activeRef.current?.id) {
+      stagedDraftsRef.current[activeRef.current.id] = [];
+    }
   }
 
   async function stageCapturePath(path: string, name: string, captureId: string) {
@@ -2061,18 +2188,25 @@ export function ChatScreen({
       } catch {
         thumb = null;
       }
-      setStagedFiles((prev) => [
-        ...prev,
-        {
-          id: `${name}-${meta.size}-${Math.random().toString(16).slice(2)}`,
-          source: { path: meta.path, name: meta.name || name, size: meta.size },
-          name: name || meta.name,
-          size: meta.size,
-          isDir: false,
-          previewUrl: thumb,
-          captureId,
-        },
-      ]);
+      const targetConvId = activeRef.current?.id;
+      const snapItem: StagedFile = {
+        id: `${name}-${meta.size}-${Math.random().toString(16).slice(2)}`,
+        source: { path: meta.path, name: meta.name || name, size: meta.size },
+        name: name || meta.name,
+        size: meta.size,
+        isDir: false,
+        scanning: false,
+        previewUrl: thumb,
+        captureId,
+        conversationId: targetConvId,
+      };
+      if (targetConvId) {
+        stagedDraftsRef.current[targetConvId] = [
+          ...(stagedDraftsRef.current[targetConvId] ?? []),
+          snapItem,
+        ];
+      }
+      setStagedFiles((prev) => [...prev, snapItem]);
     } catch (err: any) {
       setStatus(err?.message || "Could not attach screenshot");
       await peerApi.discardCapture(captureId).catch(() => {});
@@ -2555,13 +2689,20 @@ export function ChatScreen({
 
   async function submitComposer() {
     if (!active) return;
+    if (stagedFiles.some((f) => f.scanning)) {
+      setStatus("Scanning attachments in progress, please wait…");
+      return;
+    }
     // While a file is staging, only allow plain text (attach stays locked).
     const files =
       editingMessage || (outgoingFile && !outgoingFile.cancelled) ? [] : stagedFiles;
     const body = text.trim();
     const replyId = replyTo?.id;
     if (!files.length && !body) return;
-    if (active) draftsRef.current[active.id] = "";
+    if (active) {
+      draftsRef.current[active.id] = "";
+      stagedDraftsRef.current[active.id] = [];
+    }
     setText("");
     setReplyTo(null);
     if (editingMessage) {
@@ -2587,22 +2728,8 @@ export function ChatScreen({
     for (const sf of files) {
       const src = sf.source;
       if (sf.isDir && !(src instanceof File)) {
-        // Include files inside selected folders in the same batch preflight.
-        try {
-          const entries = await peerApi.listDirectoryFiles(src.path);
-          for (const entry of entries) {
-            // listDirectoryFiles returns { abs_path, rel_path, size }.
-            // Use the absolute path for scanning and the relative path for display.
-            const path = entry.abs_path;
-            if (path) {
-              const name = entry.rel_path || path.split(/[/\\]/).pop() || path;
-              scanCandidates.push({ name, path });
-            }
-          }
-        } catch (err: any) {
-          setStatus(`Could not scan folder ${src.name}: ${err?.message || String(err)}`);
-          return;
-        }
+        // Direct folder streaming streams directly; skip individual file listing
+        continue;
       } else {
         const path = src instanceof File
           ? (src as File & { path?: string }).path || ""
@@ -2690,6 +2817,7 @@ export function ChatScreen({
         try {
           const fid = await sendFolderDirectly(src.path, sf.name.replace(/\/$/, ""), {
             skipNotice: true,
+            knownMeta: sf.totalFiles && sf.size ? { total_files: sf.totalFiles, total_bytes: sf.size } : undefined,
           });
           if (fid) {
             fileIds.push(fid);
@@ -4099,6 +4227,10 @@ export function ChatScreen({
 
   async function postAnnouncement() {
     if (!active) return;
+    if (stagedFiles.some((f) => f.scanning)) {
+      setStatus("Scanning attachments in progress, please wait…");
+      return;
+    }
     const title = announceCompose.title.trim();
     const body = announceCompose.body.trim();
     const files = [...stagedFiles];
@@ -4126,8 +4258,14 @@ export function ChatScreen({
         }
         const sf = files[0];
         clearStagedFiles();
+        if (active) {
+          stagedDraftsRef.current[active.id] = [];
+        }
         if (sf.isDir && !(sf.source instanceof File)) {
-          fileId = await sendFolderDirectly(sf.source.path, sf.name.replace(/\/$/, ""), { skipNotice: true });
+          fileId = await sendFolderDirectly(sf.source.path, sf.name.replace(/\/$/, ""), {
+            skipNotice: true,
+            knownMeta: sf.totalFiles && sf.size ? { total_files: sf.totalFiles, total_bytes: sf.size } : undefined,
+          });
           fileLabel = sf.name;
           if (fileId) setFileNames((s) => ({ ...s, [fileId!]: sf.name }));
           // folder send posts its own notice; fall back to text-only announcement

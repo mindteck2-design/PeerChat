@@ -19,6 +19,8 @@ export type StagedFile = {
   /** True only for disk folders (ZIP on send). Never infer from display name. */
   isDir: boolean;
   totalFiles?: number;
+  scanning?: boolean;
+  conversationId?: string;
   previewUrl: string | null;
   /** Opaque id for Screenshot & Annotate temps under app captures/. */
   captureId?: string;
