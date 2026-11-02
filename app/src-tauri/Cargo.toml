@@ -1,6 +1,6 @@
 [package]
 name = "peerchat"
-version = "1.0.2"
+version = "1.0.3"
 description = "PeerChat secure P2P LAN messenger"
 authors = ["PeerChat"]
 edition = "2021"
@@ -37,6 +37,8 @@ xcap = "0.0.14"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
+tar = "0.4.46"
+walkdir = "2.5.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

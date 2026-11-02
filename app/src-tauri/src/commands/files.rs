@@ -10,6 +10,7 @@ use crate::state::AppState;
 use crate::util;
 use crate::peer_http::{self, SharedDb};
 use crate::bundle;
+use crate::folder_stream;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -287,6 +288,91 @@ pub async fn stage_outgoing_from_path(
         })();
         peer_http::clear_stage_controls(&file_id_bg);
         result
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    stage_result
+}
+
+#[tauri::command]
+pub async fn scan_folder_meta(path: String) -> Result<folder_stream::FolderMeta, String> {
+    tokio::task::spawn_blocking(move || folder_stream::scan_folder_meta(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn stage_outgoing_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_id: String,
+    folder_path: String,
+    content_key_b64: String,
+) -> Result<StageOutgoingResult, String> {
+    let content_key = base64::engine::general_purpose::STANDARD
+        .decode(content_key_b64.trim())
+        .map_err(|e| e.to_string())?;
+    if content_key.len() != 32 {
+        return Err("content key must be 32 bytes".into());
+    }
+    let mut key_arr = [0u8; 32];
+    key_arr.copy_from_slice(&content_key);
+
+    let src = PathBuf::from(&folder_path);
+    if !src.is_dir() {
+        return Err("source folder missing or not a directory".into());
+    }
+
+    {
+        let conn = state.db.lock();
+        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let me = profile["id"].as_str().unwrap_or("");
+        let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
+        if file["uploader_id"].as_str() != Some(me) {
+            return Err("only uploader may stage outgoing folder".into());
+        }
+    }
+
+    let dir = resolve_staging_dir(&app, &file_id)?;
+    std::fs::create_dir_all(&dir).map_err(explain_io)?;
+
+    let db = state.db.clone();
+    let app_progress = app.clone();
+    let file_id_bg = file_id.clone();
+    let path_bg = folder_path.clone();
+
+    let stage_result = tokio::task::spawn_blocking(move || {
+        let (cancel_flag, pause_flag) = peer_http::register_stage_controls(&file_id_bg);
+        let result = folder_stream::stage_folder_stream(
+            Some(&app_progress),
+            &file_id_bg,
+            &path_bg,
+            &dir,
+            key_arr,
+            cancel_flag,
+            pause_flag,
+        );
+        peer_http::clear_stage_controls(&file_id_bg);
+
+        let (digest, bytes_written, chunk_count) = result?;
+        {
+            let conn = db.lock();
+            db::update_file_size_and_chunks(
+                &conn,
+                &file_id_bg,
+                bytes_written as i64,
+                chunk_count as i64,
+                &digest,
+            )?;
+            db::set_file_local_path(&conn, &file_id_bg, &path_bg)?;
+        }
+
+        Ok(StageOutgoingResult {
+            content_sha256: digest,
+            bytes_written,
+            chunk_count,
+        })
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -851,6 +937,53 @@ pub fn finalize_file_receive(
 }
 
 #[tauri::command]
+pub async fn finalize_folder_receive(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_id: String,
+    folder_name: String,
+    destination_dir: Option<String>,
+) -> Result<String, String> {
+    let temp = {
+        let conn = state.db.lock();
+        let prog = db::get_receive_progress(&conn, &file_id)?.ok_or("receive not started")?;
+        PathBuf::from(prog.1.ok_or("missing temp path")?)
+    };
+    if !temp.is_file() {
+        return Err("temp file missing".into());
+    }
+    let dir = if let Some(d) = destination_dir.filter(|s| !s.trim().is_empty()) {
+        PathBuf::from(d)
+    } else {
+        resolve_download_dir(&app, &state)?
+    };
+
+    let app_clone = app.clone();
+    let file_id_bg = file_id.clone();
+    let folder_name_bg = folder_name.clone();
+
+    let target_path = tokio::task::spawn_blocking(move || {
+        folder_stream::finalize_folder_receive_inner(
+            Some(&app_clone),
+            &temp,
+            &dir,
+            &folder_name_bg,
+            &file_id_bg,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let target_str = target_path.display().to_string();
+    {
+        let conn = state.db.lock();
+        db::set_file_local_path(&conn, &file_id, &target_str)?;
+        let _ = db::clear_receive_progress(&conn, &file_id);
+    }
+    Ok(target_str)
+}
+
+#[tauri::command]
 pub fn get_receive_progress(state: State<AppState>, file_id: String) -> Result<Value, String> {
     let conn = state.db.lock();
     match db::get_receive_progress(&conn, &file_id)? {
@@ -1045,10 +1178,34 @@ pub fn open_local_file(state: State<AppState>, file_id: String) -> Result<bool, 
             .map(PathBuf::from)
             .ok_or("No local copy is available yet")?
     };
-    if !path.is_file() {
+    if !path.exists() {
         let conn = state.db.lock();
         let _ = db::set_file_local_path(&conn, &file_id, "");
         return Err("The local file has been moved or deleted".into());
+    }
+
+    if path.is_dir() {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            std::process::Command::new("explorer")
+                .arg(&path)
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        #[cfg(all(unix, not(target_os = "macos")))]
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(true);
     }
 
     if is_executable_or_installer(&path) {
@@ -1457,6 +1614,14 @@ pub async fn scan_file(path: String) -> ScanResult {
 }
 
 pub fn scan_file_inner(path: &str) -> ScanResult {
+    if std::path::Path::new(path).is_dir() {
+        return ScanResult {
+            clean: true,
+            engine: "none".to_string(),
+            detail: "Skipped — directory transfer".to_string(),
+            skipped: true,
+        };
+    }
     if is_low_risk_attachment(path) {
         return ScanResult {
             clean: true,

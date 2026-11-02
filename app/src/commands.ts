@@ -13,6 +13,7 @@ export type SlashCommand = {
 export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/send", hint: "Attach files to this conversation", available: (c) => c.hasConversation },
   { name: "/bundle", hint: "Package files or a folder and send them", available: (c) => c.hasConversation },
+  { name: "/folder", hint: "Share a folder directly (zero zipping, supports node_modules)", available: (c) => c.hasConversation },
   { name: "/calendar", hint: "Open the shared calendar", available: () => true },
   { name: "/peers", hint: "Show discovered peers and connection status", available: () => true },
   { name: "/announce", hint: "Post a formatted announcement in this group", available: (c) => c.isGroup },

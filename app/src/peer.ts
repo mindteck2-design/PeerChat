@@ -273,6 +273,11 @@ export const peerApi = {
       "stage_outgoing_from_path",
       { fileId, path, contentKeyB64 }
     ),
+  stageOutgoingFolder: (fileId: string, folderPath: string, contentKeyB64: string) =>
+    inv<{ content_sha256: string; bytes_written: number; chunk_count: number }>(
+      "stage_outgoing_folder",
+      { fileId, folderPath, contentKeyB64 }
+    ),
   requestStageCancel: (fileId: string) => inv<void>("request_stage_cancel", { fileId }),
   requestStagePause: (fileId: string) => inv<void>("request_stage_pause", { fileId }),
   clearStagePause: (fileId: string) => inv<void>("clear_stage_pause", { fileId }),
@@ -348,6 +353,8 @@ export const peerApi = {
     inv<void>("append_file_receive", { fileId, index, dataB64 }),
   finalizeFileReceive: (fileId: string, filename: string) =>
     inv<string>("finalize_file_receive", { fileId, filename }),
+  finalizeFolderReceive: (fileId: string, folderName: string, destinationDir?: string) =>
+    inv<string>("finalize_folder_receive", { fileId, folderName, destinationDir: destinationDir ?? null }),
   getReceiveProgress: (fileId: string) =>
     inv<{ next_index: number; temp_path: string | null }>("get_receive_progress", { fileId }),
   /** Cache plaintext for an outgoing file when the picker gave no disk path. */
@@ -406,6 +413,10 @@ export const peerApi = {
   scanFile: (path: string) => inv<ScanResult>("scan_file", { path }),
   localPathMeta: (path: string) =>
     inv<{ path: string; name: string; size: number; is_dir: boolean }>("local_path_meta", {
+      path,
+    }),
+  scanFolderMeta: (path: string) =>
+    inv<{ path: string; name: string; total_files: number; total_bytes: number }>("scan_folder_meta", {
       path,
     }),
   installShellExtension: (exePath: string) => inv<void>("install_shell_extension", { exePath }),

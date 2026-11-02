@@ -62,6 +62,21 @@ pub fn set_file_content_hash(conn: &Connection, file_id: &str, content_sha256: &
     Ok(())
 }
 
+pub fn update_file_size_and_chunks(
+    conn: &Connection,
+    file_id: &str,
+    size_bytes: i64,
+    chunk_count: i64,
+    content_sha256: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE files SET size_bytes=?2, chunk_count=?3, content_sha256=?4 WHERE id=?1",
+        params![file_id, size_bytes, chunk_count, content_sha256],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn set_file_local_path(conn: &Connection, file_id: &str, path: &str) -> Result<(), String> {
     conn.execute(
         "UPDATE files SET local_path=?2 WHERE id=?1",

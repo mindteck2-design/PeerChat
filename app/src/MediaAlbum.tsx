@@ -70,6 +70,7 @@ type MediaAlbumProps = {
 
 function FileTypeIcon({ name, accent }: { name: string; accent: string }) {
   const sx = { fontSize: 22, color: accent };
+  if (name.endsWith(".pcfolder") || name.endsWith("/")) return <FolderZipIcon sx={sx} />;
   const ext = extOfName(name);
   if (ext === "pdf") return <PictureAsPdfIcon sx={sx} />;
   if (["zip", "rar", "7z", "tar", "gz"].includes(ext)) return <FolderZipIcon sx={sx} />;
@@ -495,7 +496,7 @@ export function MediaAlbum({
             </Box>
             <Box sx={{ minWidth: 0, flex: 1 }}>
               <Typography noWrap sx={{ fontWeight: 700, fontSize: 13, color: nameColor, lineHeight: 1.25 }}>
-                {item.name}
+                {item.name.endsWith(".pcfolder") ? `${item.name.slice(0, -9)}/` : item.name}
               </Typography>
               <Typography variant="caption" color="text.secondary" sx={{ fontSize: 11 }}>
                 {docTransfer

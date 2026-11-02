@@ -1,4 +1,5 @@
 mod bundle;
+pub mod folder_stream;
 mod commands;
 mod db;
 mod discovery;
@@ -297,6 +298,9 @@ pub fn run() {
             begin_file_receive,
             append_file_receive,
             finalize_file_receive,
+            finalize_folder_receive,
+            scan_folder_meta,
+            stage_outgoing_folder,
             get_receive_progress,
             cache_outgoing_plain,
             persist_outgoing_from_path,

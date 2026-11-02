@@ -41,6 +41,7 @@ function getCommandIcon(cmdName: string) {
     case "/snippet":
       return <CodeRoundedIcon fontSize="small" />;
     case "/bundle":
+    case "/folder":
       return <FolderZipIcon fontSize="small" />;
     case "/send":
       return <AttachFileIcon fontSize="small" />;
@@ -173,7 +174,7 @@ function StagedStrip({
                 display="block"
                 sx={{ fontSize: 9.5, px: 0.15, lineHeight: 1.1 }}
               >
-                {formatBytes(sf.size)}
+                {sf.isDir && sf.totalFiles != null ? `${sf.totalFiles.toLocaleString()} files · ${formatBytes(sf.size)}` : formatBytes(sf.size)}
               </Typography>
               <IconButton
                 size="small"

@@ -280,7 +280,7 @@ export function ChatScreen({
       .catch(() => {});
   }, []);
 
-  // Title bar badge on top: e.g. "(3) PeerChat v1.0.2"
+  // Title bar badge on top: e.g. "(3) PeerChat v1.0.3"
   const totalUnread = useMemo(
     () => convs.reduce((sum, c) => sum + (c.unread_count || 0), 0),
     [convs]
@@ -1747,18 +1747,46 @@ export function ChatScreen({
     }
   }
 
+  /** Pick a directory and stage it directly (zero zipping, supports node_modules). */
+  async function pickAndStageFolder() {
+    try {
+      const picked = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Select folder to share (supports node_modules)",
+      });
+      if (!picked) return;
+      const folderPath = Array.isArray(picked) ? picked[0] : picked;
+      if (folderPath) await stageDiskPaths([folderPath]);
+    } catch (err: any) {
+      setStatus(err?.message || "Could not select folder");
+    } finally {
+      requestAnimationFrame(() => composerRef.current?.focus());
+    }
+  }
+
   async function stageDiskPaths(paths: string[]) {
     const next: StagedFile[] = [];
     for (const path of paths) {
       try {
         const meta = await peerApi.localPathMeta(path);
         if (meta.is_dir) {
+          let folderBytes = meta.size;
+          let folderFiles = 0;
+          try {
+            const scan = await peerApi.scanFolderMeta(path);
+            folderBytes = scan.total_bytes;
+            folderFiles = scan.total_files;
+          } catch {
+            /* keep defaults if scan fails */
+          }
           next.push({
             id: `${meta.name}-dir-${Math.random().toString(16).slice(2)}`,
-            source: { path: meta.path, name: meta.name, size: meta.size },
+            source: { path: meta.path, name: meta.name, size: folderBytes },
             name: `${meta.name}/`,
-            size: meta.size,
+            size: folderBytes,
             isDir: true,
+            totalFiles: folderFiles,
             previewUrl: null,
           });
         } else {
@@ -1781,54 +1809,215 @@ export function ChatScreen({
     }
   }
 
-  async function packFolderAndSend(folderPath: string, folderName: string) {
-    const entries = await peerApi.listDirectoryFiles(folderPath);
-    if (!entries.length) {
-      setStatus(`Folder empty: ${folderName}`);
-      return;
-    }
-    if (entries.length > BUNDLE_MAX_FILES) {
-      setStatus(
-        `Folder has ${entries.length} files (max ${BUNDLE_MAX_FILES}). Try a smaller folder — large trees like node_modules often exceed this.`
-      );
-      return;
-    }
-    const totalBytes = entries.reduce((sum, e) => sum + (Number(e.size) || 0), 0);
-    if (totalBytes > BUNDLE_MAX_BYTES) {
-      setStatus(
-        `Folder is about ${formatBytes(totalBytes)} (max 5 GiB). Choose fewer/smaller files.`
-      );
-      return;
-    }
-    if (totalBytes > 500 * 1024 * 1024) {
-      const ok = await askConfirm({
-        title: "Pack large folder?",
-        body: `This will pack ~${formatBytes(totalBytes)} locally before sending (${entries.length} files). Continue?`,
-        confirmLabel: "Pack & send",
-      });
-      if (!ok) return;
-    }
-    setStatus(`Packing folder… 0/${entries.length}`);
-    let unlistenPack: (() => void) | undefined;
+  async function sendFolderDirectly(
+    folderPath: string,
+    folderName: string,
+    opts?: { skipNotice?: boolean }
+  ): Promise<string | undefined> {
+    const cleanName = folderName.replace(/[\\/]/g, "").trim() || "folder";
+    const archiveFileName = `${cleanName}.pcfolder`;
+    setStatus("Scanning folder…");
+    let folderMeta: { path: string; name: string; total_files: number; total_bytes: number };
     try {
-      unlistenPack = await listen<{
-        done_files: number;
-        total_files: number;
-        bytes: number;
-      }>("bundle-pack-progress", (ev) => {
-        const { done_files, total_files, bytes } = ev.payload;
-        setStatus(`Packing folder… ${done_files}/${total_files} (${formatBytes(bytes)})`);
+      folderMeta = await peerApi.scanFolderMeta(folderPath);
+    } catch (err: any) {
+      setStatus(`Failed to read folder: ${err?.message || err}`);
+      return undefined;
+    }
+
+    if (folderMeta.total_files === 0) {
+      setStatus(`Folder is empty: ${cleanName}`);
+      return undefined;
+    }
+
+    if (folderMeta.total_bytes > 5 * 1024 * 1024 * 1024) {
+      const ok = await askConfirm({
+        title: "Send very large folder?",
+        body: `This folder contains ${folderMeta.total_files.toLocaleString()} files (~${formatBytes(folderMeta.total_bytes)}). Continue?`,
+        confirmLabel: "Send folder",
       });
-      const packed = await peerApi.packBundle(
-        entries.map((e) => ({ abs_path: e.abs_path, rel_path: e.rel_path }))
+      if (!ok) return undefined;
+    }
+
+    const conversationId = activeRef.current?.id;
+    if (!conversationId) return undefined;
+
+    const estimatedTarBytes = folderMeta.total_bytes + folderMeta.total_files * 512 + 2048;
+    const chunkCount = Math.max(1, Math.ceil(estimatedTarBytes / CHUNK_SIZE));
+
+    const transferId = `send-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const started = new Date().toISOString();
+
+    setOutgoingFile({
+      conversationId,
+      name: `${cleanName}/`,
+      done: 0,
+      total: chunkCount,
+      sourcePath: folderPath,
+      sizeBytes: folderMeta.total_bytes,
+      paused: false,
+      cancelled: false,
+    });
+
+    await recordTransfer({
+      id: transferId,
+      filename: `${cleanName}/`,
+      direction: "send",
+      status: "connecting",
+      size_bytes: folderMeta.total_bytes,
+      conversation_id: conversationId,
+      peer_label: labelForConversation(conversationId),
+      started_at: started,
+    });
+
+    let fileId: string | undefined;
+    try {
+      const memberIds = await peerApi.memberIds(conversationId);
+      const pubs: Record<string, string> = {
+        [profile.id]: exportPublic(identity).x25519_public,
+      };
+      for (const mid of memberIds) {
+        const p = peers.find((x) => x.user_id === mid);
+        if (p) pubs[mid] = p.x25519_public;
+      }
+      const { contentKey, wrapped_keys } = await prepareFileEncryption(identity, pubs);
+      const nameEnc = encryptFilename(contentKey, archiveFileName);
+
+      const created = await peerApi.createOutgoingFile({
+        conversationId,
+        encFilename: nameEnc.ciphertext,
+        filenameNonce: nameEnc.nonce,
+        sizeBytes: estimatedTarBytes,
+        chunkCount,
+        wrappedKeys: wrapped_keys,
+        originalPath: folderPath,
+        fileCryptoV: 2,
+      });
+
+      fileId = created.file_id;
+      setFileNames((s) => ({ ...s, [fileId!]: `${cleanName}/` }));
+      setOutgoingFile((o) =>
+        o
+          ? {
+              ...o,
+              fileId,
+              cancelled: false,
+              paused: false,
+            }
+          : o
       );
-      setStatus(`Packed ${packed.name} — sending…`);
-      await sendFile({ path: packed.path, name: packed.name, size: packed.size });
-      await peerApi.deleteBundleFile(packed.path).catch(() => {});
-    } finally {
-      unlistenPack?.();
+
+      await recordTransfer({
+        id: transferId,
+        filename: `${cleanName}/`,
+        direction: "send",
+        status: "transferring",
+        size_bytes: folderMeta.total_bytes,
+        file_id: fileId,
+        conversation_id: conversationId,
+        peer_label: labelForConversation(conversationId),
+        started_at: started,
+      });
+
+      let unlistenStage: (() => void) | undefined;
+      let stagedChunkCount = chunkCount;
+      let stagedBytes = folderMeta.total_bytes;
+      try {
+        let lastStageUi = 0;
+        unlistenStage = await listen<{
+          file_id: string;
+          done: number;
+          total: number;
+          bytes_done: number;
+        }>("file-stage-progress", (ev) => {
+          if (ev.payload.file_id !== fileId) return;
+          if (abortSendRef.current) return;
+          const snap: OutgoingFileState = {
+            conversationId,
+            fileId,
+            name: `${cleanName}/`,
+            done: ev.payload.done,
+            total: Math.max(ev.payload.total, ev.payload.done),
+            sourcePath: folderPath,
+            sizeBytes: folderMeta.total_bytes,
+            paused: pauseRef.current,
+            cancelled: false,
+          };
+          publishTransferProgress({ outgoing: snap });
+          const now = Date.now();
+          if (now - lastStageUi > 350) {
+            lastStageUi = now;
+            setOutgoingFile((prev) => (prev?.cancelled ? prev : snap));
+          }
+        });
+
+        const staged = await peerApi.stageOutgoingFolder(
+          fileId,
+          folderPath,
+          b64(contentKey)
+        );
+        if (abortSendRef.current) throw new Error("aborted");
+        stagedChunkCount = staged.chunk_count || chunkCount;
+        stagedBytes = Number(staged.bytes_written) || folderMeta.total_bytes;
+        setOutgoingFile({
+          conversationId,
+          fileId,
+          name: `${cleanName}/`,
+          done: stagedChunkCount,
+          total: stagedChunkCount,
+        });
+      } finally {
+        unlistenStage?.();
+      }
+
+      await recordTransfer({
+        id: transferId,
+        filename: `${cleanName}/`,
+        direction: "send",
+        status: "completed",
+        size_bytes: stagedBytes,
+        bytes_done: stagedBytes,
+        file_id: fileId,
+        conversation_id: conversationId,
+        peer_label: labelForConversation(conversationId),
+        started_at: started,
+      });
+
+      if (!opts?.skipNotice) {
+        await peerApi.sendFileNotice(
+          conversationId,
+          fileId,
+          memberIds.filter((id) => id !== profile.id)
+        );
+        setStatus(`Shared folder: ${cleanName}/ (${folderMeta.total_files.toLocaleString()} files)`);
+      }
+      return fileId;
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (fileId) {
+        await peerApi.abortOutgoingFile(fileId).catch(() => {});
+      }
+      await recordTransfer({
+        id: transferId,
+        filename: `${cleanName}/`,
+        direction: "send",
+        status: "failed",
+        size_bytes: folderMeta.total_bytes,
+        error: explainTransferError(msg),
+        conversation_id: conversationId,
+        peer_label: labelForConversation(conversationId),
+        started_at: started,
+      });
+      setStatus(msg === "aborted" ? "Folder transfer cancelled" : `Folder transfer failed: ${msg}`);
+      setOutgoingFile(null);
+      return undefined;
     }
   }
+
+  async function packFolderAndSend(folderPath: string, folderName: string) {
+    return sendFolderDirectly(folderPath, folderName);
+  }
+
 
   function discardStagedCapture(sf: StagedFile | undefined) {
     if (sf?.captureId) {
@@ -2499,7 +2688,14 @@ export function ChatScreen({
       if (sf.isDir && !(src instanceof File)) {
         if (sf.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(sf.previewUrl);
         try {
-          await packFolderAndSend(src.path, src.name);
+          const fid = await sendFolderDirectly(src.path, sf.name.replace(/\/$/, ""), {
+            skipNotice: true,
+          });
+          if (fid) {
+            fileIds.push(fid);
+            setFileNames((s) => ({ ...s, [fid]: sf.name }));
+            setFileSizes((s) => ({ ...s, [fid]: sf.size }));
+          }
         } catch (err: any) {
           setStatus(err?.message || String(err));
         }
@@ -3590,7 +3786,26 @@ export function ChatScreen({
         peer_label: senderLabel(uploaderId),
         started_at: started,
       });
-      const path = await peerApi.finalizeFileReceive(fileId, name);
+      let path: string;
+      if (name.endsWith(".pcfolder")) {
+        const folderName = name.slice(0, -".pcfolder".length);
+        setStatus(`Unpacking folder ${folderName}…`);
+        let unlistenUnpack: (() => void) | undefined;
+        try {
+          unlistenUnpack = await listen<{ file_id: string; unpacked_files: number }>(
+            "folder-unpack-progress",
+            (ev) => {
+              if (ev.payload.file_id !== fileId) return;
+              setStatus(`Unpacking ${folderName}… ${ev.payload.unpacked_files.toLocaleString()} files`);
+            }
+          );
+          path = await peerApi.finalizeFolderReceive(fileId, folderName);
+        } finally {
+          unlistenUnpack?.();
+        }
+      } else {
+        path = await peerApi.finalizeFileReceive(fileId, name);
+      }
       // Record local path so the UI immediately knows this file is saved.
       setFileLocalPaths((prev) => ({ ...prev, [fileId]: path }));
       setFileMetaReady((prev) => ({ ...prev, [fileId]: true }));
@@ -3912,9 +4127,11 @@ export function ChatScreen({
         const sf = files[0];
         clearStagedFiles();
         if (sf.isDir && !(sf.source instanceof File)) {
-          await packFolderAndSend(sf.source.path, sf.name);
+          fileId = await sendFolderDirectly(sf.source.path, sf.name.replace(/\/$/, ""), { skipNotice: true });
+          fileLabel = sf.name;
+          if (fileId) setFileNames((s) => ({ ...s, [fileId!]: sf.name }));
           // folder send posts its own notice; fall back to text-only announcement
-          fileId = undefined;
+          // folder attached to announcement
         } else {
           fileId = await sendFile(
             sf.source instanceof File ? sf.source : sf.source,
@@ -4052,6 +4269,8 @@ export function ChatScreen({
       void pickAndStageFiles();
     } else if (name === "/bundle") {
       setBundleOpen(true);
+    } else if (name === "/folder") {
+      void pickAndStageFolder();
     } else if (name === "/calendar") {
       setNav("calendar");
     } else if (name === "/peers") {

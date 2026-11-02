@@ -18,6 +18,7 @@ export type StagedFile = {
   size: number;
   /** True only for disk folders (ZIP on send). Never infer from display name. */
   isDir: boolean;
+  totalFiles?: number;
   previewUrl: string | null;
   /** Opaque id for Screenshot & Annotate temps under app captures/. */
   captureId?: string;
