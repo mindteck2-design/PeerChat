@@ -857,7 +857,11 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                 maxRows={5}
                 placeholder={
                   outgoingFile && !outgoingFile.cancelled
-                    ? `Sending ${outgoingFile.name}… you can still type`
+                    ? outgoingFile.label
+                      ? `${outgoingFile.label.replace(/…$/, "")} ${outgoingFile.name}… you can still type`
+                      : outgoingFile.name.endsWith("/")
+                        ? `Packaging ${outgoingFile.name}… you can still type`
+                        : `Sending ${outgoingFile.name}… you can still type`
                     : editingMessage
                       ? "Edit message… (Esc to cancel)"
                       : isAnnounceBoard

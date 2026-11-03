@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { useIncomingTransfer, useOutgoingTransfer } from "../files/transferProgressStore";
 import {
   Avatar, Box, Chip, Fade, Grow, IconButton, InputBase, List,
@@ -97,12 +97,14 @@ function ExpandableMessageText({
               sx={{
                 float: "right",
                 display: "inline-flex",
-                alignItems: "center",
+                alignItems: "flex-end",
                 gap: 0.35,
-                ml: 1,
-                mt: "3px",
-                height: 14,
-                verticalAlign: "middle",
+                ml: 1.25,
+                // WhatsApp-style: sit slightly below the text baseline, not mid-line.
+                mt: "7px",
+                mb: "-1px",
+                height: 15,
+                verticalAlign: "text-bottom",
                 whiteSpace: "nowrap",
                 userSelect: "none",
               }}
@@ -147,8 +149,9 @@ function ExpandableMessageText({
               component="span"
               sx={{
                 display: "inline-flex",
-                alignItems: "center",
+                alignItems: "flex-end",
                 gap: 0.35,
+                mt: "2px",
                 userSelect: "none",
                 whiteSpace: "nowrap",
               }}
@@ -219,6 +222,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
     setStatus,
     status,
     text,
+    unreadDivider,
   } = vm;
 
   // Narrow subscription — progress ticks need not rebuild ChatScreen's god vm.
@@ -239,6 +243,21 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
     return map;
   }, [messages]);
 
+  // First unread message for the one-shot "Unread" chip (cleared when leaving the chat).
+  // Kinds must match backend unread_message_filter_sql.
+  const firstUnreadMessageId = useMemo(() => {
+    if (!unreadDivider || unreadDivider.conversationId !== active?.id) return null;
+    const count = Math.max(0, Number(unreadDivider.count) || 0);
+    if (count <= 0) return null;
+    const kinds = new Set(["text", "forwarded", "file_notice", "system"]);
+    const incoming = messages.filter(
+      (m) => m.sender_id !== profile.id && kinds.has(m.kind)
+    );
+    if (!incoming.length) return null;
+    const start = Math.max(0, incoming.length - count);
+    return incoming[start]?.id ?? null;
+  }, [unreadDivider, active?.id, messages, profile.id]);
+
   const renderMessage = (m) => {
     const mine = m.sender_id === profile.id;
     const quoted = m.reply_to ? msgById.get(m.reply_to) : undefined;
@@ -257,7 +276,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
 
     if (m.kind === "system") {
       return (
-        <Grow in key={m.id} timeout={180}>
+        <Grow in timeout={180}>
           <Box display="flex" justifyContent="center" my={0.35}>
             <Chip
               size="small"
@@ -446,7 +465,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
     const overflowCount = (m.reactions || []).length > 3 ? (m.reactions || []).length - 3 : 0;
 
     return (
-      <MsgEnter in key={m.id} timeout={hasAttachments ? 160 : 180}>
+      <MsgEnter in timeout={hasAttachments ? 160 : 180}>
         <Box
           id={`msg-${m.id}`}
           className="msg-row"
@@ -501,8 +520,8 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             </IconButton>
           )}
 
-          {/* Left Avatar for RECEIVED messages */}
-          {!mine && (
+          {/* Avatars only in groups — DMs are always the same peer. */}
+          {!mine && isGroup && (
             <Avatar
               sx={{
                 width: 28,
@@ -785,7 +804,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                     setNav("calendar");
                   }}
                 />
-                <Box sx={{ mt: 0.35, display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+                <Box sx={{ mt: 0.55, display: "flex", alignItems: "flex-end", justifyContent: "flex-end" }}>
                   {metaContent}
                 </Box>
               </Box>
@@ -878,7 +897,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                     setNav("games");
                   }}
                 />
-                <Box sx={{ mt: 0.35, display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+                <Box sx={{ mt: 0.55, display: "flex", alignItems: "flex-end", justifyContent: "flex-end" }}>
                   {metaContent}
                 </Box>
               </Box>
@@ -904,7 +923,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                     void openAttachment(fid, m.sender_id);
                   }}
                 />
-                <Box sx={{ mt: 0.35, display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+                <Box sx={{ mt: 0.55, display: "flex", alignItems: "flex-end", justifyContent: "flex-end" }}>
                   {metaContent}
                 </Box>
               </Box>
@@ -991,7 +1010,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                 {m.kind === "file_notice" && !hasAttachments && (
                   <Typography sx={{ fontSize: 13, px: 0.5 }}>📎 File</Typography>
                 )}
-                <Box sx={{ mt: 0.35, display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+                <Box sx={{ mt: 0.55, display: "flex", alignItems: "flex-end", justifyContent: "flex-end" }}>
                   {metaContent}
                 </Box>
               </Box>
@@ -1002,7 +1021,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                   bigEmoji={true}
                   emojiFontSize={emojiOnlyFontSize(emojiN!)}
                 />
-                <Box sx={{ mt: 0.15, display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+                <Box sx={{ mt: 0.35, display: "flex", alignItems: "flex-end", justifyContent: "flex-end" }}>
                   {metaContent}
                 </Box>
               </Box>
@@ -1191,7 +1210,30 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
               }}
             />
           </Box>
-          {group.items.map((m) => renderMessage(m))}
+          {group.items.map((m) => (
+            <Fragment key={m.id}>
+              {m.id === firstUnreadMessageId && (
+                <Box display="flex" justifyContent="center" my={0.85}>
+                  <Chip
+                    label="Unread"
+                    size="small"
+                    sx={{
+                      height: 22,
+                      px: 1,
+                      bgcolor: dark ? "rgba(83, 189, 235, 0.16)" : "rgba(15, 107, 92, 0.12)",
+                      color: dark ? "#7dd3f0" : "primary.main",
+                      fontWeight: 700,
+                      fontSize: 11,
+                      letterSpacing: "0.02em",
+                      border: "1px solid",
+                      borderColor: dark ? "rgba(83, 189, 235, 0.35)" : "rgba(15, 107, 92, 0.28)",
+                    }}
+                  />
+                </Box>
+              )}
+              {renderMessage(m)}
+            </Fragment>
+          ))}
         </Box>
       ))}
       {outgoingFile && active?.id === outgoingFile.conversationId && (
@@ -1242,7 +1284,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                     ? "Cancelled"
                     : outgoingFile.paused
                       ? "Paused"
-                      : "Sending…"}
+                      : outgoingFile.label || (outgoingFile.name.endsWith("/") ? "Packaging folder…" : "Sending…")}
                   {!outgoingFile.cancelled && outgoingFile.total
                     ? ` ${Math.min(
                         100,
@@ -1454,7 +1496,9 @@ export const MessageList = memo(
       prev.vm.fileSizes === next.vm.fileSizes &&
       prev.vm.fileThumbs === next.vm.fileThumbs &&
       prev.vm.fileLocalPaths === next.vm.fileLocalPaths &&
-      prev.vm.fileMetaReady === next.vm.fileMetaReady
+      prev.vm.fileMetaReady === next.vm.fileMetaReady &&
+      prev.vm.unreadDivider === next.vm.unreadDivider &&
+      prev.vm.plain === next.vm.plain
     );
   }
 );

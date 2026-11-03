@@ -94,6 +94,7 @@ pub struct StreamingChunkWriter<'a> {
     staging_dir: PathBuf,
     content_key: [u8; 32],
     chunk_index: u32,
+    expected_chunks: u32,
     buffer: Vec<u8>,
     hasher: Sha256,
     total_plain_bytes: u64,
@@ -108,6 +109,7 @@ impl<'a> StreamingChunkWriter<'a> {
         file_id: String,
         staging_dir: PathBuf,
         content_key: [u8; 32],
+        expected_chunks: u32,
         app: Option<&'a AppHandle>,
         pause_flag: Arc<AtomicBool>,
         cancel_flag: Arc<AtomicBool>,
@@ -117,6 +119,7 @@ impl<'a> StreamingChunkWriter<'a> {
             staging_dir,
             content_key,
             chunk_index: 0,
+            expected_chunks: expected_chunks.max(1),
             buffer: Vec::with_capacity(PLAIN_CHUNK_BYTES + 64 * 1024),
             hasher: Sha256::new(),
             total_plain_bytes: 0,
@@ -150,7 +153,10 @@ impl<'a> StreamingChunkWriter<'a> {
         if ciphertext.len() > MAX_CHUNK_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                format!("encrypted chunk exceeds {MAX_CHUNK_BYTES} bytes"),
+                format!(
+                    "encrypted chunk exceeds {}",
+                    crate::util::format_bytes(MAX_CHUNK_BYTES as u64)
+                ),
             ));
         }
 
@@ -172,12 +178,17 @@ impl<'a> StreamingChunkWriter<'a> {
                 || self.last_emit.elapsed() >= std::time::Duration::from_millis(250)
             {
                 self.last_emit = Instant::now();
+                let total = if is_final {
+                    self.chunk_index
+                } else {
+                    std::cmp::max(self.expected_chunks, self.chunk_index)
+                };
                 let _ = app.emit(
                     "file-stage-progress",
                     json!({
                         "file_id": &self.file_id,
                         "done": self.chunk_index,
-                        "total": self.chunk_index,
+                        "total": total,
                         "bytes_done": self.total_plain_bytes,
                     }),
                 );
@@ -191,6 +202,17 @@ impl<'a> StreamingChunkWriter<'a> {
             self.flush_chunk(true)?;
         }
         let digest = hex::encode(self.hasher.finalize());
+        if let Some(app) = self.app {
+            let _ = app.emit(
+                "file-stage-progress",
+                json!({
+                    "file_id": &self.file_id,
+                    "done": self.chunk_index,
+                    "total": self.chunk_index,
+                    "bytes_done": self.total_plain_bytes,
+                }),
+            );
+        }
         Ok((digest, self.total_plain_bytes, self.chunk_index))
     }
 }
@@ -232,6 +254,7 @@ pub fn stage_folder_stream(
     folder_path: &str,
     staging_dir: &Path,
     content_key: [u8; 32],
+    expected_chunks: u32,
     cancel_flag: Arc<AtomicBool>,
     pause_flag: Arc<AtomicBool>,
 ) -> Result<(String, u64, u32), String> {
@@ -250,6 +273,7 @@ pub fn stage_folder_stream(
         file_id.to_string(),
         staging_dir.to_path_buf(),
         content_key,
+        expected_chunks,
         app,
         pause_flag,
         cancel_flag,

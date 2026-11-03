@@ -107,8 +107,11 @@ where
         let canon = path.canonicalize().map_err(|e| e.to_string())?;
         let mut src = File::open(&canon).map_err(|e| e.to_string())?;
         total = total.saturating_add(meta.len());
-        if total > 5 * 1024 * 1024 * 1024 {
-            return Err("bundle exceeds 5 GiB".into());
+        if total > crate::util::MAX_FILE_BYTES as u64 {
+            return Err(format!(
+                "bundle exceeds {}",
+                crate::util::format_bytes(crate::util::MAX_FILE_BYTES as u64)
+            ));
         }
         zip.start_file(rel, opts).map_err(|e| e.to_string())?;
         std::io::copy(&mut src, &mut zip).map_err(|e| e.to_string())?;

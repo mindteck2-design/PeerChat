@@ -56,7 +56,10 @@ pub fn create_outgoing_file(
         db::get_profile(&conn)?.ok_or("no profile")?
     };
     if size_bytes <= 0 || size_bytes > MAX_FILE_BYTES {
-        return Err(format!("file size must be 1..{MAX_FILE_BYTES} bytes"));
+        return Err(format!(
+            "file too large (max {})",
+            format_bytes(MAX_FILE_BYTES as u64)
+        ));
     }
     if chunk_count <= 0 || chunk_count > MAX_CHUNKS {
         return Err(format!("chunk_count must be 1..{MAX_CHUNKS}"));
@@ -113,7 +116,10 @@ pub fn write_file_chunk(
         .decode(&data_b64)
         .map_err(|e| e.to_string())?;
     if data.len() > MAX_CHUNK_BYTES {
-        return Err(format!("chunk exceeds {MAX_CHUNK_BYTES} bytes"));
+        return Err(format!(
+            "chunk exceeds {}",
+            format_bytes(MAX_CHUNK_BYTES as u64)
+        ));
     }
     {
         let conn = state.db.lock();
@@ -162,7 +168,10 @@ pub async fn stage_outgoing_from_path(
     let meta = std::fs::metadata(&src).map_err(explain_io)?;
     let size = meta.len();
     if size == 0 || size > MAX_FILE_BYTES as u64 {
-        return Err(format!("file size must be 1..{MAX_FILE_BYTES} bytes"));
+        return Err(format!(
+            "file too large (max {})",
+            format_bytes(MAX_FILE_BYTES as u64)
+        ));
     }
     let expected_chunks = ((size + PLAIN_CHUNK_BYTES as u64 - 1) / PLAIN_CHUNK_BYTES as u64) as u32;
     if expected_chunks == 0 || expected_chunks as i64 > MAX_CHUNKS {
@@ -235,7 +244,10 @@ pub async fn stage_outgoing_from_path(
                 let (nonce_b64, ciphertext) =
                     peer_http::encrypt_file_chunk(&content_key, plain, Some(index))?;
                 if ciphertext.len() > MAX_CHUNK_BYTES {
-                    return Err(format!("encrypted chunk exceeds {MAX_CHUNK_BYTES} bytes"));
+                    return Err(format!(
+                        "encrypted chunk exceeds {}",
+                        format_bytes(MAX_CHUNK_BYTES as u64)
+                    ));
                 }
                 std::fs::write(dir.join(format!("{index}.chunk")), &ciphertext).map_err(explain_io)?;
                 std::fs::write(dir.join(format!("{index}.nonce")), nonce_b64.as_bytes())
@@ -324,7 +336,7 @@ pub async fn stage_outgoing_folder(
         return Err("source folder missing or not a directory".into());
     }
 
-    {
+    let expected_chunks = {
         let conn = state.db.lock();
         let profile = db::get_profile(&conn)?.ok_or("no profile")?;
         let me = profile["id"].as_str().unwrap_or("");
@@ -332,7 +344,8 @@ pub async fn stage_outgoing_folder(
         if file["uploader_id"].as_str() != Some(me) {
             return Err("only uploader may stage outgoing folder".into());
         }
-    }
+        file["chunk_count"].as_i64().unwrap_or(0).max(1) as u32
+    };
 
     let dir = resolve_staging_dir(&app, &file_id)?;
     std::fs::create_dir_all(&dir).map_err(explain_io)?;
@@ -350,6 +363,7 @@ pub async fn stage_outgoing_folder(
             &path_bg,
             &dir,
             key_arr,
+            expected_chunks,
             cancel_flag,
             pause_flag,
         );
@@ -796,7 +810,10 @@ pub async fn save_downloaded_file(
         .decode(data_b64)
         .map_err(|e| e.to_string())?;
     if data.len() > MAX_FILE_BYTES as usize {
-        return Err("decoded file exceeds size limit".into());
+        return Err(format!(
+            "file too large (max {})",
+            format_bytes(MAX_FILE_BYTES as u64)
+        ));
     }
     let name = safe_download_name(&filename);
     let dir = resolve_download_dir(&app, &state)?;
@@ -830,23 +847,70 @@ pub async fn save_downloaded_file(
 
 #[tauri::command]
 pub fn begin_file_receive(app: AppHandle, state: State<AppState>, file_id: String) -> Result<Value, String> {
-    let conn = state.db.lock();
-    if let Ok(Some((next, temp))) = db::get_receive_progress(&conn, &file_id) {
+    let (size_bytes, existing) = {
+        let conn = state.db.lock();
+        let meta = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
+        let size = meta["size_bytes"].as_i64().unwrap_or(0).max(0) as u64;
+        let existing = db::get_receive_progress(&conn, &file_id)?;
+        (size, existing)
+    };
+
+    if let Some((next, temp)) = existing {
+        // Resume: only need space for the remaining payload.
+        if let Some(ref temp_s) = temp {
+            let written = std::fs::metadata(temp_s).map(|m| m.len()).unwrap_or(0);
+            let remaining = size_bytes.saturating_sub(written);
+            let temp_path = std::path::Path::new(temp_s);
+            ensure_disk_space(temp_path, remaining)?;
+            let download_dir = resolve_download_dir(&app, &state)?;
+            // Cross-volume finalize copies instead of rename — need room on the destination too.
+            if !paths_same_volume(temp_path, &download_dir) {
+                ensure_disk_space(&download_dir, remaining)?;
+            }
+        }
         return Ok(json!({ "next_index": next, "temp_path": temp }));
     }
+
     let tmp_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("incoming");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    ensure_disk_space(&tmp_dir, size_bytes)?;
+    let download_dir = resolve_download_dir(&app, &state)?;
+    if !paths_same_volume(&tmp_dir, &download_dir) {
+        ensure_disk_space(&download_dir, size_bytes)?;
+    }
     let temp = tmp_dir.join(format!("{file_id}.part"));
     if temp.exists() {
         let _ = std::fs::remove_file(&temp);
     }
     std::fs::File::create(&temp).map_err(|e| e.to_string())?;
-    db::upsert_receive_progress(&conn, &file_id, 0, Some(&temp.display().to_string()))?;
+    {
+        let conn = state.db.lock();
+        db::upsert_receive_progress(&conn, &file_id, 0, Some(&temp.display().to_string()))?;
+    }
     Ok(json!({ "next_index": 0, "temp_path": temp.display().to_string() }))
+}
+
+fn paths_same_volume(a: &std::path::Path, b: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        fn root_of(p: &std::path::Path) -> Option<String> {
+            let s = p.components().next()?.as_os_str().to_string_lossy().to_string();
+            Some(s.to_ascii_uppercase())
+        }
+        match (root_of(a), root_of(b)) {
+            (Some(ra), Some(rb)) => ra == rb,
+            _ => true,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (a, b);
+        true
+    }
 }
 
 #[tauri::command]
@@ -1105,7 +1169,10 @@ pub fn cache_outgoing_plain(
         .decode(data_b64)
         .map_err(|e| e.to_string())?;
     if data.len() > MAX_FILE_BYTES as usize {
-        return Err("decoded file exceeds size limit".into());
+        return Err(format!(
+            "file too large (max {})",
+            format_bytes(MAX_FILE_BYTES as u64)
+        ));
     }
     let name = safe_download_name(&filename);
     let dir = app
@@ -1466,7 +1533,10 @@ pub fn read_bundle_chunk(app: AppHandle, path: String, offset: u64, len: u32) ->
 pub fn read_file_chunk(path: String, offset: u64, len: u32) -> Result<String, String> {
     use std::io::{Read, Seek, SeekFrom};
     if len == 0 || (len as usize) > MAX_CHUNK_BYTES {
-        return Err(format!("invalid read length (max {MAX_CHUNK_BYTES} bytes)"));
+        return Err(format!(
+            "invalid read length (max {})",
+            format_bytes(MAX_CHUNK_BYTES as u64)
+        ));
     }
     let p = std::path::PathBuf::from(&path);
     let meta = std::fs::symlink_metadata(&p).map_err(|e| e.to_string())?;

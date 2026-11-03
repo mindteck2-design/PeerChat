@@ -27,7 +27,9 @@ export type StagedFile = {
 };
 
 export const BUNDLE_MAX_FILES = 5000;
-export const BUNDLE_MAX_BYTES = 5 * 1024 * 1024 * 1024;
+/** Must stay in sync with Rust `MAX_FILE_BYTES` (10 GiB). */
+export const MAX_FILE_BYTES = 10 * 1024 * 1024 * 1024;
+export const BUNDLE_MAX_BYTES = MAX_FILE_BYTES;
 
 export type OutgoingFileState = {
   conversationId: string;
@@ -36,6 +38,8 @@ export type OutgoingFileState = {
   name: string;
   done: number;
   total: number;
+  /** Progress chip label — e.g. "Packaging folder…" */
+  label?: string;
   /** True while encrypt/upload is cooperatively paused. */
   paused?: boolean;
   /** True after user Stop — bubble stays; progress controls hide. */

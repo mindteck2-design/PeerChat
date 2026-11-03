@@ -135,9 +135,16 @@ export function conversationPreviewLine(
 }
 
 export function formatBytes(n: number) {
+  if (!Number.isFinite(n) || n < 0) return "";
   if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`;
+  if (n < 1024 * 1024 * 1024) {
+    return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+  }
+  if (n < 1024 * 1024 * 1024 * 1024) {
+    return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+  return `${(n / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
 }
 
 export function extOfName(name: string) {

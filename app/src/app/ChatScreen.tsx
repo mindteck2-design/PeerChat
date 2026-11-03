@@ -209,6 +209,7 @@ import {
 import {
   BUNDLE_MAX_BYTES,
   BUNDLE_MAX_FILES,
+  MAX_FILE_BYTES,
   FILE_FETCH_BATCH,
   type FilePreview,
   type IncomingFileState,
@@ -296,6 +297,11 @@ export function ChatScreen({
     }
   }, [totalUnread, version]);
   const [active, setActive] = useState<Conversation | null>(null);
+  /** Snapshot of unread count when opening a chat; drives the one-shot Unread chip. */
+  const [unreadDivider, setUnreadDivider] = useState<{
+    conversationId: string;
+    count: number;
+  } | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const loadingOlderRef = useRef(false);
@@ -371,7 +377,8 @@ export function ChatScreen({
   useEffect(() => {
     if (!status) return;
     if (statusClearRef.current) window.clearTimeout(statusClearRef.current);
-    statusClearRef.current = window.setTimeout(() => setStatus(""), 8000);
+    // Keep in sync with Snackbar autoHideDuration below.
+    statusClearRef.current = window.setTimeout(() => setStatus(""), 5500);
     return () => {
       if (statusClearRef.current) window.clearTimeout(statusClearRef.current);
     };
@@ -1696,6 +1703,11 @@ export function ChatScreen({
     setStagedFiles(stagedDraftsRef.current[c.id] ?? []);
     setInChatSearchOpen(false);
     setInChatQuery("");
+    // Capture unread before markConversationRead clears it; gone after leave+return.
+    const unread = Number(c.unread_count) || 0;
+    setUnreadDivider(
+      unread > 0 ? { conversationId: c.id, count: unread } : null
+    );
     setActive(c);
     if (c.kind === "group") {
       appLog("info", "[GroupCrypto:selectConversation]", {
@@ -1950,6 +1962,12 @@ export function ChatScreen({
       return undefined;
     }
 
+    if (folderMeta.total_bytes > MAX_FILE_BYTES) {
+      setStatus(
+        `Folder is too large (~${formatBytes(folderMeta.total_bytes)}; max ${formatBytes(MAX_FILE_BYTES)})`
+      );
+      return undefined;
+    }
     if (folderMeta.total_bytes > 5 * 1024 * 1024 * 1024) {
       const ok = await askConfirm({
         title: "Send very large folder?",
@@ -1977,6 +1995,7 @@ export function ChatScreen({
       sizeBytes: folderMeta.total_bytes,
       paused: false,
       cancelled: false,
+      label: "Packaging folder…",
     });
 
     await recordTransfer({
@@ -2062,6 +2081,7 @@ export function ChatScreen({
             sizeBytes: folderMeta.total_bytes,
             paused: pauseRef.current,
             cancelled: false,
+            label: "Packaging folder…",
           };
           publishTransferProgress({ outgoing: snap });
           const now = Date.now();
@@ -2131,6 +2151,11 @@ export function ChatScreen({
       setStatus(msg === "aborted" ? "Folder transfer cancelled" : `Folder transfer failed: ${msg}`);
       setOutgoingFile(null);
       return undefined;
+    } finally {
+      // Clear outgoingFile on completion; keep cancelled state if cancelled by user
+      setOutgoingFile((o) => (o?.cancelled ? o : null));
+      abortSendRef.current = false;
+      pauseRef.current = false;
     }
   }
 
@@ -2385,7 +2410,7 @@ export function ChatScreen({
         } else {
           const gk = await ensureGroupKey(target.id);
           if (!gk) {
-            setStatus(`Waiting for group encryption key for ${target.title || "group"}...`);
+            setStatus(`Waiting for group encryption key for ${target.title || "group"}…`);
             continue;
           }
           const enc = await encryptWithGroupKey(body, target.id, profile.id, gk, identity);
@@ -2525,7 +2550,7 @@ export function ChatScreen({
       const gk = await ensureGroupKey(active.id);
       if (!gk) {
         setText(body.trim());
-        setStatus("Waiting for group encryption key...");
+        setStatus("Waiting for group encryption key…");
         return;
       }
       setStatus("");
@@ -2659,7 +2684,7 @@ export function ChatScreen({
       const gk = await ensureGroupKey(active.id);
       if (!gk) {
         setText(body.trim());
-        setStatus("Waiting for group encryption key...");
+        setStatus("Waiting for group encryption key…");
         return;
       }
       setStatus("");
@@ -2690,7 +2715,7 @@ export function ChatScreen({
   async function submitComposer() {
     if (!active) return;
     if (stagedFiles.some((f) => f.scanning)) {
-      setStatus("Scanning attachments in progress, please wait…");
+      setStatus("Still scanning attachments — please wait…");
       return;
     }
     // While a file is staging, only allow plain text (attach stays locked).
@@ -2775,7 +2800,11 @@ export function ChatScreen({
       }
     }
     if (scanFailures.length) {
-      setStatus(`Warning: virus scan unavailable for ${scanFailures.length} file${scanFailures.length === 1 ? "" : "s"}; continuing.`);
+      setStatus(
+        `Warning: virus scan unavailable for ${scanFailures.length} file${
+          scanFailures.length === 1 ? "" : "s"
+        }; continuing anyway.`
+      );
     }
 
     // Clear the composer only after preflight succeeds, so a cancelled batch
@@ -2891,6 +2920,8 @@ export function ChatScreen({
         }
       } catch (err: any) {
         setStatus(err?.message || String(err));
+      } finally {
+        setOutgoingFile((o) => (o?.cancelled ? o : null));
       }
     } else if (body) {
       await sendText(body, replyId);
@@ -3208,6 +3239,16 @@ export function ChatScreen({
     const name = file instanceof File ? file.name : file.name;
     const size = file instanceof File ? file.size : file.size;
     const conversationId = active.id;
+    if (!size) {
+      setStatus(`File is empty: ${name}`);
+      return undefined;
+    }
+    if (size > MAX_FILE_BYTES) {
+      setStatus(
+        `File is too large (${formatBytes(size)}; max ${formatBytes(MAX_FILE_BYTES)})`
+      );
+      return undefined;
+    }
 
     // Outgoing virus scanning is performed once for the whole selected batch in
     // submitComposer(), before any file is uploaded. Keep this function transfer-only.
@@ -3444,7 +3485,12 @@ export function ChatScreen({
         started_at: started,
       });
       if (!opts?.skipNotice) {
-        setStatus(`Sent ${name} · verified · ${Math.round(sentBytes / seconds / 1024)} KB/s`);
+        const rate = seconds > 0 ? sentBytes / seconds : 0;
+        setStatus(
+          rate > 0
+            ? `Sent ${name} · verified · ${formatBytes(rate)}/s`
+            : `Sent ${name} · verified`
+        );
       }
       return fileId;
     } catch (err: any) {
@@ -3699,16 +3745,54 @@ export function ChatScreen({
     }
   }
 
-  /** One-click: fetch from peer (sender must be online) → save under Downloads. */
+  /** Map backend transfer errors to short toast-friendly copy. */
   function explainTransferError(raw: string) {
-    if (/space/i.test(raw)) return `Not enough disk space. ${raw}`;
-    if (/permission/i.test(raw)) return `Permission denied while writing the file. ${raw}`;
-    if (/integrity/i.test(raw)) return raw;
-    if (/invalid destination/i.test(raw)) return raw;
-    if (/offline|no ip|no port|uploader|connect|tls|fingerprint|forbidden|missing chunk/i.test(raw)) {
-      return "Can't reach the sender. Keep PeerChat running on their PC (tray is OK — even if the screen is locked). If their PC sleeps, powers off, or leaves the LAN, retry when they're back.";
+    const msg = String(raw || "").trim();
+    if (!msg) return "Transfer failed";
+    // Already humanized (disk preflight, size limits, etc.) — pass through.
+    if (/^Not enough disk space/i.test(msg)) return msg;
+    if (/^file too large/i.test(msg)) return msg;
+    if (/Folder is too large/i.test(msg)) return msg;
+    if (/space/i.test(msg)) return `Not enough disk space: ${msg}`;
+    if (/permission/i.test(msg)) return `Permission denied while writing the file`;
+    if (/integrity/i.test(msg)) return msg;
+    if (/invalid destination/i.test(msg)) return msg;
+    if (/decoded file exceeds size limit/i.test(msg)) {
+      return `File is too large (max ${formatBytes(MAX_FILE_BYTES)})`;
     }
-    return raw;
+    if (/offline|no ip|no port|uploader|connect|tls|fingerprint|forbidden|missing chunk/i.test(msg)) {
+      return "Can't reach the sender. Keep PeerChat open on their PC (tray is OK). Retry when they're back on the LAN.";
+    }
+    return msg;
+  }
+
+  function statusAlertSeverity(
+    text: string
+  ): "error" | "warning" | "info" | "success" {
+    const t = text.toLowerCase();
+    if (/warning:|virus scan unavailable|scan warning|⚠/.test(t)) return "warning";
+    if (
+      /^blocked —|^unblocked$|sent |shared |saved |copied|opened|downloaded|forwarded|updated|removed|deleted|verified|shown in|desktop notifications|profile updated|group renamed|group deleted|chat deleted|download folder/.test(
+        t
+      )
+    ) {
+      return "success";
+    }
+    if (
+      /fail|error|could not|couldn't|denied|too large|not enough|can't|cannot|missing|aborted|nothing sent|file not sent|author is not on the lan/.test(
+        t
+      )
+    ) {
+      return "error";
+    }
+    if (
+      /cancelled|paused|waiting|scanning|packing|downloading|unpacking|retrying|pin limit|select a conversation|re-attach|add a title|one file per/.test(
+        t
+      )
+    ) {
+      return "info";
+    }
+    return "info";
   }
 
   async function downloadFileToDownloads(
@@ -4168,6 +4252,7 @@ export function ChatScreen({
       }
       await peerApi.leaveGroup(active.id, wraps);
       setMembersOpen(false);
+      setUnreadDivider(null);
       setActive(null);
       await refresh();
     } catch (err: any) {
@@ -4196,7 +4281,10 @@ export function ChatScreen({
     try {
       await peerApi.deleteConversationLocal(target.id);
       setMembersOpen(false);
-      if (active?.id === target.id) setActive(null);
+      if (active?.id === target.id) {
+        setUnreadDivider(null);
+        setActive(null);
+      }
       await refresh();
       setStatus("Group removed from your chats");
     } catch (err: any) {
@@ -4217,7 +4305,10 @@ export function ChatScreen({
     if (!ok) return;
     try {
       await peerApi.deleteConversationLocal(conv.id);
-      if (active?.id === conv.id) setActive(null);
+      if (active?.id === conv.id) {
+        setUnreadDivider(null);
+        setActive(null);
+      }
       await refresh();
       setStatus("Chat deleted");
     } catch (err: any) {
@@ -4228,7 +4319,7 @@ export function ChatScreen({
   async function postAnnouncement() {
     if (!active) return;
     if (stagedFiles.some((f) => f.scanning)) {
-      setStatus("Scanning attachments in progress, please wait…");
+      setStatus("Still scanning attachments — please wait…");
       return;
     }
     const title = announceCompose.title.trim();
@@ -4246,7 +4337,7 @@ export function ChatScreen({
     try {
       const gk = await ensureGroupKey(active.id);
       if (!gk) {
-        setStatus("Waiting for group encryption key...");
+        setStatus("Waiting for group encryption key…");
         return;
       }
       setStatus("");
@@ -4297,6 +4388,7 @@ export function ChatScreen({
     } catch (err: any) {
       setStatus(err?.message || String(err));
     } finally {
+      setOutgoingFile((o) => (o?.cancelled ? o : null));
       setAnnounceBusy(false);
     }
   }
@@ -4569,6 +4661,7 @@ export function ChatScreen({
     dayGroups,
     draftsRef,
     editingMessage,
+    unreadDivider,
     hasMoreOlder,
     loadOlderMessages,
     stickToBottomRef,
@@ -5879,7 +5972,9 @@ export function ChatScreen({
               }
               const sum = items.reduce((n, i) => n + (Number(i.size) || 0), 0);
               if (sum > BUNDLE_MAX_BYTES) {
-                throw new Error(`Selection is about ${formatBytes(sum)} (max 5 GiB).`);
+                throw new Error(
+                  `Selection is about ${formatBytes(sum)} (max ${formatBytes(BUNDLE_MAX_BYTES)}).`
+                );
               }
               if (sum > 500 * 1024 * 1024) {
                 const ok = await askConfirm({
@@ -5939,16 +6034,16 @@ export function ChatScreen({
 
       <Snackbar
         open={!!status}
-        autoHideDuration={3500}
+        autoHideDuration={5500}
         onClose={() => setStatus("")}
         anchorOrigin={{ vertical: "top", horizontal: "center" }}
         sx={{ top: { xs: 72, sm: 80 } }}
       >
         <Alert
-          severity="info"
+          severity={statusAlertSeverity(status)}
           variant="filled"
           onClose={() => setStatus("")}
-          sx={{ maxWidth: 480, boxShadow: 3 }}
+          sx={{ maxWidth: 520, boxShadow: 3, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
         >
           {status}
         </Alert>
