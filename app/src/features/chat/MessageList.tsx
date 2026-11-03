@@ -1033,18 +1033,32 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             )}
           </Paper>
 
-          {/* Attached Reactions Badge */}
+          {/* Attached Reactions Badge — single floating chip */}
           {!!m.reactions?.length && (
             <Box
               sx={{
                 position: "absolute",
-                bottom: -10,
-                [mine ? "right" : "left"]: 8,
+                bottom: -11,
+                [mine ? "right" : "left"]: 6,
                 display: "inline-flex",
                 alignItems: "center",
-                gap: 0.4,
+                gap: 0.15,
                 zIndex: 2,
                 userSelect: "none",
+                px: 0.35,
+                py: 0.2,
+                borderRadius: "999px",
+                border: "1px solid",
+                borderColor: dark
+                  ? "rgba(255, 255, 255, 0.14)"
+                  : "rgba(20, 32, 28, 0.08)",
+                bgcolor: dark
+                  ? "rgba(23, 31, 45, 0.96)"
+                  : "rgba(255, 255, 255, 0.97)",
+                backdropFilter: "blur(10px)",
+                boxShadow: dark
+                  ? "0 4px 14px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(130, 169, 248, 0.06)"
+                  : "0 3px 10px rgba(20, 32, 28, 0.1), 0 1px 2px rgba(15, 107, 92, 0.04)",
               }}
             >
               {displayedReactions.map((r) => {
@@ -1065,43 +1079,44 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                     sx={{
                       display: "inline-flex",
                       alignItems: "center",
-                      gap: 0.35,
-                      height: 20,
-                      px: 0.65,
+                      gap: 0.3,
+                      height: 22,
+                      px: 0.55,
+                      m: 0,
                       borderRadius: "999px",
-                      border: "1px solid",
-                      borderColor: isMineReaction
-                        ? "primary.main"
-                        : dark
-                          ? "rgba(255, 255, 255, 0.15)"
-                          : "rgba(0, 0, 0, 0.12)",
+                      border: "none",
                       bgcolor: isMineReaction
                         ? dark
-                          ? "rgba(59, 130, 246, 0.25)"
-                          : "rgba(15, 107, 92, 0.18)"
-                        : dark
-                          ? "#1a2333"
-                          : "#ffffff",
-                      boxShadow: dark
-                        ? "0 2px 4px rgba(0,0,0,0.35)"
-                        : "0 1px 3px rgba(0,0,0,0.12)",
+                          ? "rgba(130, 169, 248, 0.22)"
+                          : "rgba(15, 107, 92, 0.12)"
+                        : "transparent",
                       cursor: "pointer",
-                      transition: "transform 0.15s ease, border-color 0.15s ease",
+                      transition: "background-color 0.15s ease, transform 0.12s ease",
                       "&:hover": {
-                        transform: "scale(1.08)",
-                        borderColor: "primary.main",
+                        bgcolor: isMineReaction
+                          ? dark
+                            ? "rgba(130, 169, 248, 0.32)"
+                            : "rgba(15, 107, 92, 0.18)"
+                          : dark
+                            ? "rgba(255, 255, 255, 0.08)"
+                            : "rgba(15, 107, 92, 0.08)",
+                        transform: "scale(1.06)",
                       },
                     }}
                   >
-                    <Box component="span" sx={{ fontSize: 12, lineHeight: 1 }}>
+                    <Box component="span" sx={{ fontSize: 13, lineHeight: 1 }}>
                       {r.emoji}
                     </Box>
                     <Box
                       component="span"
                       sx={{
-                        fontSize: 10.5,
+                        fontSize: 11,
                         fontWeight: 700,
-                        color: isMineReaction ? "primary.main" : "text.primary",
+                        color: isMineReaction
+                          ? "primary.main"
+                          : dark
+                            ? "rgba(224, 230, 239, 0.85)"
+                            : "rgba(20, 32, 28, 0.72)",
                         lineHeight: 1,
                       }}
                     >
@@ -1126,24 +1141,21 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    height: 20,
-                    px: 0.65,
+                    height: 22,
+                    px: 0.55,
+                    m: 0,
                     borderRadius: "999px",
-                    border: "1px solid",
-                    borderColor: dark
-                      ? "rgba(255, 255, 255, 0.15)"
-                      : "rgba(0, 0, 0, 0.12)",
-                    bgcolor: dark ? "#1a2333" : "#ffffff",
-                    boxShadow: dark
-                      ? "0 2px 4px rgba(0,0,0,0.35)"
-                      : "0 1px 3px rgba(0,0,0,0.12)",
+                    border: "none",
+                    bgcolor: "transparent",
                     cursor: "pointer",
-                    fontSize: 10.5,
+                    fontSize: 11,
                     fontWeight: 700,
-                    color: "text.secondary",
+                    color: dark ? "rgba(154, 174, 200, 0.9)" : "rgba(74, 92, 85, 0.9)",
                     "&:hover": {
                       color: "primary.main",
-                      borderColor: "primary.main",
+                      bgcolor: dark
+                        ? "rgba(255, 255, 255, 0.08)"
+                        : "rgba(15, 107, 92, 0.08)",
                     },
                   }}
                 >
@@ -1314,15 +1326,25 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
         PaperProps={{
           elevation: 0,
           sx: {
-            p: "4px 6px",
-            borderRadius: "24px",
-            bgcolor: dark ? "#1a222d" : "#ffffff",
-            backgroundImage: "none",
+            p: "7px 8px",
+            borderRadius: "28px",
+            overflow: "hidden",
+            bgcolor: dark ? "rgba(26, 34, 45, 0.98)" : "rgba(255, 255, 255, 0.98)",
+            backgroundImage: dark
+              ? "linear-gradient(180deg, rgba(130,169,248,0.1) 0%, rgba(130,169,248,0) 55%)"
+              : "linear-gradient(180deg, rgba(15,107,92,0.07) 0%, rgba(15,107,92,0) 55%)",
             border: "1px solid",
-            borderColor: dark ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.08)",
+            borderColor: dark
+              ? "rgba(130, 169, 248, 0.22)"
+              : "rgba(15, 107, 92, 0.16)",
             boxShadow: dark
-              ? "0 8px 24px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4)"
-              : "0 6px 20px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.05)",
+              ? "0 12px 32px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35)"
+              : "0 10px 28px rgba(20, 32, 28, 0.14), 0 2px 8px rgba(15, 107, 92, 0.08)",
+            backdropFilter: "blur(14px)",
+            // Hover scale must not spawn a Windows scrollbar inside the pill.
+            scrollbarWidth: "none",
+            msOverflowStyle: "none",
+            "&::-webkit-scrollbar": { display: "none", width: 0, height: 0 },
           },
         }}
       >
@@ -1330,7 +1352,8 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           sx={{
             display: "flex",
             alignItems: "center",
-            gap: 0.5,
+            gap: 0.35,
+            overflow: "hidden",
           }}
         >
           {QUICK_REACTIONS.map((emoji) => (
@@ -1348,10 +1371,15 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                 height: 36,
                 fontSize: 22,
                 borderRadius: "50%",
-                transition: "transform 0.12s ease, background-color 0.15s ease",
+                transition: "transform 0.14s ease, background-color 0.14s ease",
                 "&:hover": {
-                  bgcolor: dark ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.06)",
-                  transform: "scale(1.25)",
+                  bgcolor: dark
+                    ? "rgba(130, 169, 248, 0.18)"
+                    : "rgba(15, 107, 92, 0.12)",
+                  transform: "scale(1.14)",
+                },
+                "&:active": {
+                  transform: "scale(1.02)",
                 },
               }}
             >
