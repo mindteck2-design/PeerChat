@@ -785,8 +785,11 @@ pub fn get_files(state: State<AppState>, file_ids: Vec<String>) -> Result<Vec<Va
     let mut out = Vec::with_capacity(file_ids.len());
     for fid in file_ids {
         if let Some(mut f) = db::get_file(&conn, &fid)? {
+            // Folders store local_path as a directory (sender source / received extract).
+            // is_file()-only checks wrongly cleared those and forced a re-download UI.
             let path = f["local_path"].as_str().unwrap_or("").trim();
-            let present = !path.is_empty() && std::path::Path::new(path).is_file();
+            let p = std::path::Path::new(path);
+            let present = !path.is_empty() && (p.is_file() || p.is_dir());
             if !path.is_empty() && !present {
                 let _ = db::set_file_local_path(&conn, &fid, "");
                 f["local_path"] = Value::Null;

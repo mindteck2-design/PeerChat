@@ -515,7 +515,9 @@ export function MediaAlbum({
                     : pending
                       ? "…"
                       : isDownloaded
-                        ? "Saved"
+                        ? item.name.endsWith(".pcfolder") || item.name.endsWith("/")
+                          ? "Open folder"
+                          : "Saved"
                         : item.size != null && item.size > 0
                           ? formatBytes(item.size)
                           : "Tap to download"}

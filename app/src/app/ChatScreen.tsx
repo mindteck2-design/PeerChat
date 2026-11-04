@@ -2051,6 +2051,9 @@ export function ChatScreen({
 
       fileId = created.file_id;
       setFileNames((s) => ({ ...s, [fileId!]: `${cleanName}/` }));
+      // Sender already has the folder on disk — don't flash "Download".
+      setFileLocalPaths((s) => ({ ...s, [fileId!]: folderPath }));
+      setFileMetaReady((s) => ({ ...s, [fileId!]: true }));
       setOutgoingFile((o) =>
         o
           ? {
