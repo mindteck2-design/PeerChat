@@ -33,6 +33,7 @@ import VolumeUpRoundedIcon from "@mui/icons-material/VolumeUpRounded";
 import SyncRoundedIcon from "@mui/icons-material/SyncRounded";
 import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
 import PushPinRoundedIcon from "@mui/icons-material/PushPinRounded";
+import SportsEsportsRoundedIcon from "@mui/icons-material/SportsEsportsRounded";
 import { TaskbarPinTipDialog } from "../setup/TaskbarPinTipDialog";
 import {
   isPermissionGranted,
@@ -40,6 +41,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { exportPublic, fingerprintPublic, type Identity } from "../../crypto";
+import { FEATURE_GAMES } from "../../features";
 import { peerApi, type Profile } from "../../peer";
 import { ThemeMode } from "../../theme";
 import {
@@ -62,6 +64,8 @@ export function SettingsScreen(props: {
   onBack: () => void;
   onNameUpdated: (p: Profile) => void;
   onDesignationUpdated?: (designation: string) => void;
+  gamesEnabled?: boolean;
+  onGamesEnabledChange?: (enabled: boolean) => void;
 }) {
   const { mode, setMode } = useContext(ThemeMode);
   const theme = useTheme();
@@ -84,6 +88,7 @@ export function SettingsScreen(props: {
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [shellExt, setShellExt] = useState(false);
   const [shellBusy, setShellBusy] = useState(false);
+  const [gamesEnabled, setGamesEnabled] = useState(props.gamesEnabled ?? false);
 
   // Notifications tab state
   const [notifOn, setNotifOn] = useState(true);
@@ -123,6 +128,12 @@ export function SettingsScreen(props: {
         else setNotifSoundPref(v);
       })
       .catch(() => setNotifSoundPref("chime"));
+    if (FEATURE_GAMES) {
+      peerApi
+        .getAppSetting("games_enabled")
+        .then((v) => setGamesEnabled(v === "1"))
+        .catch(() => setGamesEnabled(false));
+    }
 
     peerApi
       .getAppSetting("profile_designation")
@@ -163,6 +174,10 @@ export function SettingsScreen(props: {
         if (cached) setStatusMsg(cached.slice(0, 150));
       });
   }, []);
+
+  useEffect(() => {
+    if (props.gamesEnabled !== undefined) setGamesEnabled(props.gamesEnabled);
+  }, [props.gamesEnabled]);
 
   async function toggleAutostart(enabled: boolean) {
     setAutostartBusy(true);
@@ -687,6 +702,38 @@ export function SettingsScreen(props: {
               Adds a shortcut in Windows File Explorer to quickly beam files to LAN peers.
             </Typography>
           </Paper>
+
+          {FEATURE_GAMES && (
+            <Paper sx={cardSx} elevation={0}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+                <SportsEsportsRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+                <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
+                  Games
+                </Typography>
+              </Box>
+              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
+                  Enable offline games
+                </Typography>
+                <Switch
+                  checked={gamesEnabled}
+                  onChange={(_, v) => {
+                    setGamesEnabled(v);
+                    props.onGamesEnabledChange?.(v);
+                    peerApi
+                      .setAppSetting("games_enabled", v ? "1" : "0")
+                      .then(() => setStatus(v ? "Games enabled" : "Games disabled"))
+                      .catch((err: any) => setStatus(err?.message || String(err)));
+                  }}
+                  sx={switchSx}
+                />
+              </Box>
+              <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
+                Off by default. When on, shows the Games tab (Snake, 2048, Tic-Tac-Toe, Rock Paper
+                Scissors, Dots & Boxes).
+              </Typography>
+            </Paper>
+          )}
         </Box>
       )}
 

@@ -71,7 +71,12 @@ export function conversationPreviewLine(
 ): string {
   if (!kind) return "";
   let body = decrypted;
-  if (kind === "file_notice") return "📎 File";
+  if (kind === "file_notice") {
+    body = "📎 Attachment";
+    const prefix =
+      senderId === myId ? "You: " : isGroup && senderLabel ? `${senderLabel}: ` : "";
+    return truncate(prefix + body, 80);
+  }
   if (kind === "system") return body.trim() || "Group update";
   if (kind === "game_move") {
     try {

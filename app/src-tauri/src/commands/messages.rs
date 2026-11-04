@@ -55,6 +55,24 @@ pub fn list_messages(
 }
 
 #[tauri::command]
+pub fn get_message_receipts(
+    state: State<AppState>,
+    message_id: String,
+) -> Result<Value, String> {
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let me = profile["id"].as_str().unwrap_or("");
+    let msg = db::get_message(&conn, &message_id)?.ok_or("message missing")?;
+    if msg["sender_id"].as_str() != Some(me) {
+        return Err("Only the sender can view message info".into());
+    }
+    if msg["kind"].as_str() == Some("deleted") {
+        return Err("Message was deleted".into());
+    }
+    db::message_receipts(&conn, &message_id)
+}
+
+#[tauri::command]
 pub fn retry_message(state: State<AppState>, message_id: String) -> Result<(), String> {
     let conn = state.db.lock();
     let n = db::reset_outbox_attempts(&conn, &message_id)?;

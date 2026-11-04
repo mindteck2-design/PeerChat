@@ -1,9 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Avatar,
   Box,
   Button,
+  IconButton,
   Stack,
+  Tooltip,
   Typography,
   useTheme,
 } from "@mui/material";
@@ -11,6 +13,7 @@ import AccessTimeRoundedIcon from "@mui/icons-material/AccessTimeRounded";
 import BarChartRoundedIcon from "@mui/icons-material/BarChartRounded";
 import CheckBoxOutlineBlankRoundedIcon from "@mui/icons-material/CheckBoxOutlineBlankRounded";
 import CheckBoxRoundedIcon from "@mui/icons-material/CheckBoxRounded";
+import ContentCopyIcon from "@mui/icons-material/ContentCopyRounded";
 import DownloadIcon from "@mui/icons-material/DownloadRounded";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFileRounded";
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
@@ -23,6 +26,8 @@ import { avatarColor, formatClock } from "../../shared/format";
 import { LinkifiedText } from "../../panels";
 
 const MAX_VISIBLE_VOTERS = 5;
+/** ~8–10 monospace lines before “See more”. */
+const SNIPPET_COLLAPSED_MAX_HEIGHT = 160;
 
 function durationToMs(duration: string | undefined): number | null {
   switch (duration) {
@@ -471,6 +476,152 @@ function PollCard({
   );
 }
 
+function SnippetCard({ title, body }: { title: string; body: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [canExpand, setCanExpand] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const contentRef = useRef<HTMLPreElement | null>(null);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const measure = () => {
+      setCanExpand(content.scrollHeight > SNIPPET_COLLAPSED_MAX_HEIGHT + 2);
+    };
+    measure();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    observer?.observe(content);
+    return () => observer?.disconnect();
+  }, [body]);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    };
+  }, []);
+
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopied(true);
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+
+  return (
+    <Box sx={{ pr: 1, minWidth: 0 }}>
+      <Typography variant="overline" color="primary">
+        {title}
+      </Typography>
+      <Box
+        sx={{
+          position: "relative",
+          mt: 0.25,
+          borderRadius: 1.25,
+          bgcolor: (t) =>
+            t.palette.mode === "dark" ? "rgba(0, 0, 0, 0.28)" : "rgba(15, 107, 92, 0.06)",
+          border: "1px solid",
+          borderColor: "divider",
+          "&:hover .snippet-copy-btn": {
+            opacity: 1,
+            pointerEvents: "auto",
+          },
+        }}
+      >
+        <Tooltip title={copied ? "Copied!" : "Copy"} placement="left">
+          <IconButton
+            className="snippet-copy-btn"
+            size="small"
+            aria-label="Copy code"
+            onClick={(e) => {
+              e.stopPropagation();
+              void copyCode();
+            }}
+            sx={{
+              position: "absolute",
+              top: 4,
+              right: 4,
+              zIndex: 1,
+              opacity: 0,
+              pointerEvents: "none",
+              transition: "opacity 0.15s ease, background-color 0.15s ease",
+              bgcolor: (t) =>
+                t.palette.mode === "dark" ? "rgba(23, 31, 45, 0.92)" : "rgba(255, 255, 255, 0.95)",
+              border: "1px solid",
+              borderColor: "divider",
+              boxShadow: (t) =>
+                t.palette.mode === "dark"
+                  ? "0 2px 8px rgba(0,0,0,0.4)"
+                  : "0 1px 4px rgba(20,32,28,0.12)",
+              "&:hover": {
+                bgcolor: (t) =>
+                  t.palette.mode === "dark" ? "rgba(35, 45, 62, 0.98)" : "rgba(255, 255, 255, 1)",
+              },
+            }}
+          >
+            <ContentCopyIcon sx={{ fontSize: 15 }} />
+          </IconButton>
+        </Tooltip>
+        <Box
+          sx={{
+            maxHeight: !expanded && canExpand ? SNIPPET_COLLAPSED_MAX_HEIGHT : "none",
+            overflow: !expanded && canExpand ? "hidden" : "visible",
+            px: 1.1,
+            pt: 0.85,
+            pb: canExpand ? 0.35 : 0.85,
+          }}
+        >
+          <Typography
+            ref={contentRef}
+            component="pre"
+            sx={{
+              m: 0,
+              fontFamily: "ui-monospace, monospace",
+              fontSize: 12,
+              lineHeight: 1.45,
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+              color: "text.primary",
+            }}
+          >
+            <LinkifiedText text={body} sx={{ fontFamily: "inherit", fontSize: "inherit" }} />
+          </Typography>
+        </Box>
+        {canExpand && (
+          <Box sx={{ px: 1.1, pb: 0.75, pt: 0.15 }}>
+            <Typography
+              component="button"
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              aria-expanded={expanded}
+              sx={{
+                display: "inline-block",
+                border: 0,
+                p: 0,
+                bgcolor: "transparent",
+                color: "primary.main",
+                font: "inherit",
+                fontSize: 12,
+                fontWeight: 700,
+                lineHeight: 1.4,
+                cursor: "pointer",
+                textAlign: "left",
+                "&:hover": { textDecoration: "underline" },
+              }}
+            >
+              {expanded ? "See less" : "See more"}
+            </Typography>
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
 export function RichCard({
   kind,
   raw,
@@ -522,14 +673,7 @@ export function RichCard({
   if (kind === "snippet") {
     const title = parsed?.title || "Snippet";
     const body = parsed?.body || raw;
-    return (
-      <Box sx={{ pr: 1 }}>
-        <Typography variant="overline" color="primary">{title}</Typography>
-        <Typography component="pre" sx={{ m: 0, fontFamily: "ui-monospace, monospace", fontSize: 12, whiteSpace: "pre-wrap" }}>
-          <LinkifiedText text={body} sx={{ fontFamily: "inherit", fontSize: "inherit" }} />
-        </Typography>
-      </Box>
-    );
+    return <SnippetCard title={title} body={body} />;
   }
   const title = parsed?.title || "Announcement";
   const body = parsed?.body || raw;

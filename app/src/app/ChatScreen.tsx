@@ -68,6 +68,8 @@ import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
 import MoreVertIcon from "@mui/icons-material/MoreVertRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import DeleteForeverIcon from "@mui/icons-material/DeleteForeverRounded";
+import CheckBoxOutlinedIcon from "@mui/icons-material/CheckBoxOutlined";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import StopCircleIcon from "@mui/icons-material/StopCircleRounded";
 import PauseIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowIcon from "@mui/icons-material/PlayArrowRounded";
@@ -373,8 +375,11 @@ export function ChatScreen({
   const [renameDraft, setRenameDraft] = useState("");
   const MAX_PINNED_MESSAGES_PER_CHAT = 3;
   const [status, setStatus] = useState("");
+  /** Keep last non-empty toast text so severity/color don’t flash to “info” during exit. */
+  const lastStatusRef = useRef("");
   const statusClearRef = useRef<number | null>(null);
   useEffect(() => {
+    if (status) lastStatusRef.current = status;
     if (!status) return;
     if (statusClearRef.current) window.clearTimeout(statusClearRef.current);
     // Keep in sync with Snackbar autoHideDuration below.
@@ -383,6 +388,7 @@ export function ChatScreen({
       if (statusClearRef.current) window.clearTimeout(statusClearRef.current);
     };
   }, [status]);
+  const toastText = status || lastStatusRef.current;
   const [pinOpen, setPinOpen] = useState<Peer | null>(null);
   /** Inbound first message from someone you have not trusted/pinned yet. */
   const [firstContact, setFirstContact] = useState<{
@@ -410,6 +416,21 @@ export function ChatScreen({
   }, [outgoingFile]);
 
   const [msgMenu, setMsgMenu] = useState<{ anchor: HTMLElement; message: Message } | null>(null);
+  /** WhatsApp-style multi-select for bulk delete. */
+  const [msgSelecting, setMsgSelecting] = useState(false);
+  const [selectedMsgIds, setSelectedMsgIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
+  const [msgInfo, setMsgInfo] = useState<{
+    loading: boolean;
+    error?: string;
+    recipients: Array<{
+      user_id: string;
+      display_name: string;
+      delivered_at?: string | null;
+      read_at?: string | null;
+    }>;
+  } | null>(null);
   const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
   const [forwardPick, setForwardPick] = useState<string[]>([]);
   const [forwardQuery, setForwardQuery] = useState("");
@@ -668,7 +689,21 @@ export function ChatScreen({
           continue;
         }
         if (kind === "file_notice") {
-          next[c.id] = "📎 Attachment";
+          const sid = c.last_message_sender || "";
+          const senderName =
+            sid === profile.id
+              ? "You"
+              : c.kind === "dm"
+                ? c.peer_name || "Contact"
+                : peers.find((p) => p.user_id === sid)?.display_name || "Member";
+          next[c.id] = conversationPreviewLine(
+            kind,
+            "",
+            profile.id,
+            c.last_message_sender,
+            senderName,
+            c.kind === "group"
+          );
           continue;
         }
         const ct = c.last_message_ciphertext;
@@ -998,6 +1033,18 @@ export function ChatScreen({
     const id = window.setInterval(tick, 60_000);
     return () => window.clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    if (!msgSelecting) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        exitMsgSelection();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [msgSelecting]);
 
   // Toast click: Rust tray toasts + onAction when a listener is registered.
   useEffect(() => {
@@ -1733,6 +1780,9 @@ export function ChatScreen({
     setStagedFiles(stagedDraftsRef.current[c.id] ?? []);
     setInChatSearchOpen(false);
     setInChatQuery("");
+    setMsgSelecting(false);
+    setSelectedMsgIds(new Set());
+    setBulkDeleteOpen(false);
     // Capture unread before markConversationRead clears it; gone after leave+return.
     const unread = Number(c.unread_count) || 0;
     setUnreadDivider(
@@ -3203,6 +3253,102 @@ export function ChatScreen({
       setSavedItems(await peerApi.listSavedItems().catch(() => []));
     } catch (err: any) {
       setStatus(err?.message || String(err));
+    }
+  }
+
+  function exitMsgSelection() {
+    setMsgSelecting(false);
+    setSelectedMsgIds(new Set());
+    setBulkDeleteOpen(false);
+  }
+
+  function startMsgSelection(message: Message) {
+    if (message.kind === "system" || message.kind === "deleted") return;
+    setMsgMenu(null);
+    setInChatSearchOpen(false);
+    setInChatQuery("");
+    setMsgSelecting(true);
+    setSelectedMsgIds(new Set([message.id]));
+  }
+
+  function toggleMsgSelected(messageId: string) {
+    setSelectedMsgIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      return next;
+    });
+  }
+
+  function selectedMessagesList(): Message[] {
+    return messages.filter(
+      (m) => selectedMsgIds.has(m.id) && m.kind !== "deleted" && m.kind !== "system"
+    );
+  }
+
+  function canBulkDeleteForEveryone(msgs: Message[]): boolean {
+    return (
+      msgs.length > 0 &&
+      msgs.every(
+        (m) =>
+          m.sender_id === profile.id &&
+          m.kind !== "deleted" &&
+          canMutateMessageToday(m.created_at)
+      )
+    );
+  }
+
+  function formatReceiptTime(iso: string | null | undefined): string {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "—";
+    const day = formatDay(iso);
+    const clock = formatClock(iso);
+    if (!day) return clock || "—";
+    if (day === "Today") return clock;
+    return `${day}, ${clock}`;
+  }
+
+  async function openMessageInfo(message: Message) {
+    setMsgMenu(null);
+    if (message.sender_id !== profile.id || message.kind === "deleted") return;
+    setMsgInfo({ loading: true, recipients: [] });
+    try {
+      const data = await peerApi.getMessageReceipts(message.id);
+      setMsgInfo({ loading: false, recipients: data.recipients || [] });
+    } catch (err: any) {
+      setMsgInfo({
+        loading: false,
+        error: err?.message || String(err),
+        recipients: [],
+      });
+    }
+  }
+
+  async function runBulkDelete(mode: "me" | "everyone") {
+    const msgs = selectedMessagesList();
+    if (!msgs.length) {
+      exitMsgSelection();
+      return;
+    }
+    if (mode === "everyone" && !canBulkDeleteForEveryone(msgs)) return;
+    setBulkDeleteBusy(true);
+    try {
+      for (const m of msgs) {
+        if (mode === "everyone") {
+          await peerApi.deleteMessageForEveryone(m.id);
+        } else {
+          await peerApi.deleteMessageForMe(m.id);
+        }
+      }
+      if (active) await refreshNewestMessages(active.id);
+      setSavedItems(await peerApi.listSavedItems().catch(() => []));
+      exitMsgSelection();
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    } finally {
+      setBulkDeleteBusy(false);
+      setBulkDeleteOpen(false);
     }
   }
 
@@ -4761,6 +4907,9 @@ export function ChatScreen({
     setGroupOpen,
     setMessages,
     setMsgMenu,
+    msgSelecting,
+    selectedMsgIds,
+    toggleMsgSelected,
     setNav,
     setPendingCalendarFocus,
     setPendingGameInvite,
@@ -4947,6 +5096,8 @@ export function ChatScreen({
                 profile={profile}
                 identity={identity}
                 version={version}
+                gamesEnabled={gamesOn}
+                onGamesEnabledChange={setGamesOn}
                 onBack={() => {
                   setNav("chats");
                   setTab(1);
@@ -4988,7 +5139,32 @@ export function ChatScreen({
           }}
         >
           <Toolbar sx={{ gap: 1, minHeight: 64 }}>
-            {active && inChatSearchOpen ? (
+            {active && msgSelecting ? (
+              <>
+                <IconButton
+                  aria-label="Cancel selection"
+                  onClick={exitMsgSelection}
+                  disabled={bulkDeleteBusy}
+                >
+                  <CloseIcon />
+                </IconButton>
+                <Typography variant="subtitle1" fontWeight={700} sx={{ flex: 1 }}>
+                  {selectedMsgIds.size} selected
+                </Typography>
+                <Tooltip title="Delete">
+                  <span>
+                    <IconButton
+                      aria-label="Delete selected"
+                      color="error"
+                      disabled={bulkDeleteBusy || selectedMsgIds.size === 0}
+                      onClick={() => setBulkDeleteOpen(true)}
+                    >
+                      <DeleteOutlineIcon />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              </>
+            ) : active && inChatSearchOpen ? (
               <>
                 <TextField
                   inputRef={inChatSearchInputRef}
@@ -5663,6 +5839,27 @@ export function ChatScreen({
           </ListItemIcon>
           {msgMenu?.message.pinned ? "Unpin message" : "Pin message"}
         </MenuItem>
+        {msgMenu &&
+          msgMenu.message.kind !== "deleted" &&
+          msgMenu.message.kind !== "system" && (
+            <MenuItem onClick={() => msgMenu && startMsgSelection(msgMenu.message)}>
+              <ListItemIcon>
+                <CheckBoxOutlinedIcon fontSize="small" />
+              </ListItemIcon>
+              Select
+            </MenuItem>
+          )}
+        {msgMenu &&
+          msgMenu.message.sender_id === profile.id &&
+          msgMenu.message.kind !== "deleted" &&
+          msgMenu.message.kind !== "system" && (
+            <MenuItem onClick={() => msgMenu && void openMessageInfo(msgMenu.message)}>
+              <ListItemIcon>
+                <InfoOutlinedIcon fontSize="small" />
+              </ListItemIcon>
+              Info
+            </MenuItem>
+          )}
         <Divider />
         <MenuItem onClick={() => msgMenu && deleteForMe(msgMenu.message)}>
           <ListItemIcon>
@@ -5687,6 +5884,148 @@ export function ChatScreen({
 
 
       <GroupCreateDialog vm={vm} />
+
+      <Dialog
+        open={!!msgInfo}
+        onClose={() => setMsgInfo(null)}
+        fullWidth
+        maxWidth="xs"
+        PaperProps={{ sx: { borderRadius: 2 } }}
+      >
+        <DialogTitle sx={{ fontWeight: 800, pr: 6 }}>
+          Message info
+          <IconButton
+            aria-label="Close"
+            onClick={() => setMsgInfo(null)}
+            sx={{ position: "absolute", right: 10, top: 10 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers sx={{ px: 0, py: 0 }}>
+          {msgInfo?.loading ? (
+            <Box sx={{ display: "grid", placeItems: "center", py: 4 }}>
+              <CircularProgress size={28} />
+            </Box>
+          ) : msgInfo?.error ? (
+            <Typography variant="body2" color="error" sx={{ px: 2.5, py: 2 }}>
+              {msgInfo.error}
+            </Typography>
+          ) : !msgInfo?.recipients.length ? (
+            <Typography variant="body2" color="text.secondary" sx={{ px: 2.5, py: 2 }}>
+              No delivery details yet. The message may still be waiting to send.
+            </Typography>
+          ) : (
+            <List dense disablePadding>
+              {msgInfo.recipients.map((r) => (
+                <ListItemButton key={r.user_id} disableRipple sx={{ cursor: "default", py: 1.25, px: 2.5 }}>
+                  <ListItemAvatar sx={{ minWidth: 44 }}>
+                    <Avatar
+                      sx={{
+                        width: 36,
+                        height: 36,
+                        fontSize: 14,
+                        fontWeight: 700,
+                        bgcolor: avatarColor(r.display_name || r.user_id),
+                      }}
+                    >
+                      {(r.display_name || r.user_id).slice(0, 1).toUpperCase()}
+                    </Avatar>
+                  </ListItemAvatar>
+                  <ListItemText
+                    primary={
+                      <Typography variant="body2" fontWeight={700} noWrap>
+                        {r.display_name || "Peer"}
+                      </Typography>
+                    }
+                    secondary={
+                      <Stack spacing={0.2} sx={{ mt: 0.35 }}>
+                        <Typography variant="caption" color="text.secondary" component="span">
+                          Delivered · {formatReceiptTime(r.delivered_at)}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" component="span">
+                          Read · {formatReceiptTime(r.read_at)}
+                        </Typography>
+                      </Stack>
+                    }
+                    secondaryTypographyProps={{ component: "div" }}
+                  />
+                  <Box sx={{ ml: 1, display: "flex", alignItems: "center" }}>
+                    {r.read_at ? (
+                      <DoneAllIcon sx={{ fontSize: 18, color: "#53bdeb" }} />
+                    ) : r.delivered_at ? (
+                      <DoneAllIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+                    ) : (
+                      <DoneIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+                    )}
+                  </Box>
+                </ListItemButton>
+              ))}
+            </List>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 2.5, pb: 2 }}>
+          <Button onClick={() => setMsgInfo(null)} sx={{ textTransform: "none", fontWeight: 600 }}>
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={bulkDeleteOpen}
+        onClose={() => !bulkDeleteBusy && setBulkDeleteOpen(false)}
+        fullWidth
+        maxWidth="xs"
+        PaperProps={{ sx: { borderRadius: 2 } }}
+      >
+        <DialogTitle sx={{ fontWeight: 800, pr: 6 }}>
+          Delete {selectedMessagesList().length || selectedMsgIds.size} message
+          {(selectedMessagesList().length || selectedMsgIds.size) === 1 ? "" : "s"}?
+          <IconButton
+            aria-label="Close"
+            disabled={bulkDeleteBusy}
+            onClick={() => setBulkDeleteOpen(false)}
+            sx={{ position: "absolute", right: 10, top: 10 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            Choose how to remove the selected messages.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 2.5, pb: 2, flexWrap: "wrap", gap: 1 }}>
+          <Button
+            disabled={bulkDeleteBusy}
+            onClick={() => setBulkDeleteOpen(false)}
+            sx={{ textTransform: "none", mr: "auto" }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="outlined"
+            disabled={bulkDeleteBusy || selectedMessagesList().length === 0}
+            onClick={() => void runBulkDelete("me")}
+            startIcon={<DeleteOutlineIcon />}
+            sx={{ textTransform: "none", fontWeight: 700 }}
+          >
+            Delete for me
+          </Button>
+          {canBulkDeleteForEveryone(selectedMessagesList()) && (
+            <Button
+              color="error"
+              variant="contained"
+              disabled={bulkDeleteBusy}
+              onClick={() => void runBulkDelete("everyone")}
+              startIcon={<DeleteForeverIcon />}
+              sx={{ textTransform: "none", fontWeight: 700 }}
+            >
+              Delete for everyone
+            </Button>
+          )}
+        </DialogActions>
+      </Dialog>
 
       <Dialog
         open={!!confirmDialog}
@@ -6073,12 +6412,12 @@ export function ChatScreen({
         sx={{ top: { xs: 72, sm: 80 } }}
       >
         <Alert
-          severity={statusAlertSeverity(status)}
+          severity={statusAlertSeverity(toastText)}
           variant="filled"
           onClose={() => setStatus("")}
           sx={{ maxWidth: 520, boxShadow: 3, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
         >
-          {status}
+          {toastText}
         </Alert>
       </Snackbar>
 

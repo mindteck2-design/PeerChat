@@ -255,6 +255,7 @@ pub fn run() {
             request_group_sync,
             repair_group_member_key,
             list_messages,
+            get_message_receipts,
             retry_message,
             delete_message_for_me,
             delete_message_for_everyone,

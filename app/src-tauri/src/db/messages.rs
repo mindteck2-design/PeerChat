@@ -1,4 +1,5 @@
 use super::conversations::dm_related_conversation_ids;
+use super::peers::get_peer;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -678,6 +679,98 @@ pub fn hide_message(conn: &Connection, user_id: &str, message_id: &str) -> Resul
     // Saved is a shortcut into chat — drop it when the message is gone for me.
     let _ = delete_saved_by_message_id(conn, message_id);
     Ok(())
+}
+
+/// Per-recipient delivery + read times for Message info (sender's machine).
+/// Built from outbox.delivered_at and message_reads.read_at.
+pub fn message_receipts(conn: &Connection, message_id: &str) -> Result<Value, String> {
+    let mut by_user: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+
+    let mut out_stmt = conn
+        .prepare(
+            "SELECT recipient_id, delivered_at FROM outbox WHERE id=?1 OR id LIKE ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let out_rows = out_stmt
+        .query_map(
+            params![message_id, format!("{message_id}:%")],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    for row in out_rows {
+        let (uid, delivered_at) = row.map_err(|e| e.to_string())?;
+        if uid.is_empty() {
+            continue;
+        }
+        let entry = by_user.entry(uid).or_insert((None, None));
+        // Prefer a concrete delivered_at if multiple outbox rows exist.
+        if entry.0.is_none() {
+            entry.0 = delivered_at;
+        } else if let Some(ref newer) = delivered_at {
+            if entry.0.as_ref().map(|p| newer > p).unwrap_or(true) {
+                entry.0 = Some(newer.clone());
+            }
+        }
+    }
+
+    let mut read_stmt = conn
+        .prepare("SELECT user_id, read_at FROM message_reads WHERE message_id=?1")
+        .map_err(|e| e.to_string())?;
+    let read_rows = read_stmt
+        .query_map(params![message_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in read_rows {
+        let (uid, read_at) = row.map_err(|e| e.to_string())?;
+        if uid.is_empty() {
+            continue;
+        }
+        let entry = by_user.entry(uid).or_insert((None, None));
+        entry.1 = Some(read_at);
+    }
+
+    let mut recipients = Vec::new();
+    for (user_id, (delivered_at, read_at)) in by_user {
+        let display_name = get_peer(conn, &user_id)
+            .ok()
+            .flatten()
+            .and_then(|p| {
+                p.get("display_name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| user_id.clone());
+        recipients.push(serde_json::json!({
+            "user_id": user_id,
+            "display_name": display_name,
+            "delivered_at": delivered_at,
+            "read_at": read_at,
+        }));
+    }
+    // Read first, then delivered, then pending — stable by name within each bucket.
+    recipients.sort_by(|a, b| {
+        let rank = |v: &Value| -> u8 {
+            if v.get("read_at").and_then(|x| x.as_str()).is_some() {
+                0
+            } else if v.get("delivered_at").and_then(|x| x.as_str()).is_some() {
+                1
+            } else {
+                2
+            }
+        };
+        rank(a).cmp(&rank(b)).then_with(|| {
+            let na = a.get("display_name").and_then(|v| v.as_str()).unwrap_or("");
+            let nb = b.get("display_name").and_then(|v| v.as_str()).unwrap_or("");
+            na.to_lowercase().cmp(&nb.to_lowercase())
+        })
+    });
+
+    Ok(serde_json::json!({
+        "message_id": message_id,
+        "recipients": recipients,
+    }))
 }
 
 pub fn get_message(conn: &Connection, message_id: &str) -> Result<Option<Value>, String> {
