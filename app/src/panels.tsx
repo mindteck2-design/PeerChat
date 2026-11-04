@@ -54,7 +54,7 @@ import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import PeopleAltOutlinedIcon from "@mui/icons-material/PeopleAltOutlined";
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { SavedItem, TransferLog } from "./peer";
+import type { TransferLog } from "./peer";
 import { peerApi } from "./peer";
 import { SLASH_COMMANDS, type CommandContext } from "./commands";
 
@@ -1678,41 +1678,7 @@ export function HelpDialog({
   );
 }
 
-export function SavedPanel({
-  items,
-  onOpen,
-  onRemove,
-}: {
-  items: SavedItem[];
-  onOpen: (conversationId: string, messageId?: string | null) => void;
-  onRemove: (id: string) => void;
-}) {
-  return (
-    <Box sx={{ p: 2, overflow: "auto", height: "100%" }}>
-      <Typography variant="h6" gutterBottom>Saved</Typography>
-      {!items.length && <Alert severity="info">Nothing saved yet. Use Save on a message.</Alert>}
-      <List>
-        {items.map((item) => (
-          <ListItemButton
-            key={item.id}
-            onClick={() => onOpen(item.conversation_id, item.message_id)}
-          >
-            <ListItemText primary={item.preview} secondary={item.kind} primaryTypographyProps={{ noWrap: true }} />
-            <Button
-              size="small"
-              onClick={(e) => {
-                e.stopPropagation();
-                onRemove(item.id);
-              }}
-            >
-              Remove
-            </Button>
-          </ListItemButton>
-        ))}
-      </List>
-    </Box>
-  );
-}
+export { SavedPanel } from "./features/saved/SavedPanel";
 
 type SnakeSpeed = "slow" | "moderate" | "fast";
 

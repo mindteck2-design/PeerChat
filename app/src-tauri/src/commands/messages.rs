@@ -55,6 +55,12 @@ pub fn list_messages(
 }
 
 #[tauri::command]
+pub fn get_message(state: State<AppState>, message_id: String) -> Result<Option<Value>, String> {
+    let conn = state.db.lock();
+    db::get_message(&conn, &message_id)
+}
+
+#[tauri::command]
 pub fn get_message_receipts(
     state: State<AppState>,
     message_id: String,

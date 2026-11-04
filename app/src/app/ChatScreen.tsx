@@ -3459,7 +3459,11 @@ export function ChatScreen({
     setSelectionBusy(true);
     try {
       for (const m of msgs) {
-        const preview = (plain[m.id] || m.kind).slice(0, 500);
+        let preview = (plain[m.id] || m.kind).slice(0, 500);
+        const fids = messageAttachmentIds(m);
+        if ((!preview || preview === m.kind) && fids.length) {
+          preview = fids.map((fid) => fileNames[fid] || "File").join(", ").slice(0, 500);
+        }
         await peerApi.saveItem({
           id: `save-${m.id}`,
           message_id: m.id,
@@ -5283,6 +5287,10 @@ export function ChatScreen({
         {nav === "saved" && (
           <SavedPanel
             items={savedItems}
+            convs={convs}
+            peers={peers}
+            profile={profile}
+            fileNames={fileNames}
             onOpen={(id, messageId) => {
               const conv = convs.find((c) => c.id === id);
               if (conv) {
@@ -5290,6 +5298,8 @@ export function ChatScreen({
                 selectConversation(conv);
                 setNav("chats");
                 setTab(1);
+              } else {
+                setStatus("That chat is no longer available");
               }
             }}
             onRemove={async (id) => {
@@ -6031,12 +6041,17 @@ export function ChatScreen({
         <MenuItem
           onClick={async () => {
             if (!msgMenu || !active) return;
-            const preview = (plain[msgMenu.message.id] || msgMenu.message.kind).slice(0, 500);
+            const m = msgMenu.message;
+            let preview = (plain[m.id] || m.kind).slice(0, 500);
+            const fids = messageAttachmentIds(m);
+            if ((!preview || preview === m.kind) && fids.length) {
+              preview = fids.map((fid) => fileNames[fid] || "File").join(", ").slice(0, 500);
+            }
             await peerApi.saveItem({
-              id: `save-${msgMenu.message.id}`,
-              message_id: msgMenu.message.id,
+              id: `save-${m.id}`,
+              message_id: m.id,
               conversation_id: active.id,
-              kind: msgMenu.message.kind,
+              kind: m.kind,
               preview,
               created_at: new Date().toISOString(),
             });
