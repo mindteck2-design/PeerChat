@@ -194,14 +194,20 @@ pub fn spawn_listener(
 /// OS toast from Rust so notifications still fire when the window is hidden in the tray
 /// (WebView2 may suspend JS listeners while not visible).
 fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
-    // Skip redelivered / already-known messages (duplicate OS toasts).
-    if info.get("fresh").and_then(|v| v.as_bool()) == Some(false) {
+    // Only brand-new inserts — missing/false fresh must stay silent (catch-up / retries).
+    if info.get("fresh").and_then(|v| v.as_bool()) != Some(true) {
+        return;
+    }
+    // Peer outbox flush on launch can deliver dozens of "fresh" rows at once; Windows
+    // queues each toast sound and keeps playing until the process exits.
+    if !crate::runtime::notify_gate::allow_os_toast() {
         return;
     }
     let kind = info.get("kind").and_then(|v| v.as_str()).unwrap_or("text");
     if matches!(
         kind,
         "reaction" | "pin" | "unpin" | "deleted" | "game_move" | "group_event" | "system"
+            | "calendar_share"
     ) {
         return;
     }
@@ -307,7 +313,8 @@ fn desktop_notify_if_needed(app: &AppHandle, db: &SharedDb, info: &Value) {
         .title(title)
         .body(body)
         .auto_cancel();
-    if sound_enabled {
+    // Platform sounds stack in the Windows notification queue; gate hard.
+    if sound_enabled && crate::runtime::notify_gate::allow_os_sound() {
         builder = builder.sound("Default");
     }
     if !cid.is_empty() {

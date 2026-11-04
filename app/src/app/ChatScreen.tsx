@@ -241,7 +241,11 @@ import { useGroupAdmin } from "../features/groups/useGroupAdmin";
 import { useFileTransfer } from "../features/files/useFileTransfer";
 import { FilePreviewDialog } from "../features/files/FilePreviewDialog";
 import { publishTransferProgress } from "../features/files/transferProgressStore";
-import { playNotificationSoundFromPref } from "../shared/sound";
+import {
+  canPlayInboundNotificationSound,
+  playNotificationSoundFromPref,
+  silenceNotificationAudio,
+} from "../shared/sound";
 
 export function ChatScreen({
   profile: initialProfile,
@@ -890,14 +894,16 @@ export function ChatScreen({
         if (kind === "reaction" || kind === "pin" || kind === "unpin" || kind === "deleted") return;
         if (kind === "system" || kind === "group_event") return;
 
-        // Fresh inbound only, and never while the app window is focused
-        // (matches Rust desktop_notify_if_needed — UI already shows the message).
+        // Fresh inbound only. Skip while focused, tray-hidden, or in startup quiet
+        // (OS toast owns tray alerts; catch-up must not stack chimes).
         if (isFresh) {
           try {
             const winFocused = await getCurrentWindow()
               .isFocused()
               .catch(() => document.hasFocus());
-            if (!winFocused) {
+            if (
+              canPlayInboundNotificationSound({ windowFocused: winFocused })
+            ) {
               const isMuted = convsRef.current.find((c) => c.id === cid)?.muted;
               if (!isMuted) {
                 const soundPref = await peerApi
@@ -997,6 +1003,15 @@ export function ChatScreen({
     tick();
     const id = window.setInterval(tick, 60_000);
     return () => window.clearInterval(id);
+  }, []);
+
+  // Hide-to-tray: stop any Web Audio so a chime cannot keep ringing in the background.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "hidden") silenceNotificationAudio();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
   // Toast click: Rust tray toasts + onAction when a listener is registered.

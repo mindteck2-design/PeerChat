@@ -175,6 +175,8 @@ pub(crate) fn start_runtime_inner(
     // Stay reachable for LAN transfers even if the screen is locked / window is in tray.
     *state.keep_awake.lock() = Some(KeepAwakeGuard::acquire());
     *state.started.lock() = true;
+    // Catch-up delivers after listen/discovery must not queue OS notification sounds.
+    crate::runtime::notify_gate::mark_runtime_started();
     Ok(())
 }
 

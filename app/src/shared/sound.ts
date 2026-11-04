@@ -16,6 +16,10 @@ const SOUND_IDS = new Set<string>(NOTIFICATION_SOUND_OPTIONS.map((o) => o.id));
 
 let audioCtx: AudioContext | null = null;
 let lastPlayedAt = 0;
+/** Suppress catch-up chimes while peers flush backlog right after launch. */
+const SESSION_STARTED_AT = Date.now();
+const STARTUP_QUIET_MS = 25_000;
+const SOUND_GAP_MS = 2_000;
 
 /** True when the stored pref should play a sound (not off). */
 export function isNotificationSoundEnabled(pref: string | null | undefined): boolean {
@@ -118,17 +122,41 @@ function playPreset(ctx: AudioContext, id: NotificationSoundId) {
   }
 }
 
-/** Play a notification preset. `force` bypasses the debounce. */
+/** True when in-app chime is allowed (not catch-up, not tray-hidden, not focused). */
+export function canPlayInboundNotificationSound(opts?: {
+  windowFocused?: boolean;
+  force?: boolean;
+}): boolean {
+  if (opts?.force) return true;
+  if (Date.now() - SESSION_STARTED_AT < STARTUP_QUIET_MS) return false;
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return false;
+  if (opts?.windowFocused) return false;
+  return true;
+}
+
+/** Play a notification preset. `force` bypasses the debounce (settings preview). */
 export function playNotificationSound(id: NotificationSoundId, force = false): void {
   try {
     const nowMs = Date.now();
-    if (!force && nowMs - lastPlayedAt < 600) return;
+    if (!force && nowMs - lastPlayedAt < SOUND_GAP_MS) return;
+    if (!force && !canPlayInboundNotificationSound()) return;
     lastPlayedAt = nowMs;
     const ctx = getCtx();
     if (!ctx) return;
     playPreset(ctx, id);
   } catch (err) {
     console.warn("[Sound] Failed to play notification sound", err);
+  }
+}
+
+/** Stop any lingering Web Audio so hide-to-tray cannot leave a stuck tone. */
+export function silenceNotificationAudio(): void {
+  try {
+    if (audioCtx && audioCtx.state !== "closed") {
+      void audioCtx.suspend();
+    }
+  } catch {
+    /* ignore */
   }
 }
 

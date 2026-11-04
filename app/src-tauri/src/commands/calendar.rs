@@ -402,7 +402,10 @@ pub fn poll_calendar_due(app: tauri::AppHandle, state: State<'_, AppState>) -> R
         if focused && within_grace {
             continue;
         }
-        if within_grace && !focused {
+        if within_grace
+            && !focused
+            && crate::runtime::notify_gate::allow_os_toast()
+        {
             let title = item["title"].as_str().unwrap_or("Reminder");
             let kind = item["kind"].as_str().unwrap_or("reminder");
             let day = item["day"].as_str().unwrap_or("");
@@ -420,7 +423,7 @@ pub fn poll_calendar_due(app: tauri::AppHandle, state: State<'_, AppState>) -> R
                     .unwrap_or(true)
             };
             let mut builder = app.notification().builder().title(title).body(&body);
-            if sound_enabled {
+            if sound_enabled && crate::runtime::notify_gate::allow_os_sound() {
                 builder = builder.sound("Reminder");
             }
             let _ = builder.show();
