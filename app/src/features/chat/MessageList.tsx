@@ -483,7 +483,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             position: "relative",
             mb: m.reactions?.length ? 1.6 : 0.4,
             "&:hover .msg-reaction-trigger": {
-              opacity: 0.65,
+              opacity: 1,
               pointerEvents: "auto",
             },
           }}
@@ -916,6 +916,9 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                       : undefined
                   }
                   mine={m.sender_id === profile.id}
+                  myId={profile.id}
+                  resolveName={senderLabel}
+                  createdAt={m.created_at}
                   onOpenFile={(fid) => {
                     void openAttachment(fid, m.sender_id);
                   }}
@@ -1326,22 +1329,17 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
         PaperProps={{
           elevation: 0,
           sx: {
-            p: "7px 8px",
-            borderRadius: "28px",
+            p: "8px 10px",
+            borderRadius: "999px",
             overflow: "hidden",
-            bgcolor: dark ? "rgba(26, 34, 45, 0.98)" : "rgba(255, 255, 255, 0.98)",
-            backgroundImage: dark
-              ? "linear-gradient(180deg, rgba(130,169,248,0.1) 0%, rgba(130,169,248,0) 55%)"
-              : "linear-gradient(180deg, rgba(15,107,92,0.07) 0%, rgba(15,107,92,0) 55%)",
-            border: "1px solid",
-            borderColor: dark
-              ? "rgba(130, 169, 248, 0.22)"
-              : "rgba(15, 107, 92, 0.16)",
+            // Solid surfaces — avoid translucent/washed look.
+            bgcolor: dark ? "#243044" : "#FFFFFF",
+            backgroundImage: "none",
+            border: "1.5px solid",
+            borderColor: dark ? "rgba(130, 169, 248, 0.45)" : "rgba(15, 107, 92, 0.28)",
             boxShadow: dark
-              ? "0 12px 32px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35)"
-              : "0 10px 28px rgba(20, 32, 28, 0.14), 0 2px 8px rgba(15, 107, 92, 0.08)",
-            backdropFilter: "blur(14px)",
-            // Hover scale must not spawn a Windows scrollbar inside the pill.
+              ? "0 14px 36px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(130,169,248,0.12)"
+              : "0 12px 30px rgba(20, 32, 28, 0.18), 0 0 0 1px rgba(15,107,92,0.06)",
             scrollbarWidth: "none",
             msOverflowStyle: "none",
             "&::-webkit-scrollbar": { display: "none", width: 0, height: 0 },
@@ -1352,7 +1350,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           sx={{
             display: "flex",
             alignItems: "center",
-            gap: 0.35,
+            gap: 0.25,
             overflow: "hidden",
           }}
         >
@@ -1367,16 +1365,17 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                 setEmojiPickerAnchor(null);
               }}
               sx={{
-                width: 36,
-                height: 36,
-                fontSize: 22,
+                width: 40,
+                height: 40,
+                fontSize: 24,
                 borderRadius: "50%",
+                filter: "saturate(1.15)",
                 transition: "transform 0.14s ease, background-color 0.14s ease",
                 "&:hover": {
                   bgcolor: dark
-                    ? "rgba(130, 169, 248, 0.18)"
-                    : "rgba(15, 107, 92, 0.12)",
-                  transform: "scale(1.14)",
+                    ? "rgba(130, 169, 248, 0.28)"
+                    : "rgba(15, 107, 92, 0.14)",
+                  transform: "scale(1.12)",
                 },
                 "&:active": {
                   transform: "scale(1.02)",
