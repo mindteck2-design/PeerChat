@@ -372,49 +372,64 @@ async fn calendar_respond(
 }
 
 /// Check due reminders/meetings and fire desktop toasts once each.
+/// Stale overdue items (outside a short grace window) are marked silently so
+/// app launch does not dump Reminder sounds for everything earlier today.
+/// When the main window is focused, skip toast+sound (same as message toasts).
 #[tauri::command]
 pub fn poll_calendar_due(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<u32, String> {
     use chrono::Local;
+    use tauri::Manager;
+    const GRACE_MINUTES: i64 = 3;
     let local = Local::now();
     let now_local = local.format("%Y-%m-%dT%H:%M").to_string();
+    let now_hm = now_local.get(11..16).unwrap_or("").to_string();
     let due = {
         let conn = state.db.lock();
         db::due_calendar_items(&conn, &now_local)?
     };
+    let win = app.get_webview_window("main");
+    let focused = win
+        .as_ref()
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false);
     let mut n = 0u32;
     for item in due {
         let id = item["id"].as_str().unwrap_or("");
-        let title = item["title"].as_str().unwrap_or("Reminder");
-        let kind = item["kind"].as_str().unwrap_or("reminder");
-        let day = item["day"].as_str().unwrap_or("");
         let time = item.get("time").and_then(|v| v.as_str()).unwrap_or("");
-        let body = if time.is_empty() {
-            format!("{kind} · {day}")
-        } else {
-            format!("{kind} · {day} {time}")
-        };
-        let sound_enabled = {
-            let conn = state.db.lock();
-            db::get_setting(&conn, "notification_sound")
-                .ok()
-                .flatten()
-                .map(|v| v != "0" && v != "off")
-                .unwrap_or(true)
-        };
-        let mut builder = app
-            .notification()
-            .builder()
-            .title(title)
-            .body(&body);
-        if sound_enabled {
-            builder = builder.sound("Reminder");
+        let within_grace = db::calendar_due_within_grace(&now_hm, time, GRACE_MINUTES);
+        // Focused: stay quiet and leave notified_at empty so a later unfocused
+        // poll (still in grace) can still toast. Stale overdue: clear without toast.
+        if focused && within_grace {
+            continue;
         }
-        let _ = builder.show();
+        if within_grace && !focused {
+            let title = item["title"].as_str().unwrap_or("Reminder");
+            let kind = item["kind"].as_str().unwrap_or("reminder");
+            let day = item["day"].as_str().unwrap_or("");
+            let body = if time.is_empty() {
+                format!("{kind} · {day}")
+            } else {
+                format!("{kind} · {day} {time}")
+            };
+            let sound_enabled = {
+                let conn = state.db.lock();
+                db::get_setting(&conn, "notification_sound")
+                    .ok()
+                    .flatten()
+                    .map(|v| v != "0" && v != "off")
+                    .unwrap_or(true)
+            };
+            let mut builder = app.notification().builder().title(title).body(&body);
+            if sound_enabled {
+                builder = builder.sound("Reminder");
+            }
+            let _ = builder.show();
+            n += 1;
+        }
         {
             let conn = state.db.lock();
             let _ = db::mark_calendar_notified(&conn, id);
         }
-        n += 1;
     }
     Ok(n)
 }

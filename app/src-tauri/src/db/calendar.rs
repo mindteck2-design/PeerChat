@@ -424,7 +424,7 @@ pub fn list_calendar_items(
     Ok(out)
 }
 
-/// Items due soon for desktop notification (reminder/meeting with a time).
+/// Items due today at or before `now_local` that have not been notified yet.
 pub fn due_calendar_items(conn: &Connection, now_local: &str) -> Result<Vec<Value>, String> {
     let day = now_local.get(..10).unwrap_or("");
     let hm = now_local.get(11..16).unwrap_or("");
@@ -453,6 +453,28 @@ pub fn due_calendar_items(conn: &Connection, now_local: &str) -> Result<Vec<Valu
         out.push(row.map_err(|e| e.to_string())?);
     }
     Ok(out)
+}
+
+/// True when `item_hm` ("HH:MM") is within `grace_minutes` before `now_hm`.
+pub fn calendar_due_within_grace(now_hm: &str, item_hm: &str, grace_minutes: i64) -> bool {
+    let Some(earliest) = subtract_minutes_hhmm(now_hm, grace_minutes) else {
+        return false;
+    };
+    item_hm.len() == 5 && item_hm >= earliest.as_str() && item_hm <= now_hm
+}
+
+fn subtract_minutes_hhmm(hm: &str, minutes: i64) -> Option<String> {
+    let (h, m) = hm.split_once(':')?;
+    let hour: i64 = h.parse().ok()?;
+    let min: i64 = m.parse().ok()?;
+    if !(0..24).contains(&hour) || !(0..60).contains(&min) {
+        return None;
+    }
+    let total = hour * 60 + min - minutes.max(0);
+    if total < 0 {
+        return Some("00:00".into());
+    }
+    Some(format!("{:02}:{:02}", total / 60, total % 60))
 }
 
 pub fn mark_calendar_notified(conn: &Connection, id: &str) -> Result<(), String> {

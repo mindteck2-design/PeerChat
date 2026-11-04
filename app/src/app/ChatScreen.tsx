@@ -876,25 +876,39 @@ export function ChatScreen({
       from_name?: string;
       from_id?: string;
       kind?: string;
+      fresh?: boolean;
     }>("inbox-updated", (ev) => {
       const p = ev.payload || {};
       const cid = p.conversation_id || "";
       const fromId = p.from_id || "";
       const kind = p.kind || "";
+      // Redelivery / catch-up on launch sets fresh=false — must not beep.
+      const isFresh = p.fresh === true;
       void (async () => {
         await refresh().catch(() => {});
         if (!cid || fromId === profile.id) return;
         if (kind === "reaction" || kind === "pin" || kind === "unpin" || kind === "deleted") return;
+        if (kind === "system" || kind === "group_event") return;
 
-        // Play in-app notification chime if sound is enabled and chat is not muted
-        try {
-          const isMuted = convsRef.current.find((c) => c.id === cid)?.muted;
-          if (!isMuted) {
-            const soundPref = await peerApi.getAppSetting("notification_sound").catch(() => "chime");
-            playNotificationSoundFromPref(soundPref);
+        // Fresh inbound only, and never while the app window is focused
+        // (matches Rust desktop_notify_if_needed — UI already shows the message).
+        if (isFresh) {
+          try {
+            const winFocused = await getCurrentWindow()
+              .isFocused()
+              .catch(() => document.hasFocus());
+            if (!winFocused) {
+              const isMuted = convsRef.current.find((c) => c.id === cid)?.muted;
+              if (!isMuted) {
+                const soundPref = await peerApi
+                  .getAppSetting("notification_sound")
+                  .catch(() => "chime");
+                playNotificationSoundFromPref(soundPref);
+              }
+            }
+          } catch {
+            /* ignore sound errors */
           }
-        } catch {
-          /* ignore sound errors */
         }
 
         // Decrypt game_move for session + UI. Apply actionable payloads (move/reveal)

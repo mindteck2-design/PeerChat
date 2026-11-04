@@ -30,6 +30,7 @@ import {
   TextField,
   Tooltip,
   Typography,
+  Collapse,
   useTheme,
 } from "@mui/material";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutlineRounded";
@@ -41,8 +42,7 @@ import MoreVertIcon from "@mui/icons-material/MoreVertRounded";
 import ReplayIcon from "@mui/icons-material/ReplayRounded";
 import SearchIcon from "@mui/icons-material/SearchRounded";
 import BarChartRoundedIcon from "@mui/icons-material/BarChartRounded";
-import DragIndicatorRoundedIcon from "@mui/icons-material/DragIndicatorRounded";
-import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import ExpandMoreRoundedIcon from "@mui/icons-material/ExpandMoreRounded";
 import RadioButtonCheckedRoundedIcon from "@mui/icons-material/RadioButtonCheckedRounded";
 import RadioButtonUncheckedRoundedIcon from "@mui/icons-material/RadioButtonUncheckedRounded";
 import CheckBoxRoundedIcon from "@mui/icons-material/CheckBoxRounded";
@@ -761,6 +761,7 @@ export function PollDialog({
   const [showVoterNames, setShowVoterNames] = useState(true);
   const [allowVoteChange, setAllowVoteChange] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -771,6 +772,7 @@ export function PollDialog({
       setShowVoterNames(true);
       setAllowVoteChange(true);
       setIsSubmitting(false);
+      setSettingsOpen(false);
     }
   }, [isOpen]);
 
@@ -791,19 +793,6 @@ export function PollDialog({
   const handleRemoveOption = (idx: number) => {
     if (options.length > 2) {
       setOptions((prev) => prev.filter((_, i) => i !== idx));
-    }
-  };
-
-  const handleAttachOptionImage = async (_idx: number) => {
-    try {
-      await open({
-        multiple: false,
-        directory: false,
-        title: "Select option image",
-        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
-      });
-    } catch {
-      // ignore
     }
   };
 
@@ -841,6 +830,8 @@ export function PollDialog({
       PaperProps={{
         sx: {
           maxWidth: 580,
+          height: { xs: "min(92vh, 640px)", sm: 640 },
+          maxHeight: "92vh",
           borderRadius: 2.5,
           bgcolor: "background.paper",
           backgroundImage: "none",
@@ -848,7 +839,9 @@ export function PollDialog({
           borderColor: "divider",
           boxShadow: isDark ? "0 24px 48px -12px rgba(0, 0, 0, 0.75)" : "0 12px 32px -8px rgba(0, 0, 0, 0.15)",
           p: 1.5,
-          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
         },
       }}
     >
@@ -873,7 +866,7 @@ export function PollDialog({
       </Box>
 
       {/* Body */}
-      <Box sx={{ px: 2, pb: 1 }}>
+      <Box sx={{ px: 2, pb: 1, flex: 1, minHeight: 0, overflowY: "auto" }}>
         {/* Question card */}
         <Box
           sx={{
@@ -927,91 +920,78 @@ export function PollDialog({
           </Typography>
         </Box>
 
-        <Stack spacing={1.25} sx={{ mb: 1.5 }}>
-          {options.map((opt, idx) => (
-            <Box
-              key={idx}
-              sx={{
-                display: "flex",
-                alignItems: "center",
-                gap: 1.25,
-              }}
-            >
-              <DragIndicatorRoundedIcon
-                sx={{
-                  color: "text.secondary",
-                  fontSize: 20,
-                  flexShrink: 0,
-                  cursor: "grab",
-                  opacity: 0.7,
-                }}
-              />
+        {/* ~4 option rows visible; scroll for 5–10 so the dialog height stays fixed */}
+        <Box
+          sx={{
+            maxHeight: 4 * 52 + 3 * 10,
+            overflowY: options.length > 4 ? "auto" : "visible",
+            mb: 1.5,
+            pr: options.length > 4 ? 0.5 : 0,
+          }}
+        >
+          <Stack spacing={1.25}>
+            {options.map((opt, idx) => (
               <Box
+                key={idx}
                 sx={{
-                  flex: 1,
                   display: "flex",
                   alignItems: "center",
-                  bgcolor: isDark ? "rgba(255, 255, 255, 0.03)" : "action.hover",
-                  border: "1px solid",
-                  borderColor: "divider",
-                  borderRadius: 2,
-                  px: 1.75,
-                  py: 0.85,
-                  transition: "border-color 0.15s ease",
-                  "&:focus-within": {
-                    borderColor: "primary.main",
-                  },
+                  gap: 1.25,
                 }}
               >
-                <InputBase
-                  fullWidth
-                  placeholder={`Option ${idx + 1}`}
-                  value={opt}
-                  onChange={(e) => handleOptionChange(idx, e.target.value)}
+                <Box
                   sx={{
-                    fontSize: "0.9rem",
-                    color: "text.primary",
-                    "& ::placeholder": { color: "text.secondary", opacity: 0.7 },
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    bgcolor: isDark ? "rgba(255, 255, 255, 0.03)" : "action.hover",
+                    border: "1px solid",
+                    borderColor: "divider",
+                    borderRadius: 2,
+                    px: 1.75,
+                    py: 0.85,
+                    transition: "border-color 0.15s ease",
+                    "&:focus-within": {
+                      borderColor: "primary.main",
+                    },
                   }}
-                />
-                <Tooltip title="Attach image (optional)">
-                  <IconButton
-                    size="small"
-                    onClick={() => handleAttachOptionImage(idx)}
+                >
+                  <InputBase
+                    fullWidth
+                    placeholder={`Option ${idx + 1}`}
+                    value={opt}
+                    onChange={(e) => handleOptionChange(idx, e.target.value)}
                     sx={{
-                      color: "text.secondary",
-                      p: 0.5,
-                      ml: 0.5,
-                      "&:hover": { color: "primary.main" },
+                      fontSize: "0.9rem",
+                      color: "text.primary",
+                      "& ::placeholder": { color: "text.secondary", opacity: 0.7 },
                     }}
-                  >
-                    <ImageOutlinedIcon sx={{ fontSize: 18 }} />
-                  </IconButton>
-                </Tooltip>
+                  />
+                </Box>
+                <IconButton
+                  size="small"
+                  disabled={options.length <= 2}
+                  onClick={() => handleRemoveOption(idx)}
+                  sx={{
+                    color: "text.secondary",
+                    bgcolor: "action.hover",
+                    border: "1px solid",
+                    borderColor: "divider",
+                    p: 0.75,
+                    opacity: options.length <= 2 ? 0.35 : 0.85,
+                    "&:hover": {
+                      bgcolor: "rgba(239, 68, 68, 0.12)",
+                      color: "error.main",
+                      borderColor: "error.main",
+                    },
+                  }}
+                >
+                  <CloseIcon sx={{ fontSize: 15 }} />
+                </IconButton>
               </Box>
-              <IconButton
-                size="small"
-                disabled={options.length <= 2}
-                onClick={() => handleRemoveOption(idx)}
-                sx={{
-                  color: "text.secondary",
-                  bgcolor: "action.hover",
-                  border: "1px solid",
-                  borderColor: "divider",
-                  p: 0.75,
-                  opacity: options.length <= 2 ? 0.35 : 0.85,
-                  "&:hover": {
-                    bgcolor: "rgba(239, 68, 68, 0.12)",
-                    color: "error.main",
-                    borderColor: "error.main",
-                  },
-                }}
-              >
-                <CloseIcon sx={{ fontSize: 15 }} />
-              </IconButton>
-            </Box>
-          ))}
-        </Stack>
+            ))}
+          </Stack>
+        </Box>
 
         {/* Add option button */}
         {options.length < 10 && (
@@ -1021,7 +1001,7 @@ export function PollDialog({
             startIcon={<AddRoundedIcon sx={{ fontSize: 18 }} />}
             sx={{
               py: 1.25,
-              mb: 2.75,
+              mb: 2,
               color: "primary.main",
               border: "1px dashed",
               borderColor: "primary.main",
@@ -1040,11 +1020,39 @@ export function PollDialog({
           </Button>
         )}
 
-        {/* Poll settings section */}
-        <Typography sx={{ fontSize: "0.92rem", fontWeight: 700, color: "text.primary", mb: 1.25 }}>
-          Poll settings
-        </Typography>
+        {/* Poll settings — collapsed by default */}
+        <Box
+          component="button"
+          type="button"
+          onClick={() => setSettingsOpen((v) => !v)}
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            width: "100%",
+            m: 0,
+            mb: settingsOpen ? 1.25 : 0,
+            p: 0,
+            border: "none",
+            bgcolor: "transparent",
+            cursor: "pointer",
+            textAlign: "left",
+          }}
+        >
+          <Typography sx={{ fontSize: "0.92rem", fontWeight: 700, color: "text.primary" }}>
+            Poll settings
+          </Typography>
+          <ExpandMoreRoundedIcon
+            sx={{
+              color: "text.secondary",
+              fontSize: 22,
+              transform: settingsOpen ? "rotate(180deg)" : "none",
+              transition: "transform 0.2s ease",
+            }}
+          />
+        </Box>
 
+        <Collapse in={settingsOpen} timeout="auto" unmountOnExit>
         <Box
           sx={{
             bgcolor: isDark ? "rgba(255, 255, 255, 0.03)" : "action.hover",
@@ -1241,10 +1249,24 @@ export function PollDialog({
             />
           </Box>
         </Box>
+        </Collapse>
       </Box>
 
       {/* Footer Actions */}
-      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 1.5, px: 2, pt: 2.5, pb: 1 }}>
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 1.5,
+          px: 2,
+          pt: 2.5,
+          pb: 1,
+          flexShrink: 0,
+          borderTop: "1px solid",
+          borderColor: "divider",
+        }}
+      >
         <Button
           onClick={onClose}
           sx={{
