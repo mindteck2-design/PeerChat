@@ -67,7 +67,7 @@ export function SettingsScreen(props: {
   gamesEnabled?: boolean;
   onGamesEnabledChange?: (enabled: boolean) => void;
 }) {
-  const { mode, setMode } = useContext(ThemeMode);
+  const { preference, setPreference } = useContext(ThemeMode);
   const theme = useTheme();
   const dark = theme.palette.mode === "dark";
   const [tab, setTab] = useState(0);
@@ -615,22 +615,33 @@ export function SettingsScreen(props: {
                 Appearance
               </Typography>
             </Box>
-            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 2 }}>
               <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
-                Light Theme
+                Theme
               </Typography>
-              <Switch
-                checked={mode === "light"}
-                onChange={(_, v) => {
-                  const next = v ? "light" : "dark";
-                  setMode(next);
-                  peerApi.setAppSetting("theme", next).catch(() => {});
-                }}
-                sx={switchSx}
-              />
+              <FormControl size="small" sx={{ minWidth: 140 }}>
+                <Select
+                  value={preference}
+                  onChange={(e) => {
+                    const next = e.target.value as "light" | "dark" | "system";
+                    setPreference(next);
+                    peerApi.setAppSetting("theme", next).catch(() => {});
+                  }}
+                  sx={{
+                    fontSize: "0.875rem",
+                    fontWeight: 600,
+                    borderRadius: 2,
+                    bgcolor: dark ? "rgba(255,255,255,0.04)" : "action.hover",
+                  }}
+                >
+                  <MenuItem value="light">Light</MenuItem>
+                  <MenuItem value="dark">Dark</MenuItem>
+                  <MenuItem value="system">System</MenuItem>
+                </Select>
+              </FormControl>
             </Box>
             <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
-              Toggle between Dark and Light mode. Your choice is saved locally.
+              System follows your OS appearance. Choice is saved locally.
             </Typography>
           </Paper>
 
