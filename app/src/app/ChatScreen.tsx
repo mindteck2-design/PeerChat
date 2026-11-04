@@ -1489,10 +1489,26 @@ export function ChatScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [highlightMsgId, active?.id, messages, hasMoreOlder, plain[highlightMsgId || ""]]);
 
+  // Mark incoming as read and clear sidebar unread (mark alone left stale list counts).
   useEffect(() => {
     if (!active || !messages.some((m) => m.sender_id !== profile.id)) return;
-    peerApi.markConversationRead(active.id).catch(console.error);
-  }, [active?.id, messages, profile.id]);
+    const cid = active.id;
+    // Snapshot divider uses unread_count at open; zero the list badge right away so
+    // switching chats does not keep showing "1" / re-show the Unread chip.
+    setConvs((prev) => {
+      let changed = false;
+      const next = prev.map((c) => {
+        if (c.id !== cid || !(c.unread_count || 0)) return c;
+        changed = true;
+        return { ...c, unread_count: 0 };
+      });
+      return changed ? next : prev;
+    });
+    peerApi.markConversationRead(cid).catch((err) => {
+      console.error(err);
+      refresh().catch(() => {});
+    });
+  }, [active?.id, messages, profile.id, refresh]);
 
   // Ref to track active chat ID for clearing fileThumbs on switch
   const prevActiveIdRef = useRef<string | undefined>(undefined);

@@ -481,7 +481,8 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             alignItems: "flex-end",
             gap: 0.75,
             position: "relative",
-            mb: m.reactions?.length ? 1.6 : 0.4,
+            // Extra bottom margin so the hanging reaction chip clears the next row.
+            mb: m.reactions?.length ? 2.25 : 0.4,
             "&:hover .msg-reaction-trigger": {
               opacity: 1,
               pointerEvents: "auto",
@@ -553,7 +554,15 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                 display: "flow-root",
                 pl: bigEmoji ? 0.5 : 1.25,
                 pr: bigEmoji ? 0.5 : 1.25,
-                py: bigEmoji ? 0.25 : 0.65,
+                // Keep text/time above the hanging reaction chip on short bubbles.
+                pt: bigEmoji ? 0.25 : 0.65,
+                pb: m.reactions?.length
+                  ? bigEmoji
+                    ? 1.35
+                    : 1.55
+                  : bigEmoji
+                    ? 0.25
+                    : 0.65,
               bgcolor: bigEmoji
                 ? highlighted
                   ? dark
@@ -1036,12 +1045,12 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             )}
           </Paper>
 
-          {/* Attached Reactions Badge — single floating chip */}
+          {/* Attached Reactions Badge — hangs below bubble, over reserved padding */}
           {!!m.reactions?.length && (
             <Box
               sx={{
                 position: "absolute",
-                bottom: -11,
+                bottom: -13,
                 [mine ? "right" : "left"]: 6,
                 display: "inline-flex",
                 alignItems: "center",
