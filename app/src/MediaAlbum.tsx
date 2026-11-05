@@ -75,7 +75,7 @@ type MediaAlbumProps = {
 
 function FileTypeIcon({ name, accent }: { name: string; accent: string }) {
   const sx = { fontSize: 22, color: accent };
-  if (name.endsWith(".pcfolder") || name.endsWith("/")) return <FolderZipIcon sx={sx} />;
+  if (name.endsWith(".pcfolder") || name.endsWith(".pcdir") || name.endsWith("/")) return <FolderZipIcon sx={sx} />;
   const ext = extOfName(name);
   if (ext === "pdf") return <PictureAsPdfIcon sx={sx} />;
   if (["zip", "rar", "7z", "tar", "gz"].includes(ext)) return <FolderZipIcon sx={sx} />;
@@ -269,18 +269,33 @@ function MediaTile({
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          <CircularTransferControl
-            value={transfer.pct}
-            paused={transfer.paused}
-            cancelled={transfer.cancelled}
-            tone="onDark"
-            size={totalShown === 1 ? 56 : 48}
-            onPause={onPauseTransfer}
-            onResume={onResumeTransfer}
-            onStop={onAbortTransfer}
-            onRetry={onRetryTransfer}
-            onDismiss={onDismissTransfer}
-          />
+          <Box sx={{ display: "grid", justifyItems: "center", gap: 0.5 }}>
+            <CircularTransferControl
+              value={transfer.pct}
+              paused={transfer.paused}
+              cancelled={transfer.cancelled}
+              tone="onDark"
+              size={totalShown === 1 ? 56 : 48}
+              onPause={onPauseTransfer}
+              onResume={onResumeTransfer}
+              onStop={onAbortTransfer}
+              onRetry={onRetryTransfer}
+              onDismiss={onRetryTransfer ? undefined : onDismissTransfer}
+            />
+            {transfer.cancelled && onRetryTransfer && onDismissTransfer && (
+              <Typography
+                component="span"
+                variant="caption"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDismissTransfer();
+                }}
+                sx={{ color: "#fff", cursor: "pointer", textDecoration: "underline", lineHeight: 1 }}
+              >
+                Dismiss
+              </Typography>
+            )}
+          </Box>
         </Box>
       )}
     </Box>
@@ -417,10 +432,26 @@ export function MediaAlbum({
               onDismiss={onDismissTransfer}
             />
             <Typography variant="caption" color="text.secondary">
-              {transfer.cancelled
-                ? "Cancelled"
-                : transfer.paused
-                  ? `Paused ${transfer.pct}%`
+              {transfer.cancelled ? (
+                <>
+                  Cancelled
+                  {onDismissTransfer && (
+                    <Box
+                      component="span"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDismissTransfer();
+                      }}
+                      sx={{ ml: 0.75, cursor: "pointer", textDecoration: "underline" }}
+                    >
+                      Dismiss
+                    </Box>
+                  )}
+                </>
+              ) : transfer.paused
+                ? `Paused ${transfer.pct}%`
+                : transfer.label?.startsWith("Unpacking folder")
+                  ? transfer.label
                   : `${transfer.label || "Downloading…"} ${transfer.pct}%`}
             </Typography>
           </Stack>
@@ -501,21 +532,46 @@ export function MediaAlbum({
             </Box>
             <Box sx={{ minWidth: 0, flex: 1 }}>
               <Typography noWrap sx={{ fontWeight: 700, fontSize: 13, color: nameColor, lineHeight: 1.25 }}>
-                {item.name.endsWith(".pcfolder") ? `${item.name.slice(0, -9)}/` : item.name}
+                {item.name.endsWith(".pcfolder")
+                  ? `${item.name.slice(0, -".pcfolder".length)}/`
+                  : item.name.endsWith(".pcdir")
+                    ? `${item.name.slice(0, -".pcdir".length)}/`
+                    : item.name}
               </Typography>
               <Typography variant="caption" color="text.secondary" sx={{ fontSize: 11 }}>
                 {docTransfer
                   ? docTransfer.cancelled
-                    ? "Cancelled"
+                    ? (
+                      <>
+                        Cancelled
+                        {onDismissTransfer && (
+                          <Box
+                            component="span"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              onDismissTransfer();
+                            }}
+                            sx={{ ml: 0.75, cursor: "pointer", textDecoration: "underline" }}
+                          >
+                            Dismiss
+                          </Box>
+                        )}
+                      </>
+                    )
                     : docTransfer.paused
                       ? `Paused ${docTransfer.pct}%`
-                      : `${docTransfer.label || "Downloading…"} ${docTransfer.pct}%`
+                      : docTransfer.label?.startsWith("Unpacking folder")
+                        ? docTransfer.label
+                        : `${docTransfer.label || "Downloading…"} ${docTransfer.pct}%`
                   : busy
                     ? "Downloading…"
                     : pending
                       ? "…"
                       : isDownloaded
-                        ? item.name.endsWith(".pcfolder") || item.name.endsWith("/")
+                        ? item.name.endsWith(".pcfolder") ||
+                          item.name.endsWith(".pcdir") ||
+                          item.name.endsWith("/")
                           ? "Open folder"
                           : "Saved"
                         : item.size != null && item.size > 0

@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { parseCalendarShare } from "../calendar/CalendarShareCard";
-import { useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import {
   Box, Button, Chip, CircularProgress, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Paper,
   Stack, TextField, Typography,
@@ -32,6 +32,7 @@ import { isImageFileName, isVideoFileName } from "../../MediaAlbum";
 import { canBroadcastRole } from "../profile/roles";
 import { SLASH_COMMANDS, type CommandContext } from "../../commands";
 import type { ChatScreenVm } from "./chatVm";
+import { imagesFromClipboard } from "./clipboardImages";
 
 function getCommandIcon(cmdName: string) {
   switch (cmdName) {
@@ -352,6 +353,24 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
       return tall;
     });
   }, [text, composerRef]);
+
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (!active || editingMessage) return;
+      const target = e.target;
+      if (target instanceof HTMLElement) {
+        const field = target.closest("input, textarea, [contenteditable='true']");
+        const composer = composerRef?.current as HTMLElement | null;
+        if (field && field !== composer && !composer?.contains(field)) return;
+      }
+      const images = imagesFromClipboard(e.clipboardData);
+      if (!images.length) return;
+      e.preventDefault();
+      stageFiles(images);
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [active, editingMessage, composerRef, stageFiles]);
 
   const toolButtons = (
     <Stack direction="row" spacing={0.15} alignItems="center" sx={{ flexShrink: 0 }}>

@@ -61,21 +61,6 @@ pub async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, St
             let ip_changed = old_ip.as_deref() != Some(p.ip.as_str())
                 && discovery::is_usable_lan_ip(&p.ip);
 
-            // Auto-adopt new TLS / crypto keys; archive previous keys for history.
-            if let Some(ref ex) = existing {
-                let same_fp = ex["tls_fingerprint"].as_str() == Some(p.fingerprint.as_str());
-                let same_x = ex["x25519_public"].as_str() == Some(p.x25519_public.as_str());
-                let same_e = ex["ed25519_public"].as_str() == Some(p.ed25519_public.as_str());
-                if !(same_fp && same_x && same_e) {
-                    let _ = db::adopt_peer_identity(
-                        &conn,
-                        &p.user_id,
-                        &p.fingerprint,
-                        &p.x25519_public,
-                        &p.ed25519_public,
-                    );
-                }
-            }
             db::upsert_peer_with_team(
                 &conn,
                 &p.user_id,
@@ -91,20 +76,19 @@ pub async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, St
             if ip_changed || was_offline {
                 peers_to_kick.push(p.user_id.clone());
             }
+            let stored = db::get_peer(&conn, &p.user_id).ok().flatten();
             out.push(json!({
                 "user_id": p.user_id,
                 "display_name": p.display_name,
-                "x25519_public": p.x25519_public,
-                "ed25519_public": p.ed25519_public,
+                "x25519_public": stored.as_ref().and_then(|s| s["x25519_public"].as_str()).unwrap_or(p.x25519_public.as_str()),
+                "ed25519_public": stored.as_ref().and_then(|s| s["ed25519_public"].as_str()).unwrap_or(p.ed25519_public.as_str()),
                 "last_ip": p.ip,
                 "last_port": p.port,
-                "tls_fingerprint": p.fingerprint,
+                "tls_fingerprint": stored.as_ref().and_then(|s| s["tls_fingerprint"].as_str()).unwrap_or(p.fingerprint.as_str()),
                 "online": true,
-                "identity_changed": false,
                 "team": p.team,
             }));
         }
-        let _ = db::auto_accept_all_pending_identities(&conn);
         let _ = db::mark_peers_offline_except(&conn, &online_ids);
         let _ = db::mark_stale_peers_offline(&conn, 45);
         let _ = db::dedupe_peers_by_ip(&conn);

@@ -124,7 +124,7 @@ export function SetupScreen(props: {
                 }
               }}
             />
-            <FormControl fullWidth size="small">
+            <FormControl fullWidth>
               <InputLabel id="setup-role-label">Designation / Role</InputLabel>
               <Select
                 labelId="setup-role-label"
@@ -156,7 +156,6 @@ export function SetupScreen(props: {
               <TextField
                 label="Custom designation"
                 fullWidth
-                size="small"
                 value={customRoleText}
                 placeholder="e.g. Solution Architect"
                 onChange={(e) => setCustomRoleText(e.target.value)}

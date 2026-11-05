@@ -66,7 +66,6 @@ pub fn run() {
             let shared: SharedDb = Arc::new(Mutex::new(conn));
             {
                 let conn = shared.lock();
-                let _ = db::auto_accept_all_pending_identities(&conn);
                 let _ = db::dedupe_peers_by_ip(&conn);
             }
             commands::screenshot::cleanup_stale_captures_dir(&data);

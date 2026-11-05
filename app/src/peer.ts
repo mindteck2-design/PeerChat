@@ -284,10 +284,16 @@ export const peerApi = {
       "stage_outgoing_from_path",
       { fileId, path, contentKeyB64 }
     ),
-  stageOutgoingFolder: (fileId: string, folderPath: string, contentKeyB64: string) =>
+  stageOutgoingFolder: (
+    fileId: string,
+    folderPath: string,
+    contentKeyB64: string,
+    totalFiles?: number,
+    totalBytes?: number
+  ) =>
     inv<{ content_sha256: string; bytes_written: number; chunk_count: number }>(
       "stage_outgoing_folder",
-      { fileId, folderPath, contentKeyB64 }
+      { fileId, folderPath, contentKeyB64, totalFiles, totalBytes }
     ),
   requestStageCancel: (fileId: string) => inv<void>("request_stage_cancel", { fileId }),
   requestStagePause: (fileId: string) => inv<void>("request_stage_pause", { fileId }),
@@ -320,13 +326,15 @@ export const peerApi = {
     fileId: string,
     uploaderId: string,
     contentKeyB64: string,
-    fromIndex: number
+    fromIndex: number,
+    folderName?: string
   ) =>
-    inv<{ next_index: number; total: number }>("download_file_stream", {
+    inv<{ next_index: number; total: number; path?: string | null }>("download_file_stream", {
       fileId,
       uploaderId,
       contentKeyB64,
       fromIndex,
+      folderName: folderName ?? null,
     }),
   /** Abort an in-flight binary stream download (pause/stop). */
   cancelFileStream: (fileId: string) => inv<void>("cancel_file_stream", { fileId }),

@@ -1394,11 +1394,23 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                   {outgoingFile.batchTotal && outgoingFile.batchTotal > 1
                     ? `File ${outgoingFile.batchIndex || 1} of ${outgoingFile.batchTotal} · `
                     : ""}
-                  {outgoingFile.cancelled
-                    ? "Cancelled"
-                    : outgoingFile.paused
-                      ? "Paused"
-                      : outgoingFile.label || (outgoingFile.name.endsWith("/") ? "Packaging folder…" : "Sending…")}
+                  {outgoingFile.cancelled ? (
+                    <>
+                      Cancelled
+                      <Box
+                        component="span"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          dismissOutgoingTransfer();
+                        }}
+                        sx={{ ml: 0.75, cursor: "pointer", textDecoration: "underline" }}
+                      >
+                        Dismiss
+                      </Box>
+                    </>
+                  ) : outgoingFile.paused
+                    ? "Paused"
+                    : outgoingFile.label || (outgoingFile.name.endsWith("/") ? "Packaging folder…" : "Sending…")}
                   {!outgoingFile.cancelled && outgoingFile.total
                     ? ` ${Math.min(
                         100,

@@ -397,18 +397,6 @@ async fn handle_packet(
             let was_offline = existing.get("online").and_then(|v| v.as_bool()) == Some(false);
             let old_ip = existing.get("last_ip").and_then(|v| v.as_str());
             let ip_changed = old_ip != Some(peer.ip.as_str());
-            let same_fp = existing.get("tls_fingerprint").and_then(|v| v.as_str()) == Some(peer.fingerprint.as_str());
-            let same_x = existing.get("x25519_public").and_then(|v| v.as_str()) == Some(peer.x25519_public.as_str());
-            let same_e = existing.get("ed25519_public").and_then(|v| v.as_str()) == Some(peer.ed25519_public.as_str());
-            if !(same_fp && same_x && same_e) {
-                let _ = crate::db::adopt_peer_identity(
-                    &conn,
-                    &peer.user_id,
-                    &peer.fingerprint,
-                    &peer.x25519_public,
-                    &peer.ed25519_public,
-                );
-            }
             let _ = crate::db::upsert_peer_with_team(
                 &conn,
                 &peer.user_id,

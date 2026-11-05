@@ -146,32 +146,6 @@ pub fn adopt_peer_identity(
     Ok(())
 }
 
-/// Apply any leftover pending identity rows (from older builds that required Review).
-pub fn auto_accept_all_pending_identities(conn: &Connection) -> Result<u64, String> {
-    let mut stmt = conn
-        .prepare(
-            r#"SELECT user_id,
-                      COALESCE(pending_tls_fingerprint,''),
-                      COALESCE(pending_x25519_public,''),
-                      COALESCE(pending_ed25519_public,'')
-               FROM peers
-               WHERE identity_changed=1 AND pending_tls_fingerprint IS NOT NULL"#,
-        )
-        .map_err(|e| e.to_string())?;
-    let rows: Vec<(String, String, String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    drop(stmt);
-    let mut n = 0u64;
-    for (uid, fp, x, e) in rows {
-        adopt_peer_identity(conn, &uid, &fp, &x, &e)?;
-        n += 1;
-    }
-    Ok(n)
-}
-
 pub fn upsert_peer(
     conn: &Connection,
     user_id: &str,
@@ -197,6 +171,70 @@ pub fn upsert_peer(
     )
 }
 
+/// Record a newly seen certificate or key set without replacing the keys already stored.
+/// The active row stays in use for encrypt, verify, and connect until
+/// `accept_pending_identity`. A beacon that matches the active keys clears a stale pending swap.
+pub fn stage_peer_identity(
+    conn: &Connection,
+    user_id: &str,
+    tls_fingerprint: &str,
+    x25519_public: &str,
+    ed25519_public: &str,
+) -> Result<(), String> {
+    if user_id.is_empty() {
+        return Ok(());
+    }
+    let Some(existing) = get_peer(conn, user_id)? else {
+        return Ok(());
+    };
+    let old_x = existing["x25519_public"].as_str().unwrap_or("");
+    let old_e = existing["ed25519_public"].as_str().unwrap_or("");
+    let old_fp = existing["tls_fingerprint"].as_str().unwrap_or("");
+    let pinned = existing["pinned"].as_bool().unwrap_or(false);
+    let incoming_x = if x25519_public.is_empty() {
+        old_x
+    } else {
+        x25519_public
+    };
+    let incoming_e = if ed25519_public.is_empty() {
+        old_e
+    } else {
+        ed25519_public
+    };
+    let incoming_fp = if tls_fingerprint.is_empty() {
+        old_fp
+    } else {
+        tls_fingerprint
+    };
+    let same = incoming_x == old_x && incoming_e == old_e && incoming_fp == old_fp;
+    if same {
+        conn.execute(
+            r#"UPDATE peers SET identity_changed=0,
+                   pending_tls_fingerprint=NULL,
+                   pending_x25519_public=NULL,
+                   pending_ed25519_public=NULL
+               WHERE user_id=?1"#,
+            params![user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    // Nothing trusted yet — take the first real keys. A pinned row stays pending.
+    if !pinned && old_x.is_empty() && old_e.is_empty() && old_fp.is_empty() {
+        return adopt_peer_identity(conn, user_id, incoming_fp, incoming_x, incoming_e);
+    }
+    conn.execute(
+        r#"UPDATE peers SET identity_changed=1,
+               pending_tls_fingerprint=?2,
+               pending_x25519_public=?3,
+               pending_ed25519_public=?4
+           WHERE user_id=?1"#,
+        params![user_id, incoming_fp, incoming_x, incoming_e],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn upsert_peer_with_team(
     conn: &Connection,
     user_id: &str,
@@ -213,16 +251,14 @@ pub fn upsert_peer_with_team(
     // Never persist loopback / garbage — that poisons reverse delivery.
     let ip = ip.filter(|s| crate::discovery::is_usable_lan_ip(s));
     let team = team.unwrap_or("").trim();
+    // On conflict, keep the saved certificate and public keys. Reachability can move.
     conn.execute(
         r#"INSERT INTO peers(user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, last_seen_at, online, team)
            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
            ON CONFLICT(user_id) DO UPDATE SET
              display_name=excluded.display_name,
-             x25519_public=excluded.x25519_public,
-             ed25519_public=excluded.ed25519_public,
              last_ip=COALESCE(excluded.last_ip, peers.last_ip),
              last_port=COALESCE(excluded.last_port, peers.last_port),
-             tls_fingerprint=COALESCE(excluded.tls_fingerprint, peers.tls_fingerprint),
              last_seen_at=excluded.last_seen_at,
              online=excluded.online,
              team=CASE WHEN excluded.team != '' THEN excluded.team ELSE peers.team END"#,
@@ -240,6 +276,13 @@ pub fn upsert_peer_with_team(
         ],
     )
     .map_err(|e| e.to_string())?;
+    stage_peer_identity(
+        conn,
+        user_id,
+        tls_fingerprint.unwrap_or(""),
+        x25519_public,
+        ed25519_public,
+    )?;
     // One peer per LAN IP: when this identity is live at `ip`, fold any other row
     // still holding that address (typical after a PeerChat reinstall / new user_id).
     if online {
@@ -362,11 +405,7 @@ pub(crate) fn list_peers_raw(conn: &Connection) -> Result<Vec<Value>, String> {
                 "ed25519_public": r.get::<_, String>(3)?,
                 "last_ip": r.get::<_, Option<String>>(4)?,
                 "last_port": r.get::<_, Option<i64>>(5)?,
-                "tls_fingerprint": if identity_changed {
-                    pending_fp.clone().or(pinned_fp)
-                } else {
-                    pinned_fp
-                },
+                "tls_fingerprint": pinned_fp,
                 "pinned": r.get::<_, i64>(7)? == 1,
                 "last_seen_at": r.get::<_, Option<String>>(8)?,
                 "online": r.get::<_, i64>(9)? == 1,
@@ -423,35 +462,17 @@ pub fn set_peer_blocked(conn: &Connection, user_id: &str, blocked: bool) -> Resu
 }
 
 pub fn pin_peer(conn: &Connection, user_id: &str, fingerprint: &str) -> Result<(), String> {
-    // If a pending identity was flagged, adopt those keys when re-pinning.
-    let pending: Option<(Option<String>, Option<String>, Option<String>)> = conn
-        .query_row(
-            "SELECT pending_tls_fingerprint, pending_x25519_public, pending_ed25519_public FROM peers WHERE user_id=?1",
-            params![user_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if let Some((Some(p_fp), Some(px), Some(pe))) = pending {
-        let use_fp = if fingerprint.is_empty() {
-            p_fp
-        } else {
-            fingerprint.to_string()
-        };
+    // First-contact pin trusts the keys already stored. A pending rotation stays
+    // pending until accept_pending_identity.
+    if fingerprint.is_empty() {
         conn.execute(
-            r#"UPDATE peers SET pinned=1, blocked=0, tls_fingerprint=?2,
-                   x25519_public=?3, ed25519_public=?4,
-                   identity_changed=0,
-                   pending_tls_fingerprint=NULL,
-                   pending_x25519_public=NULL,
-                   pending_ed25519_public=NULL
-               WHERE user_id=?1"#,
-            params![user_id, use_fp, px, pe],
+            "UPDATE peers SET pinned=1, blocked=0 WHERE user_id=?1",
+            params![user_id],
         )
         .map_err(|e| e.to_string())?;
     } else {
         conn.execute(
-            "UPDATE peers SET pinned=1, blocked=0, tls_fingerprint=?2, identity_changed=0 WHERE user_id=?1",
+            "UPDATE peers SET pinned=1, blocked=0, tls_fingerprint=?2 WHERE user_id=?1",
             params![user_id, fingerprint],
         )
         .map_err(|e| e.to_string())?;
@@ -515,5 +536,118 @@ pub fn accept_pending_identity(conn: &Connection, user_id: &str) -> Result<(), S
         return Err("No pending identity change for this peer".into());
     };
     adopt_peer_identity(conn, user_id, &fp, &x, &e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrate(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn changed_keys_stay_pending_until_accepted() {
+        let conn = mem();
+        upsert_peer(
+            &conn,
+            "u1",
+            "Ada",
+            "x-old",
+            "e-old",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-old"),
+            true,
+        )
+        .unwrap();
+        pin_peer(&conn, "u1", "fp-old").unwrap();
+
+        upsert_peer(
+            &conn,
+            "u1",
+            "Ada",
+            "x-new",
+            "e-new",
+            Some("10.0.0.9"),
+            Some(9877),
+            Some("fp-new"),
+            true,
+        )
+        .unwrap();
+
+        let listed = list_peers(&conn).unwrap();
+        let row = listed.iter().find(|p| p["user_id"] == "u1").unwrap();
+        assert_eq!(row["x25519_public"], "x-old");
+        assert_eq!(row["ed25519_public"], "e-old");
+        assert_eq!(row["tls_fingerprint"], "fp-old");
+        assert_eq!(row["identity_changed"], true);
+        assert_eq!(row["pending_tls_fingerprint"], "fp-new");
+        assert_eq!(row["last_ip"], "10.0.0.9");
+        assert_eq!(row["pinned"], true);
+
+        pin_peer(&conn, "u1", "fp-old").unwrap();
+        let still = get_peer(&conn, "u1").unwrap().unwrap();
+        assert_eq!(still["x25519_public"], "x-old");
+        assert_eq!(still["tls_fingerprint"], "fp-old");
+
+        accept_pending_identity(&conn, "u1").unwrap();
+        let accepted = get_peer(&conn, "u1").unwrap().unwrap();
+        assert_eq!(accepted["x25519_public"], "x-new");
+        assert_eq!(accepted["ed25519_public"], "e-new");
+        assert_eq!(accepted["tls_fingerprint"], "fp-new");
+        let after = list_peers(&conn).unwrap();
+        let row = after.iter().find(|p| p["user_id"] == "u1").unwrap();
+        assert_eq!(row["identity_changed"], false);
+        assert!(row["pending_tls_fingerprint"].is_null());
+    }
+
+    #[test]
+    fn matching_beacon_clears_pending_identity() {
+        let conn = mem();
+        upsert_peer(
+            &conn,
+            "u1",
+            "Ada",
+            "x-old",
+            "e-old",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-old"),
+            true,
+        )
+        .unwrap();
+        upsert_peer(
+            &conn,
+            "u1",
+            "Ada",
+            "x-new",
+            "e-new",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-new"),
+            true,
+        )
+        .unwrap();
+        upsert_peer(
+            &conn,
+            "u1",
+            "Ada",
+            "x-old",
+            "e-old",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-old"),
+            true,
+        )
+        .unwrap();
+        let row = list_peers(&conn).unwrap().pop().unwrap();
+        assert_eq!(row["identity_changed"], false);
+        assert_eq!(row["x25519_public"], "x-old");
+        assert_eq!(row["tls_fingerprint"], "fp-old");
+    }
 }
 

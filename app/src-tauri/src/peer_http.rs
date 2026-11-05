@@ -594,22 +594,8 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     .get("tls_fingerprint")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                // Archive previous keys before overwriting, then refresh reachability.
-                if let Ok(Some(existing)) = db::get_peer(&conn, &uid) {
-                    let same_fp = existing["tls_fingerprint"].as_str() == fp.as_deref()
-                        || fp.as_ref().map(|s| s.is_empty()).unwrap_or(true);
-                    let same_x = existing["x25519_public"].as_str() == Some(x.as_str());
-                    let same_e = existing["ed25519_public"].as_str() == Some(e.as_str());
-                    if !(same_fp && same_x && same_e) {
-                        let _ = db::adopt_peer_identity(
-                            &conn,
-                            &uid,
-                            fp.as_deref().unwrap_or(""),
-                            &x,
-                            &e,
-                        );
-                    }
-                }
+                // Reachability updates immediately. A changed certificate or key set
+                // is stored as pending and does not replace the saved identity.
                 let _ = db::upsert_peer(
                     &conn,
                     &uid,
@@ -1146,6 +1132,56 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
     }
 }
 
+enum ChunkWait {
+    Ready,
+    Finished,
+    Failed,
+}
+
+/// Folder sends publish chunks while the walk is still running (`.live`).
+/// Wait until this index exists, the walk finishes (`.done`), or it fails.
+async fn wait_live_chunk(staging: &std::path::Path, index: u32) -> ChunkWait {
+    let path = staging.join(format!("{index}.chunk"));
+    let nonce = staging.join(format!("{index}.nonce"));
+    let done = staging.join(".done");
+    let failed = staging.join(".failed");
+    let started = std::time::Instant::now();
+    loop {
+        if path.is_file() && nonce.is_file() {
+            return ChunkWait::Ready;
+        }
+        if failed.is_file() {
+            return ChunkWait::Failed;
+        }
+        if done.is_file() {
+            return ChunkWait::Finished;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(30 * 60) {
+            return ChunkWait::Failed;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    }
+}
+
+async fn write_chunk_frame(out: &mut Vec<u8>, staging: &std::path::Path, index: u32) -> Result<(), ()> {
+    let path = staging.join(format!("{index}.chunk"));
+    let nonce_path = staging.join(format!("{index}.nonce"));
+    let data = tokio::fs::read(&path).await.map_err(|_| ())?;
+    let nonce = tokio::fs::read_to_string(&nonce_path)
+        .await
+        .unwrap_or_default();
+    let nonce_b = nonce.as_bytes();
+    if nonce_b.len() > u16::MAX as usize {
+        return Err(());
+    }
+    out.extend_from_slice(&index.to_le_bytes());
+    out.extend_from_slice(&(nonce_b.len() as u16).to_le_bytes());
+    out.extend_from_slice(nonce_b);
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&data);
+    Ok(())
+}
+
 /// Binary framed stream of encrypted staging chunks (E2E preserved).
 async fn stream_file_chunks(
     tls: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
@@ -1158,26 +1194,33 @@ async fn stream_file_chunks(
     tls.write_all(headers.as_bytes()).await.map_err(|_| ())?;
     // Batch a few frames before flush — cuts TLS/syscall overhead on LAN.
     let mut out = Vec::with_capacity(16 * 1024 * 1024);
-    for index in from_index..chunk_count {
-        let path = staging.join(format!("{index}.chunk"));
-        let nonce_path = staging.join(format!("{index}.nonce"));
-        let data = tokio::fs::read(&path).await.map_err(|_| ())?;
-        let nonce = tokio::fs::read_to_string(&nonce_path)
-            .await
-            .unwrap_or_default();
-        let nonce_b = nonce.as_bytes();
-        if nonce_b.len() > u16::MAX as usize {
-            return Err(());
+    let live = staging.join(".live").is_file();
+    if live {
+        let mut index = from_index;
+        loop {
+            match wait_live_chunk(staging, index).await {
+                ChunkWait::Ready => {
+                    write_chunk_frame(&mut out, staging, index).await?;
+                    index += 1;
+                    if out.len() >= 14 * 1024 * 1024 {
+                        tls.write_all(&out).await.map_err(|_| ())?;
+                        out.clear();
+                    }
+                }
+                ChunkWait::Finished => break,
+                ChunkWait::Failed => return Err(()),
+            }
         }
-        out.extend_from_slice(&index.to_le_bytes());
-        out.extend_from_slice(&(nonce_b.len() as u16).to_le_bytes());
-        out.extend_from_slice(nonce_b);
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&data);
-        // Flush every ~2 frames (≈16 MiB ciphertext) or at end.
-        if out.len() >= 14 * 1024 * 1024 || index + 1 == chunk_count {
+        if !out.is_empty() {
             tls.write_all(&out).await.map_err(|_| ())?;
-            out.clear();
+        }
+    } else {
+        for index in from_index..chunk_count {
+            write_chunk_frame(&mut out, staging, index).await?;
+            if out.len() >= 14 * 1024 * 1024 || index + 1 == chunk_count {
+                tls.write_all(&out).await.map_err(|_| ())?;
+                out.clear();
+            }
         }
     }
     tls.write_all(&0xFFFFFFFFu32.to_le_bytes())
@@ -1280,19 +1323,29 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
     }
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
     }
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         rustls::crypto::ring::default_provider()
@@ -1548,7 +1601,7 @@ pub fn decrypt_file_chunk(
 
 /// Pull encrypted stream, decrypt, append to receive temp; emit progress.
 /// `on_chunk` is called after each successful append so the DB can track resume points.
-pub async fn stream_download_and_append<F>(
+pub async fn stream_download_and_append<F, C>(
     host: &str,
     port: u16,
     expected_fp: Option<String>,
@@ -1556,29 +1609,21 @@ pub async fn stream_download_and_append<F>(
     from_index: u32,
     content_key: &[u8],
     file_crypto_v: i64,
-    temp_path: &std::path::Path,
     total_chunks: u32,
     app: &AppHandle,
     cancel: Arc<AtomicBool>,
+    mut on_plain: C,
     mut on_chunk: F,
 ) -> Result<u32, String>
 where
     F: FnMut(u32) -> Result<(), String>,
+    C: FnMut(&[u8]) -> Result<(), String>,
 {
-    use std::io::{BufWriter, Write};
     let mut session = PeerSession::connect(host, port, expected_fp).await?;
     session.begin_file_stream(file_id, from_index).await?;
     let mut next = from_index;
-    let raw = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(temp_path)
-        .map_err(|e| e.to_string())?;
-    // 4 MiB write buffer — fewer syscalls on large LAN transfers.
-    let mut file = BufWriter::with_capacity(4 * 1024 * 1024, raw);
     loop {
         if cancel.load(Ordering::Relaxed) {
-            file.flush().map_err(|e| e.to_string())?;
             if next > from_index {
                 on_chunk(next)?;
             }
@@ -1608,11 +1653,10 @@ where
             None
         };
         let plain = decrypt_file_chunk(content_key, &nonce_b64, &cipher, chunk_idx)?;
-        file.write_all(&plain).map_err(|e| e.to_string())?;
+        on_plain(&plain)?;
         next = index + 1;
         // Persist resume cursor less often — DB lock every chunk was a LAN bottleneck.
         if next == total_chunks || next == 1 || next % 8 == 0 {
-            file.flush().map_err(|e| e.to_string())?;
             on_chunk(next)?;
             let _ = app.emit(
                 "file-stream-progress",
@@ -1624,7 +1668,6 @@ where
             );
         }
     }
-    file.flush().map_err(|e| e.to_string())?;
     if next > from_index && (next % 8 != 0) {
         on_chunk(next)?;
     }
@@ -1667,5 +1710,105 @@ pub async fn fetch_chunks_keep_alive(
         }));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeerSession;
+    use rcgen::{CertificateParams, KeyPair};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::sign::{CertifiedKey, Signer, SigningKey};
+    use rustls::{SignatureAlgorithm, SignatureScheme};
+    use rustls::ServerConfig;
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+
+    #[derive(Debug)]
+    struct ForeignKey(Arc<dyn SigningKey>);
+
+    impl SigningKey for ForeignKey {
+        fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+            self.0.choose_scheme(offered)
+        }
+        fn algorithm(&self) -> SignatureAlgorithm {
+            self.0.algorithm()
+        }
+    }
+
+    fn install_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    fn issued() -> (CertificateDer<'static>, KeyPair) {
+        let key = KeyPair::generate().unwrap();
+        let params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        (cert.der().clone(), key)
+    }
+
+    fn load_key(key: &KeyPair) -> Arc<dyn SigningKey> {
+        let der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
+        rustls::crypto::ring::default_provider()
+            .key_provider
+            .load_private_key(der)
+            .unwrap()
+    }
+
+    fn fingerprint(cert: &CertificateDer<'_>) -> String {
+        hex::encode(Sha256::digest(cert.as_ref()))
+    }
+
+    fn server_config(cert: CertificateDer<'static>, key: Arc<dyn SigningKey>) -> Arc<ServerConfig> {
+        let certified = CertifiedKey::new(vec![cert], key);
+        Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified))),
+        )
+    }
+
+    async fn serve(config: Arc<ServerConfig>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let acceptor = TlsAcceptor::from(config);
+        tokio::spawn(async move {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = acceptor.accept(sock).await;
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn matching_certificate_key_connects() {
+        install_provider();
+        let (cert, key) = issued();
+        let fp = fingerprint(&cert);
+        let port = serve(server_config(cert, load_key(&key))).await;
+        PeerSession::connect("127.0.0.1", port, Some(fp))
+            .await
+            .expect("pinned peer with its own key");
+    }
+
+    #[tokio::test]
+    async fn copied_certificate_with_other_private_key_is_rejected() {
+        install_provider();
+        let (cert_a, _key_a) = issued();
+        let (_cert_b, key_b) = issued();
+        let fp_a = fingerprint(&cert_a);
+        let port = serve(server_config(cert_a, Arc::new(ForeignKey(load_key(&key_b))))).await;
+        let err = PeerSession::connect("127.0.0.1", port, Some(fp_a))
+            .await
+            .err()
+            .expect("copied cert signed by a different key");
+        let lower = err.to_lowercase();
+        assert!(
+            lower.contains("signature") || lower.contains("badsignature"),
+            "expected a handshake signature failure, got {err}"
+        );
+    }
 }
 

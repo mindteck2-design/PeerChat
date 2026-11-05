@@ -61,7 +61,11 @@ export function useChatSync(opts: {
                 x.online === p[i].online &&
                 x.last_ip === p[i].last_ip &&
                 x.pinned === p[i].pinned &&
-                x.blocked === p[i].blocked
+                x.blocked === p[i].blocked &&
+                x.identity_changed === p[i].identity_changed &&
+                x.tls_fingerprint === p[i].tls_fingerprint &&
+                x.x25519_public === p[i].x25519_public &&
+                x.ed25519_public === p[i].ed25519_public
             )
           ) {
             return prev;

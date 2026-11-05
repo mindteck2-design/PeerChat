@@ -80,7 +80,7 @@ pub(crate) async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
                 if pinned && !observed_fp.is_empty() {
                     let cur = peer["tls_fingerprint"].as_str().unwrap_or("");
                     if cur != observed_fp {
-                        let _ = db::adopt_peer_identity(
+                        let _ = db::stage_peer_identity(
                             &conn,
                             &recipient,
                             &observed_fp,

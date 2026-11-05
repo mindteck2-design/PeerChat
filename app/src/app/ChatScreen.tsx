@@ -413,6 +413,24 @@ export function ChatScreen({
   }, [status]);
   const toastText = status || lastStatusRef.current;
   const [pinOpen, setPinOpen] = useState<Peer | null>(null);
+  const [identityReview, setIdentityReview] = useState<Peer | null>(null);
+  const identityDismissedRef = useRef<Set<string>>(new Set());
+  const identityAcceptingRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      identityReview &&
+      peers.some((p) => p.user_id === identityReview.user_id && p.identity_changed)
+    ) {
+      return;
+    }
+    const next = peers.find(
+      (p) =>
+        p.identity_changed &&
+        p.user_id !== identityAcceptingRef.current &&
+        !identityDismissedRef.current.has(p.user_id)
+    );
+    setIdentityReview(next ?? null);
+  }, [peers, identityReview]);
   /** Inbound first message from someone you have not trusted/pinned yet. */
   const [firstContact, setFirstContact] = useState<{
     peer: Peer;
@@ -1883,6 +1901,30 @@ export function ChatScreen({
     }, 400);
   }
 
+  function reviewIdentity(peer: Peer) {
+    identityDismissedRef.current.delete(peer.user_id);
+    setIdentityReview(peer);
+  }
+
+  function dismissIdentityReview(peer: Peer) {
+    identityDismissedRef.current.add(peer.user_id);
+    setIdentityReview(null);
+  }
+
+  async function acceptIdentityReview(peer: Peer) {
+    identityAcceptingRef.current = peer.user_id;
+    setIdentityReview(null);
+    try {
+      await peerApi.acceptPendingIdentity(peer.user_id);
+      setStatus("Accepted new keys for " + peer.display_name);
+      await refresh();
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    } finally {
+      identityAcceptingRef.current = null;
+    }
+  }
+
   async function openDm(peer: Peer) {
     if (peer.blocked) {
       const c = await peerApi.openDm(peer.user_id);
@@ -2070,7 +2112,7 @@ export function ChatScreen({
     opts?: { skipNotice?: boolean; knownMeta?: { total_files: number; total_bytes: number } }
   ): Promise<string | undefined> {
     const cleanName = folderName.replace(/[\\/]/g, "").trim() || "folder";
-    const archiveFileName = `${cleanName}.pcfolder`;
+    const archiveFileName = `${cleanName}.pcdir`;
     let folderMeta: { path: string; name: string; total_files: number; total_bytes: number };
     if (opts?.knownMeta && opts.knownMeta.total_files > 0) {
       folderMeta = {
@@ -2194,10 +2236,28 @@ export function ChatScreen({
       });
 
       let unlistenStage: (() => void) | undefined;
+      let unlistenReady: (() => void) | undefined;
       let stagedChunkCount = chunkCount;
       let stagedBytes = folderMeta.total_bytes;
+      let noticeSent = false;
+      const sendNotice = async () => {
+        if (noticeSent || opts?.skipNotice) return;
+        noticeSent = true;
+        await peerApi.sendFileNotice(
+          conversationId,
+          fileId!,
+          memberIds.filter((id) => id !== profile.id)
+        );
+      };
       try {
         let lastStageUi = 0;
+        unlistenReady = await listen<{ file_id: string }>("folder-stage-ready", (ev) => {
+          if (ev.payload.file_id !== fileId) return;
+          setOutgoingFile((prev) =>
+            prev && !prev.cancelled ? { ...prev, label: "Sending folder…" } : prev
+          );
+          void sendNotice();
+        });
         unlistenStage = await listen<{
           file_id: string;
           done: number;
@@ -2206,30 +2266,32 @@ export function ChatScreen({
         }>("file-stage-progress", (ev) => {
           if (ev.payload.file_id !== fileId) return;
           if (abortSendRef.current) return;
+          const bytes = Number(ev.payload.bytes_done) || 0;
+          const totalBytes = Math.max(folderMeta.total_bytes, bytes, 1);
+          const now = Date.now();
+          if (now - lastStageUi < 1000 && bytes < totalBytes) return;
+          lastStageUi = now;
           const snap: OutgoingFileState = {
             conversationId,
             fileId,
             name: `${cleanName}/`,
-            done: ev.payload.done,
-            total: Math.max(ev.payload.total, ev.payload.done),
+            done: bytes,
+            total: totalBytes,
             sourcePath: folderPath,
             sizeBytes: folderMeta.total_bytes,
             paused: pauseRef.current,
             cancelled: false,
-            label: "Packaging folder…",
+            label: noticeSent ? "Sending folder…" : "Packaging folder…",
           };
-          publishTransferProgress({ outgoing: snap });
-          const now = Date.now();
-          if (now - lastStageUi > 350) {
-            lastStageUi = now;
-            setOutgoingFile((prev) => (prev?.cancelled ? prev : snap));
-          }
+          setOutgoingFile((prev) => (prev?.cancelled ? prev : snap));
         });
 
         const staged = await peerApi.stageOutgoingFolder(
           fileId,
           folderPath,
-          b64(contentKey)
+          b64(contentKey),
+          folderMeta.total_files,
+          folderMeta.total_bytes
         );
         if (abortSendRef.current) throw new Error("aborted");
         stagedChunkCount = staged.chunk_count || chunkCount;
@@ -2238,11 +2300,17 @@ export function ChatScreen({
           conversationId,
           fileId,
           name: `${cleanName}/`,
-          done: stagedChunkCount,
-          total: stagedChunkCount,
+          done: stagedBytes,
+          total: Math.max(folderMeta.total_bytes, stagedBytes, 1),
+          label: "Sending folder…",
+          sourcePath: folderPath,
+          sizeBytes: folderMeta.total_bytes,
+          paused: pauseRef.current,
+          cancelled: false,
         });
       } finally {
         unlistenStage?.();
+        unlistenReady?.();
       }
 
       await recordTransfer({
@@ -2258,14 +2326,10 @@ export function ChatScreen({
         started_at: started,
       });
 
-      if (!opts?.skipNotice) {
-        await peerApi.sendFileNotice(
-          conversationId,
-          fileId,
-          memberIds.filter((id) => id !== profile.id)
-        );
-        setStatus(`Shared folder: ${cleanName}/ (${folderMeta.total_files.toLocaleString()} files)`);
+      if (!noticeSent) {
+        await sendNotice();
       }
+      setStatus(`Shared folder: ${cleanName}/ (${folderMeta.total_files.toLocaleString()} files)`);
       return fileId;
     } catch (err: any) {
       const msg = err?.message || String(err);
@@ -4216,7 +4280,6 @@ export function ChatScreen({
     opts?: { openAfter?: boolean }
   ) {
     setPreviewBusy(true);
-    setStatus("Downloading…");
     abortOpenRef.current = false;
     pauseOpenRef.current = false;
     cancelReceiveRef.current = false;
@@ -4243,16 +4306,19 @@ export function ChatScreen({
       }
       const totalChunks = Math.max(1, Number(file.chunk_count) || 1);
       const cryptoV = Number(file.file_crypto_v) || 1;
+      const isRawFolder = name.endsWith(".pcdir");
+      const isTarFolder = name.endsWith(".pcfolder");
       const progress = await peerApi.beginFileReceive(fileId);
-      let next = Number(progress.next_index) || 0;
+      let next = isRawFolder ? 0 : Number(progress.next_index) || 0;
       const convId = active?.id;
+      const folderLabel = isRawFolder ? "Receiving folder…" : "Downloading…";
       setIncomingFile({
         fileId,
         conversationId: convId,
         name,
-        done: next,
-        total: totalChunks,
-        label: "Downloading…",
+        done: isRawFolder ? 0 : next,
+        total: isRawFolder ? 1 : totalChunks,
+        label: folderLabel,
         paused: false,
         cancelled: false,
         uploaderId,
@@ -4271,60 +4337,107 @@ export function ChatScreen({
       });
       // Prefer one TLS binary stream (IPMsg-style); fall back to chunk HTTP for old peers.
       let usedStream = false;
+      let rawFolderPath = "";
       if (next < totalChunks && !abortOpenRef.current) {
         let unlistenStream: (() => void) | undefined;
+        let unlistenFolder: (() => void) | undefined;
         try {
           let lastUi = 0;
-          unlistenStream = await listen<{
-            file_id: string;
-            done: number;
-            total: number;
-          }>("file-stream-progress", (ev) => {
-            if (ev.payload.file_id !== fileId) return;
-            const snap = {
+          if (isRawFolder) {
+            const folderName = name.slice(0, -".pcdir".length);
+            let lastFolderUi = 0;
+            unlistenFolder = await listen<{
+              file_id: string;
+              files_done: number;
+              files_total: number;
+              bytes_done: number;
+              bytes_total: number;
+            }>("folder-receive-progress", (ev) => {
+              if (ev.payload.file_id !== fileId || abortOpenRef.current) return;
+              const filesDone = Number(ev.payload.files_done) || 0;
+              const filesTotal = Number(ev.payload.files_total) || 0;
+              const bytesDone = Number(ev.payload.bytes_done) || 0;
+              const bytesTotal = Number(ev.payload.bytes_total) || 0;
+              const useFiles = filesTotal > 0;
+              const useBytes = !useFiles && bytesTotal > 0;
+              const done = useFiles ? filesDone : useBytes ? bytesDone : 0;
+              const total = useFiles ? filesTotal : useBytes ? bytesTotal : 1;
+              const finished = useFiles
+                ? filesDone >= filesTotal
+                : useBytes && bytesDone >= bytesTotal;
+              const now = Date.now();
+              if (!finished && now - lastFolderUi < 1000) return;
+              lastFolderUi = now;
+              setIncomingFile({
+                fileId,
+                conversationId: convId,
+                name,
+                done,
+                total,
+                label: "Receiving folder…",
+                paused: false,
+                cancelled: false,
+                uploaderId,
+              });
+            });
+            const streamed = await peerApi.downloadFileStream(
+              fileId,
+              uploaderId,
+              b64(key),
+              0,
+              folderName
+            );
+            if (abortOpenRef.current) {
+              throw new Error(cancelReceiveRef.current ? "aborted" : "paused");
+            }
+            rawFolderPath = streamed.path || "";
+            if (!rawFolderPath) throw new Error("Folder was not saved");
+            next = totalChunks;
+            usedStream = true;
+          }
+          if (!isRawFolder) {
+            unlistenStream = await listen<{
+              file_id: string;
+              done: number;
+              total: number;
+            }>("file-stream-progress", (ev) => {
+              if (ev.payload.file_id !== fileId) return;
+              const snap = {
+                fileId,
+                conversationId: convId,
+                name,
+                done: ev.payload.done,
+                total: ev.payload.total || totalChunks,
+                label: "Downloading…" as const,
+              };
+              publishTransferProgress({ incoming: snap });
+              const now = Date.now();
+              if (now - lastUi > 250) {
+                lastUi = now;
+                setIncomingFile(snap);
+              }
+            });
+            const streamed = await peerApi.downloadFileStream(
+              fileId,
+              uploaderId,
+              b64(key),
+              next
+            );
+            if (abortOpenRef.current) {
+              throw new Error(cancelReceiveRef.current ? "aborted" : "paused");
+            }
+            next = Number(streamed.next_index) || totalChunks;
+            usedStream = next >= totalChunks;
+            setIncomingFile({
               fileId,
               conversationId: convId,
               name,
-              done: ev.payload.done,
-              total: ev.payload.total || totalChunks,
-              label: "Downloading…" as const,
-            };
-            // Store updates ~8 Hz for the progress chrome; React state less often.
-            publishTransferProgress({ incoming: snap });
-            const now = Date.now();
-            if (now - lastUi > 250) {
-              lastUi = now;
-              setIncomingFile(snap);
-            }
-          });
-          const streamed = await peerApi.downloadFileStream(
-            fileId,
-            uploaderId,
-            b64(key),
-            next
-          );
-          if (abortOpenRef.current) {
-            throw new Error(cancelReceiveRef.current ? "aborted" : "paused");
+              done: next,
+              total: totalChunks,
+              label: "Downloading…",
+            });
           }
-          next = Number(streamed.next_index) || totalChunks;
-          usedStream = next >= totalChunks;
-          setIncomingFile({
-            fileId,
-            conversationId: convId,
-            name,
-            done: next,
-            total: totalChunks,
-            label: "Downloading…",
-          });
         } catch (streamErr: any) {
-          usedStream = false;
-          // Resume chunk path from whatever stream already wrote.
-          try {
-            const prog = await peerApi.getReceiveProgress(fileId);
-            next = Number(prog.next_index) || next;
-          } catch {
-            /* keep next */
-          }
           const streamMsg = String(streamErr?.message || streamErr || "");
           if (pauseOpenRef.current && !cancelReceiveRef.current) {
             throw new Error("paused");
@@ -4332,17 +4445,24 @@ export function ChatScreen({
           if (abortOpenRef.current && cancelReceiveRef.current) {
             throw new Error("aborted");
           }
-          // Mid-stream cancel from pause/stop (Rust cancel_file_stream).
           if (/cancelled/i.test(streamMsg)) {
             throw new Error(cancelReceiveRef.current ? "aborted" : "paused");
           }
-          // Clear soft abort so chunk fallback can continue after a stream drop.
+          if (isRawFolder) throw streamErr;
+          usedStream = false;
+          try {
+            const prog = await peerApi.getReceiveProgress(fileId);
+            next = Number(prog.next_index) || next;
+          } catch {
+            /* keep next */
+          }
           abortOpenRef.current = false;
         } finally {
           unlistenStream?.();
+          unlistenFolder?.();
         }
       }
-      if (!usedStream && next < totalChunks) {
+      if (!isRawFolder && !usedStream && next < totalChunks) {
         for (let i = next; i < totalChunks; ) {
           while (pauseOpenRef.current) {
             if (abortOpenRef.current) {
@@ -4414,16 +4534,43 @@ export function ChatScreen({
         started_at: started,
       });
       let path: string;
-      if (name.endsWith(".pcfolder")) {
+      if (isRawFolder) {
+        path = rawFolderPath;
+      } else if (isTarFolder) {
         const folderName = name.slice(0, -".pcfolder".length);
-        setStatus(`Unpacking folder ${folderName}…`);
         let unlistenUnpack: (() => void) | undefined;
+        let lastUnpackUi = 0;
         try {
+          setIncomingFile({
+            fileId,
+            conversationId: convId,
+            name,
+            done: 0,
+            total: 0,
+            label: "Unpacking folder…",
+            paused: false,
+            cancelled: false,
+            uploaderId,
+          });
           unlistenUnpack = await listen<{ file_id: string; unpacked_files: number }>(
             "folder-unpack-progress",
             (ev) => {
               if (ev.payload.file_id !== fileId) return;
-              setStatus(`Unpacking ${folderName}… ${ev.payload.unpacked_files.toLocaleString()} files`);
+              const now = Date.now();
+              if (now - lastUnpackUi < 1000) return;
+              lastUnpackUi = now;
+              const n = Number(ev.payload.unpacked_files) || 0;
+              setIncomingFile({
+                fileId,
+                conversationId: convId,
+                name,
+                done: n,
+                total: 0,
+                label: `Unpacking folder… ${n.toLocaleString()} files`,
+                paused: false,
+                cancelled: false,
+                uploaderId,
+              });
             }
           );
           path = await peerApi.finalizeFolderReceive(fileId, folderName);
@@ -4439,9 +4586,16 @@ export function ChatScreen({
       const check = await peerApi.verifyDownloadedFile(fileId);
 
       // Virus scan — warn on hit but keep the download (preview/save already bypassed scan).
-      const scanResult = await peerApi.scanFile(path).catch((): ScanResult => ({
-        clean: true, engine: "none", detail: "scan unavailable", skipped: true,
-      }));
+      const scanResult = isRawFolder || isTarFolder
+        ? ({
+            clean: true,
+            engine: "none",
+            detail: "folder scan runs in the background",
+            skipped: true,
+          } satisfies ScanResult)
+        : await peerApi.scanFile(path).catch((): ScanResult => ({
+            clean: true, engine: "none", detail: "scan unavailable", skipped: true,
+          }));
       let scanWarned = false;
       if (!scanResult.clean) {
         scanWarned = true;
@@ -5190,6 +5344,10 @@ export function ChatScreen({
     membersOpen,
     openPreviewedFile,
     pinOpen,
+    identityReview,
+    reviewIdentity,
+    dismissIdentityReview,
+    acceptIdentityReview,
     previewBusy,
     previewGalleryStep,
     renameDraft,
@@ -5551,22 +5709,16 @@ export function ChatScreen({
                     </span>
                   </Tooltip>
                 )}
-                {active?.kind === "group" && (
+                {isAnnounceBoard && (
                   <IconButton
-                    aria-label={isAnnounceBoard ? "Channel info" : "Group details"}
+                    aria-label="Channel info"
                     disabled={msgSelecting}
                     onClick={() => {
                       if (msgSelecting) return;
-                      if (isAnnounceBoard) {
-                        setBroadcastInfoOpen(true);
-                      } else {
-                        setRenameDraft(active.title || "");
-                        setAddPick([]);
-                        setMembersOpen(true);
-                      }
+                      setBroadcastInfoOpen(true);
                     }}
                   >
-                    {isAnnounceBoard ? <CampaignIcon /> : <GroupIcon />}
+                    <CampaignIcon />
                   </IconButton>
                 )}
                 {active && (

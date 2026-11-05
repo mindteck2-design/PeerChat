@@ -321,6 +321,8 @@ pub async fn stage_outgoing_folder(
     file_id: String,
     folder_path: String,
     content_key_b64: String,
+    total_files: Option<u64>,
+    total_bytes: Option<u64>,
 ) -> Result<StageOutgoingResult, String> {
     let content_key = base64::engine::general_purpose::STANDARD
         .decode(content_key_b64.trim())
@@ -354,16 +356,20 @@ pub async fn stage_outgoing_folder(
     let app_progress = app.clone();
     let file_id_bg = file_id.clone();
     let path_bg = folder_path.clone();
+    let total_files_hint = total_files.unwrap_or(0);
+    let total_bytes_hint = total_bytes.unwrap_or(0);
 
     let stage_result = tokio::task::spawn_blocking(move || {
         let (cancel_flag, pause_flag) = peer_http::register_stage_controls(&file_id_bg);
-        let result = folder_stream::stage_folder_stream(
+        let result = folder_stream::stage_folder_raw(
             Some(&app_progress),
             &file_id_bg,
             &path_bg,
             &dir,
             key_arr,
             expected_chunks,
+            total_files_hint,
+            total_bytes_hint,
             cancel_flag,
             pause_flag,
         );
@@ -588,6 +594,7 @@ pub async fn download_file_stream(
     uploader_id: String,
     content_key_b64: String,
     from_index: u32,
+    folder_name: Option<String>,
 ) -> Result<Value, String> {
     let content_key = base64::engine::general_purpose::STANDARD
         .decode(content_key_b64.trim())
@@ -605,7 +612,7 @@ pub async fn download_file_stream(
         let crypto_v = meta["file_crypto_v"].as_i64().unwrap_or(1);
         (PathBuf::from(temp), total, crypto_v, expected)
     };
-    if from_index as i64 != expected {
+    if folder_name.is_none() && from_index as i64 != expected {
         return Err(format!("expected chunk {expected}, got {from_index}"));
     }
     let db = state.db.clone();
@@ -613,7 +620,17 @@ pub async fn download_file_stream(
     let temp_s = temp_path.display().to_string();
     let cancel = peer_http::register_stream_cancel(&file_id);
 
-    let mut resume_from = from_index;
+    let folder_dest = if let Some(name) = folder_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        let dir = resolve_download_dir(&app, &state)?;
+        let dest = folder_stream::prepare_folder_dest(&dir, name)?;
+        if dest.exists() {
+            let _ = std::fs::remove_dir_all(&dest);
+        }
+        Some(dest)
+    } else {
+        None
+    };
+    let mut resume_from = if folder_dest.is_some() { 0 } else { from_index };
     let mut attempt = 0;
     let next = loop {
         attempt += 1;
@@ -628,24 +645,116 @@ pub async fn download_file_stream(
                 return Err(e);
             }
         };
-        let result = peer_http::stream_download_and_append(
-            &ip,
-            port,
-            fp,
-            &file_id,
-            resume_from,
-            &content_key,
-            crypto_v,
-            &temp_path,
-            total_chunks,
-            &app,
-            cancel.clone(),
-            |done| {
+        let result = if let Some(dest) = folder_dest.clone() {
+            if dest.exists() {
+                let _ = std::fs::remove_dir_all(&dest);
+            }
+            let extractor = match folder_stream::FolderExtractor::create(
+                dest.clone(),
+                Some(app.clone()),
+                &file_id,
+            ) {
+                Ok(ext) => std::sync::Arc::new(std::sync::Mutex::new(ext)),
+                Err(e) => {
+                    peer_http::clear_stream_cancel(&file_id);
+                    return Err(e);
+                }
+            };
+            let dest_s = dest.display().to_string();
+            if temp_path.is_file() {
+                let _ = std::fs::remove_file(&temp_path);
+            }
+            {
                 let conn = db.lock();
-                db::upsert_receive_progress(&conn, &fid, done as i64, Some(&temp_s))
-            },
-        )
-        .await;
+                let _ = db::upsert_receive_progress(&conn, &fid, 0, Some(&dest_s));
+            }
+            let ext_plain = extractor.clone();
+            let db_prog = db.clone();
+            let fid_prog = fid.clone();
+            let streamed = peer_http::stream_download_and_append(
+                &ip,
+                port,
+                fp,
+                &file_id,
+                0,
+                &content_key,
+                crypto_v,
+                total_chunks,
+                &app,
+                cancel.clone(),
+                move |plain| {
+                    ext_plain
+                        .lock()
+                        .map_err(|_| "folder extractor lock".to_string())?
+                        .push(plain)
+                        .map_err(|e| e.to_string())
+                },
+                move |done| {
+                    let conn = db_prog.lock();
+                    db::upsert_receive_progress(&conn, &fid_prog, done as i64, Some(&dest_s))
+                },
+            )
+            .await;
+            match streamed {
+                Ok(n) => {
+                    let ext = std::sync::Arc::try_unwrap(extractor)
+                        .map_err(|_| "folder extractor still shared".to_string())?
+                        .into_inner()
+                        .map_err(|_| "folder extractor lock".to_string())?;
+                    ext.finish().map(|_| n).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            use std::io::{BufWriter, Write};
+            let raw = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&temp_path)
+                .map_err(|e| e.to_string())?;
+            let file = std::sync::Arc::new(std::sync::Mutex::new(BufWriter::with_capacity(
+                4 * 1024 * 1024,
+                raw,
+            )));
+            let file_plain = file.clone();
+            let file_prog = file.clone();
+            let db_prog = db.clone();
+            let fid_prog = fid.clone();
+            let temp_prog = temp_s.clone();
+            let streamed = peer_http::stream_download_and_append(
+                &ip,
+                port,
+                fp,
+                &file_id,
+                resume_from,
+                &content_key,
+                crypto_v,
+                total_chunks,
+                &app,
+                cancel.clone(),
+                move |plain| {
+                    file_plain
+                        .lock()
+                        .map_err(|_| "receive file lock".to_string())?
+                        .write_all(plain)
+                        .map_err(|e| e.to_string())
+                },
+                move |done| {
+                    file_prog
+                        .lock()
+                        .map_err(|_| "receive file lock".to_string())?
+                        .flush()
+                        .map_err(|e| e.to_string())?;
+                    let conn = db_prog.lock();
+                    db::upsert_receive_progress(&conn, &fid_prog, done as i64, Some(&temp_prog))
+                },
+            )
+            .await;
+            if let Ok(mut guard) = file.lock() {
+                let _ = guard.flush();
+            }
+            streamed
+        };
         match result {
             Ok(n) => break n,
             Err(e)
@@ -665,12 +774,28 @@ pub async fn download_file_stream(
             }
             Err(e) => {
                 peer_http::clear_stream_cancel(&file_id);
+                if let Some(dest) = folder_dest.as_ref() {
+                    if dest.join(".pcdir-partial").is_file() {
+                        let _ = std::fs::remove_dir_all(dest);
+                    }
+                    let conn = state.db.lock();
+                    let _ = db::clear_receive_progress(&conn, &file_id);
+                }
                 return Err(format!("stream download failed: {e}"));
             }
         }
     };
     peer_http::clear_stream_cancel(&file_id);
-    Ok(json!({ "next_index": next, "total": total_chunks }))
+    let saved = folder_dest
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .filter(|p| PathBuf::from(p).is_dir());
+    if let Some(ref path) = saved {
+        let conn = state.db.lock();
+        db::set_file_local_path(&conn, &file_id, path)?;
+        let _ = db::clear_receive_progress(&conn, &file_id);
+    }
+    Ok(json!({ "next_index": next, "total": total_chunks, "path": saved }))
 }
 
 #[tauri::command]
@@ -1438,6 +1563,20 @@ pub fn verify_downloaded_file(state: State<AppState>, file_id: String) -> Result
         .map(std::path::PathBuf::from)
         .ok_or("no local file to verify")?;
     drop(conn);
+    if path.is_dir() {
+        let expected = file["content_sha256"].as_str().unwrap_or("").trim().to_string();
+        if path.join(".pcdir-ok").is_file() {
+            return Ok(json!({
+                "verified": true,
+                "sha256": expected,
+            }));
+        }
+        return Ok(json!({
+            "verified": false,
+            "sha256": "",
+            "reason": "folder integrity marker missing"
+        }));
+    }
     if !path.is_file() {
         return Err("local file missing before integrity check".into());
     }
@@ -1468,7 +1607,9 @@ pub fn discard_file_receive(state: State<AppState>, file_id: String) -> Result<(
         if let Some(temp) = temp {
             let path = PathBuf::from(temp);
             if path.file_name().and_then(|s| s.to_str()) == Some(&format!("{file_id}.part")) {
-                let _ = std::fs::remove_file(path);
+                let _ = std::fs::remove_file(&path);
+            } else if path.is_dir() && path.join(".pcdir-partial").is_file() {
+                let _ = std::fs::remove_dir_all(&path);
             }
         }
     }

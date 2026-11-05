@@ -76,49 +76,36 @@ export function CircularTransferControl({
         </>
       )}
       {cancelled ? (
-        <Box sx={{ display: "flex", gap: 0.25 }}>
-          {onRetry && (
-            <Tooltip title="Retry">
-              <IconButton
-                size="small"
-                aria-label="Retry download"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRetry();
-                }}
-                sx={{
-                  width: size * 0.72,
-                  height: size * 0.72,
-                  bgcolor: btnBg,
-                  color: btnColor,
-                  "&:hover": { bgcolor: btnBg },
-                }}
-              >
+        <Box
+          sx={{
+            width: size * 0.72,
+            height: size * 0.72,
+            borderRadius: "50%",
+            bgcolor: btnBg,
+            display: "grid",
+            placeItems: "center",
+            position: "relative",
+            zIndex: 1,
+          }}
+        >
+          <Tooltip title={onRetry ? "Retry" : "Dismiss"}>
+            <IconButton
+              size="small"
+              aria-label={onRetry ? "Retry" : "Dismiss"}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onRetry) onRetry();
+                else onDismiss?.();
+              }}
+              sx={{ color: btnColor, p: 0.25 }}
+            >
+              {onRetry ? (
                 <PlayArrowIcon sx={{ fontSize: iconPx }} />
-              </IconButton>
-            </Tooltip>
-          )}
-          {onDismiss && (
-            <Tooltip title="Dismiss">
-              <IconButton
-                size="small"
-                aria-label="Dismiss"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDismiss();
-                }}
-                sx={{
-                  width: size * 0.55,
-                  height: size * 0.55,
-                  bgcolor: btnBg,
-                  color: btnColor,
-                  "&:hover": { bgcolor: btnBg },
-                }}
-              >
-                <CloseIcon sx={{ fontSize: iconPx * 0.85 }} />
-              </IconButton>
-            </Tooltip>
-          )}
+              ) : (
+                <CloseIcon sx={{ fontSize: iconPx }} />
+              )}
+            </IconButton>
+          </Tooltip>
         </Box>
       ) : (
         <Box

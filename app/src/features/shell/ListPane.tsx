@@ -38,6 +38,7 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
     peers,
     profile,
     refresh,
+    reviewIdentity,
     scanning,
     selectConversation,
     setChatSearch,
@@ -209,6 +210,18 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                                 fontWeight: 700,
                                 bgcolor: "action.hover",
                               }}
+                            />
+                          )}
+                          {p.identity_changed && (
+                            <Chip
+                              label="New keys"
+                              size="small"
+                              color="warning"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                reviewIdentity(p);
+                              }}
+                              sx={{ height: 18, fontSize: "0.6875rem", fontWeight: 700 }}
                             />
                           )}
                         </Box>
@@ -384,6 +397,18 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                               size="small"
                               label="New"
                               color="warning"
+                              sx={{ height: 16, fontSize: 9.5, fontWeight: 700, flexShrink: 0 }}
+                            />
+                          )}
+                          {dmPeer?.identity_changed && (
+                            <Chip
+                              size="small"
+                              label="New keys"
+                              color="warning"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                reviewIdentity(dmPeer);
+                              }}
                               sx={{ height: 16, fontSize: 9.5, fontWeight: 700, flexShrink: 0 }}
                             />
                           )}

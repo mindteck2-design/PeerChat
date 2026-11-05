@@ -13,6 +13,9 @@ export function PeerTrustDialogs({ vm }: { vm: ChatScreenVm }) {
     openDm,
     peerApi,
     pinOpen,
+    identityReview,
+    dismissIdentityReview,
+    acceptIdentityReview,
     refresh,
     selectConversation,
     setFirstContact,
@@ -98,6 +101,38 @@ export function PeerTrustDialogs({ vm }: { vm: ChatScreenVm }) {
             }}
           >
             Accept & chat
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={!!identityReview} onClose={() => identityReview && dismissIdentityReview(identityReview)}>
+        <DialogTitle>Encryption keys changed</DialogTitle>
+        <DialogContent>
+          <Typography gutterBottom>
+            <strong>{identityReview?.display_name}</strong> is advertising a new certificate or
+            encryption key. Chats stay sealed to the keys already saved until you accept this
+            change. Compare the new fingerprint with them out of band.
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Saved fingerprint
+          </Typography>
+          <Typography fontFamily="monospace" sx={{ wordBreak: "break-all", mb: 1 }}>
+            {identityReview?.tls_fingerprint || "—"}
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            New fingerprint
+          </Typography>
+          <Typography fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
+            {identityReview?.pending_tls_fingerprint || "—"}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => identityReview && dismissIdentityReview(identityReview)}>Later</Button>
+          <Button
+            variant="contained"
+            onClick={() => identityReview && acceptIdentityReview(identityReview)}
+          >
+            Accept new keys
           </Button>
         </DialogActions>
       </Dialog>
