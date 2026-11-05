@@ -38,7 +38,15 @@ test("formatDay labels today and yesterday", () => {
 test("conversationPreviewLine formats file, system, and text messages", () => {
   assert.strictEqual(
     conversationPreviewLine("file_notice", "", "u1", "u2", "Bob", false),
-    "📎 File"
+    "📎 Attachment"
+  );
+  assert.strictEqual(
+    conversationPreviewLine("file_notice", "", "u1", "u1", "Me", false),
+    "You: 📎 Attachment"
+  );
+  assert.strictEqual(
+    conversationPreviewLine("file_notice", "", "u1", "u2", "Bob", true),
+    "Bob: 📎 Attachment"
   );
   assert.strictEqual(
     conversationPreviewLine("system", "Alice joined", "u1", "u2", "Alice", true),

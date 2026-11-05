@@ -22,6 +22,7 @@ import {
   ListItemText,
   Menu,
   MenuItem,
+  Paper,
   Select,
   Stack,
   Switch,
@@ -53,7 +54,7 @@ import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import PeopleAltOutlinedIcon from "@mui/icons-material/PeopleAltOutlined";
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { SavedItem, TransferLog } from "./peer";
+import type { TransferLog } from "./peer";
 import { peerApi } from "./peer";
 import { SLASH_COMMANDS, type CommandContext } from "./commands";
 
@@ -710,30 +711,205 @@ export function AnnounceDialog({
 }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const [previewMode, setPreviewMode] = useState(false);
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+
+  useEffect(() => {
+    if (isOpen) setPreviewMode(false);
+  }, [isOpen]);
+
   return (
-    <Dialog open={isOpen} onClose={onClose} fullWidth maxWidth="sm">
-      <DialogTitle>Announcement</DialogTitle>
-      <DialogContent>
-        <TextField fullWidth label="Title" value={title} onChange={(e) => setTitle(e.target.value)} sx={{ mt: 1, mb: 1.5 }} />
-        <TextField fullWidth multiline minRows={3} label="Message" value={body} onChange={(e) => setBody(e.target.value)} />
-        {(title || body) && (
-          <Box sx={{ mt: 2, p: 1.5, border: "1px solid", borderColor: "primary.main", borderRadius: 2 }}>
-            <Typography variant="overline" color="primary">Preview</Typography>
-            <Typography fontWeight={700}>{title || "Untitled"}</Typography>
-            <LinkifiedText text={body} sx={{ display: "block", fontSize: 14 }} />
+    <Dialog
+      open={isOpen}
+      onClose={onClose}
+      fullWidth
+      maxWidth="sm"
+      PaperProps={{
+        sx: {
+          maxWidth: 520,
+          height: "min(85vh, 560px)",
+          maxHeight: "85vh",
+          borderRadius: 2.5,
+          bgcolor: "background.paper",
+          backgroundImage: "none",
+          border: "1px solid",
+          borderColor: "divider",
+          boxShadow: isDark
+            ? "0 24px 48px -12px rgba(0, 0, 0, 0.75)"
+            : "0 12px 32px -8px rgba(0, 0, 0, 0.15)",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        },
+      }}
+    >
+      <Box
+        sx={{
+          flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          px: 2.5,
+          pt: 2,
+          pb: 1.5,
+          borderBottom: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        <Typography sx={{ fontWeight: 700, fontSize: "1.15rem", color: "text.primary" }}>
+          Announcement
+        </Typography>
+        <IconButton
+          onClick={onClose}
+          size="small"
+          aria-label="Close"
+          sx={{
+            color: "text.secondary",
+            "&:hover": { color: "text.primary", bgcolor: "action.hover" },
+          }}
+        >
+          <CloseIcon sx={{ fontSize: 20 }} />
+        </IconButton>
+      </Box>
+
+      <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", px: 2.5, py: 2 }}>
+        {previewMode ? (
+          <Box>
+            <Button
+              size="small"
+              onClick={() => setPreviewMode(false)}
+              sx={{
+                mb: 2,
+                px: 0,
+                minWidth: 0,
+                textTransform: "none",
+                fontWeight: 600,
+                fontSize: "0.8125rem",
+                color: "text.secondary",
+                "&:hover": { color: "text.primary", bgcolor: "transparent" },
+              }}
+            >
+              ← Back to editing
+            </Button>
+            <Box
+              sx={{
+                p: 2,
+                borderRadius: 2,
+                bgcolor: isDark ? "rgba(255, 255, 255, 0.03)" : "action.hover",
+                border: "1px solid",
+                borderColor: "divider",
+                display: "flex",
+                justifyContent: "flex-end",
+              }}
+            >
+              <Paper
+                elevation={0}
+                sx={{
+                  width: "fit-content",
+                  maxWidth: "100%",
+                  minWidth: 84,
+                  display: "flow-root",
+                  pl: 1.25,
+                  pr: 1.25,
+                  pt: 0.65,
+                  pb: 0.65,
+                  bgcolor: "chat.sent",
+                  border: "1px solid",
+                  borderColor: isDark ? "rgba(42, 53, 70, 0.95)" : "#C5DFD6",
+                  borderRadius: "10px 10px 3px 10px",
+                  boxShadow: isDark
+                    ? "0 1px 2px rgba(0,0,0,0.22)"
+                    : "0 1px 1px rgba(20,32,28,0.04)",
+                }}
+              >
+                <Box sx={{ pr: 1 }}>
+                  <Typography variant="overline" color="primary">
+                    Announcement
+                  </Typography>
+                  <Typography fontWeight={700}>{title.trim() || "Untitled"}</Typography>
+                  <LinkifiedText text={body} sx={{ display: "block", fontSize: 14 }} />
+                </Box>
+              </Paper>
+            </Box>
+          </Box>
+        ) : (
+          <Box>
+            <TextField
+              fullWidth
+              label="Title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              sx={{ mb: 1.5 }}
+            />
+            <TextField
+              fullWidth
+              multiline
+              minRows={3}
+              label="Message"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+            />
+            <Button
+              size="small"
+              startIcon={<VisibilityOutlinedIcon sx={{ fontSize: 16 }} />}
+              onClick={() => setPreviewMode(true)}
+              sx={{
+                mt: 1.25,
+                px: 0.5,
+                ml: -0.5,
+                textTransform: "none",
+                fontWeight: 600,
+                fontSize: "0.8125rem",
+                color: "text.secondary",
+                "&:hover": { color: "primary.main", bgcolor: "transparent" },
+              }}
+            >
+              Show preview
+            </Button>
           </Box>
         )}
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
+      </Box>
+
+      <Box
+        sx={{
+          flexShrink: 0,
+          display: "flex",
+          justifyContent: "flex-end",
+          gap: 1,
+          px: 2.5,
+          py: 1.75,
+          borderTop: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        <Button
+          onClick={onClose}
+          sx={{
+            textTransform: "none",
+            fontWeight: 600,
+            color: "text.secondary",
+            "&:hover": { bgcolor: "action.selected", color: "text.primary" },
+          }}
+        >
+          Cancel
+        </Button>
         <Button
           variant="contained"
           disabled={!title.trim() || !body.trim()}
-          onClick={() => onSend(title.trim(), body.trim())}
+          onClick={() => {
+            void (async () => {
+              await onSend(title.trim(), body.trim());
+              setTitle("");
+              setBody("");
+              setPreviewMode(false);
+            })();
+          }}
+          sx={{ textTransform: "none", fontWeight: 600 }}
         >
-          Send announcement
+          Send Announcement
         </Button>
-      </DialogActions>
+      </Box>
     </Dialog>
   );
 }
@@ -1323,27 +1499,155 @@ export function SnippetDialog({
 }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+
   return (
-    <Dialog open={isOpen} onClose={onClose} fullWidth maxWidth="sm">
-      <DialogTitle>Code snippet</DialogTitle>
-      <DialogContent>
-        <TextField fullWidth label="Title" value={title} onChange={(e) => setTitle(e.target.value)} sx={{ mt: 1, mb: 1.5 }} />
+    <Dialog
+      open={isOpen}
+      onClose={onClose}
+      fullWidth
+      maxWidth="sm"
+      PaperProps={{
+        sx: {
+          maxWidth: 560,
+          height: "min(85vh, 560px)",
+          maxHeight: "85vh",
+          borderRadius: 2.5,
+          bgcolor: "background.paper",
+          backgroundImage: "none",
+          border: "1px solid",
+          borderColor: "divider",
+          boxShadow: isDark
+            ? "0 24px 48px -12px rgba(0, 0, 0, 0.75)"
+            : "0 12px 32px -8px rgba(0, 0, 0, 0.15)",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        },
+      }}
+    >
+      <Box
+        sx={{
+          flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          px: 2.5,
+          pt: 2,
+          pb: 1.5,
+          borderBottom: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        <Typography sx={{ fontWeight: 700, fontSize: "1.15rem", color: "text.primary" }}>
+          Code snippet
+        </Typography>
+        <IconButton
+          onClick={onClose}
+          size="small"
+          aria-label="Close"
+          sx={{
+            color: "text.secondary",
+            "&:hover": { color: "text.primary", bgcolor: "action.hover" },
+          }}
+        >
+          <CloseIcon sx={{ fontSize: 20 }} />
+        </IconButton>
+      </Box>
+
+      <Box
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          gap: 1.5,
+          px: 2.5,
+          py: 2,
+          overflow: "hidden",
+        }}
+      >
+        <TextField
+          fullWidth
+          label="Title"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          sx={{ flexShrink: 0 }}
+        />
         <TextField
           fullWidth
           multiline
-          minRows={6}
           label="Snippet"
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          InputProps={{ sx: { fontFamily: "ui-monospace, monospace", fontSize: 13 } }}
+          inputProps={{ spellCheck: false, autoCorrect: "off", autoCapitalize: "off" }}
+          InputProps={{
+            sx: {
+              fontFamily: "ui-monospace, monospace",
+              fontSize: 13,
+              alignItems: "stretch",
+              height: "100%",
+              overflow: "auto",
+            },
+          }}
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            "& .MuiInputBase-root": {
+              flex: 1,
+              alignItems: "flex-start",
+              overflow: "auto",
+            },
+            "& textarea": {
+              height: "100% !important",
+              overflow: "auto !important",
+              resize: "none",
+            },
+          }}
         />
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" disabled={!body.trim()} onClick={() => onSend(title.trim() || "Snippet", body)}>
+      </Box>
+
+      <Box
+        sx={{
+          flexShrink: 0,
+          display: "flex",
+          justifyContent: "flex-end",
+          gap: 1,
+          px: 2.5,
+          py: 1.75,
+          borderTop: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        <Button
+          onClick={onClose}
+          sx={{
+            textTransform: "none",
+            fontWeight: 600,
+            color: "text.secondary",
+            "&:hover": { bgcolor: "action.selected", color: "text.primary" },
+          }}
+        >
+          Cancel
+        </Button>
+        <Button
+          variant="contained"
+          disabled={!body.trim()}
+          onClick={() => {
+            void (async () => {
+              await onSend(title.trim() || "Snippet", body);
+              setTitle("");
+              setBody("");
+            })();
+          }}
+          sx={{ textTransform: "none", fontWeight: 600 }}
+        >
           Send snippet
         </Button>
-      </DialogActions>
+      </Box>
     </Dialog>
   );
 }
@@ -1374,41 +1678,7 @@ export function HelpDialog({
   );
 }
 
-export function SavedPanel({
-  items,
-  onOpen,
-  onRemove,
-}: {
-  items: SavedItem[];
-  onOpen: (conversationId: string, messageId?: string | null) => void;
-  onRemove: (id: string) => void;
-}) {
-  return (
-    <Box sx={{ p: 2, overflow: "auto", height: "100%" }}>
-      <Typography variant="h6" gutterBottom>Saved</Typography>
-      {!items.length && <Alert severity="info">Nothing saved yet. Use Save on a message.</Alert>}
-      <List>
-        {items.map((item) => (
-          <ListItemButton
-            key={item.id}
-            onClick={() => onOpen(item.conversation_id, item.message_id)}
-          >
-            <ListItemText primary={item.preview} secondary={item.kind} primaryTypographyProps={{ noWrap: true }} />
-            <Button
-              size="small"
-              onClick={(e) => {
-                e.stopPropagation();
-                onRemove(item.id);
-              }}
-            >
-              Remove
-            </Button>
-          </ListItemButton>
-        ))}
-      </List>
-    </Box>
-  );
-}
+export { SavedPanel } from "./features/saved/SavedPanel";
 
 type SnakeSpeed = "slow" | "moderate" | "fast";
 

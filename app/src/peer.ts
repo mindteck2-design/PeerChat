@@ -167,6 +167,17 @@ export const peerApi = {
       beforeId: opts?.beforeId ?? null,
     }),
   retryMessage: (messageId: string) => inv<void>("retry_message", { messageId }),
+  getMessage: (messageId: string) => inv<Message | null>("get_message", { messageId }),
+  getMessageReceipts: (messageId: string) =>
+    inv<{
+      message_id: string;
+      recipients: Array<{
+        user_id: string;
+        display_name: string;
+        delivered_at?: string | null;
+        read_at?: string | null;
+      }>;
+    }>("get_message_receipts", { messageId }),
   deleteMessageForMe: (messageId: string) =>
     inv<void>("delete_message_for_me", { messageId }),
   deleteMessageForEveryone: (messageId: string) =>

@@ -2,7 +2,7 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { useIncomingTransfer, useOutgoingTransfer } from "../files/transferProgressStore";
 import {
-  Avatar, Box, Chip, Fade, Grow, IconButton, InputBase, List,
+  Avatar, Box, Checkbox, Chip, Fade, Grow, IconButton, InputBase, List,
   Paper, Popover, Stack, Tooltip, Typography,
 } from "@mui/material";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
@@ -216,6 +216,9 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
     setMessages,
     setHighlightMsgId,
     setMsgMenu,
+    msgSelecting,
+    selectedMsgIds,
+    toggleMsgSelected,
     setNav,
     setPendingCalendarFocus,
     setPendingGameInvite,
@@ -230,12 +233,19 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
   const outgoingFile = useOutgoingTransfer() ?? vm.outgoingFile;
 
   const jumpToReferencedMessage = (messageId: string) => {
+    if (msgSelecting) return;
     if (vm.stickToBottomRef) vm.stickToBottomRef.current = false;
     // ChatScreen centers via highlightMsgId (with layout-settle retries).
     if (typeof setHighlightMsgId === "function") {
       setHighlightMsgId(messageId);
     }
   };
+
+  useEffect(() => {
+    if (!msgSelecting) return;
+    setEmojiPickerAnchor(null);
+    setReactionDetails(null);
+  }, [msgSelecting]);
 
   const msgById = useMemo(() => {
     const map = new Map();
@@ -463,34 +473,29 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
     const MsgEnter = hasAttachments ? Fade : Grow;
     const displayedReactions = (m.reactions || []).slice(0, 3);
     const overflowCount = (m.reactions || []).length > 3 ? (m.reactions || []).length - 3 : 0;
+    const nonSelectableKind =
+      m.kind === "system" ||
+      m.kind === "group_event" ||
+      m.kind === "deleted" ||
+      m.kind === "poll_vote" ||
+      m.kind === "reaction";
+    const selectable = !!msgSelecting && !nonSelectableKind;
+    const isSelected = selectable && selectedMsgIds?.has?.(m.id);
+    const bubbleMaxWidth = messageAttachmentIds(m).some((fid) =>
+      isGridMediaName(fileNames[fid] || "")
+    )
+      ? "min(78%, 360px)"
+      : "min(72%, 460px)";
 
-    return (
-      <MsgEnter in timeout={hasAttachments ? 160 : 180}>
-        <Box
-          id={`msg-${m.id}`}
-          className="msg-row"
-          sx={{
-            alignSelf: mine ? "flex-end" : "flex-start",
-            maxWidth: messageAttachmentIds(m).some((fid) =>
-              isGridMediaName(fileNames[fid] || "")
-            )
-              ? "min(78%, 360px)"
-              : "min(72%, 460px)",
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "flex-end",
-            gap: 0.75,
-            position: "relative",
-            // Extra bottom margin so the hanging reaction chip clears the next row.
-            mb: m.reactions?.length ? 2.25 : 0.4,
-            "&:hover .msg-reaction-trigger": {
-              opacity: 1,
-              pointerEvents: "auto",
-            },
-          }}
-        >
+    const selectedBg = "action.selected";
+    const jumpBg = dark ? "rgba(130, 169, 248, 0.18)" : "rgba(196, 232, 220, 0.95)";
+    const jumpBgSoft = dark ? "rgba(130, 169, 248, 0.14)" : "rgba(196, 232, 220, 0.55)";
+    const jumpBorder = dark ? "rgba(130, 169, 248, 0.45)" : "#7FBFB0";
+
+    const rowInner = (
+      <>
           {/* Left Reaction Trigger Icon for SENT messages (no background/container) */}
-          {mine && m.kind !== "deleted" && (
+          {mine && m.kind !== "deleted" && !msgSelecting && (
             <IconButton
               className="msg-reaction-trigger"
               size="small"
@@ -522,7 +527,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           )}
 
           {/* Avatars only in groups — DMs are always the same peer. */}
-          {!mine && isGroup && (
+          {!mine && isGroup && !msgSelecting && (
             <Avatar
               sx={{
                 width: 28,
@@ -539,11 +544,17 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
           )}
 
           {/* Bubble wrapper with attached reactions */}
-          <Box sx={{ position: "relative", maxWidth: "100%", minWidth: 0 }}>
+          <Box
+            sx={{
+              position: "relative",
+              maxWidth: msgSelecting ? bubbleMaxWidth : "100%",
+              minWidth: 0,
+            }}
+          >
             <Paper
               elevation={0}
               onContextMenu={(e) => {
-                if (m.kind === "deleted") return;
+                if (m.kind === "deleted" || msgSelecting) return;
                 e.preventDefault();
                 setMsgMenu({ anchor: e.currentTarget as HTMLElement, message: m });
               }}
@@ -564,34 +575,40 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                     ? 0.25
                     : 0.65,
               bgcolor: bigEmoji
-                ? highlighted
-                  ? dark
-                    ? "rgba(130, 169, 248, 0.14)"
-                    : "rgba(196, 232, 220, 0.55)"
-                  : "transparent"
-                : highlighted
-                  ? dark
-                    ? "rgba(130, 169, 248, 0.18)"
-                    : "rgba(196, 232, 220, 0.95)"
-                  : m.kind === "deleted"
-                    ? "action.selected"
-                    : mine
-                      ? "chat.sent"
-                      : "chat.received",
-              border: bigEmoji ? "1px solid transparent" : "1px solid",
+                ? isSelected
+                  ? selectedBg
+                  : highlighted
+                    ? jumpBgSoft
+                    : "transparent"
+                : isSelected
+                  ? selectedBg
+                  : highlighted
+                    ? jumpBg
+                    : m.kind === "deleted"
+                      ? "action.selected"
+                      : mine
+                        ? "chat.sent"
+                        : "chat.received",
+              border: bigEmoji
+                ? isSelected
+                  ? "1px solid"
+                  : "1px solid transparent"
+                : "1px solid",
               borderColor: bigEmoji
-                ? "transparent"
-                : highlighted
-                  ? dark
-                    ? "rgba(130, 169, 248, 0.45)"
-                    : "#7FBFB0"
-                  : m.kind === "deleted"
-                    ? "divider"
-                    : mine
-                      ? dark
-                        ? "rgba(42, 53, 70, 0.95)"
-                        : "#C5DFD6"
-                      : "divider",
+                ? isSelected
+                  ? "primary.main"
+                  : "transparent"
+                : isSelected
+                  ? "primary.main"
+                  : highlighted
+                    ? jumpBorder
+                    : m.kind === "deleted"
+                      ? "divider"
+                      : mine
+                        ? dark
+                          ? "rgba(42, 53, 70, 0.95)"
+                          : "#C5DFD6"
+                        : "divider",
               borderRadius: mine ? "10px 10px 3px 10px" : "10px 10px 10px 3px",
               position: "relative",
               overflow: "visible",
@@ -601,10 +618,12 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                   ? "0 1px 2px rgba(0,0,0,0.22)"
                   : "0 1px 1px rgba(20,32,28,0.04)",
               transition: "background-color 0.25s ease, border-color 0.25s ease",
-              "&:hover .msg-action-chevron": {
-                opacity: 0.65,
-                pointerEvents: "auto",
-              },
+              "&:hover .msg-action-chevron": msgSelecting
+                ? undefined
+                : {
+                    opacity: 0.65,
+                    pointerEvents: "auto",
+                  },
             }}
           >
             {m.pinned && (
@@ -631,7 +650,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
               </Tooltip>
             )}
 
-            {m.kind !== "deleted" && (
+            {m.kind !== "deleted" && !msgSelecting && (
               <IconButton
                 className="msg-action-chevron"
                 size="small"
@@ -1179,7 +1198,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
         </Box>
 
         {/* Right Reaction Trigger Icon for RECEIVED messages */}
-        {!mine && m.kind !== "deleted" && (
+        {!mine && m.kind !== "deleted" && !msgSelecting && (
           <IconButton
             className="msg-reaction-trigger"
             size="small"
@@ -1209,8 +1228,79 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             <SentimentSatisfiedAltOutlinedIcon sx={{ fontSize: 18 }} />
           </IconButton>
         )}
-      </Box>
-    </MsgEnter>
+      </>
+    );
+
+    return (
+      <MsgEnter in timeout={hasAttachments ? 160 : 180}>
+        <Box
+          id={`msg-${m.id}`}
+          className="msg-row"
+          onClick={() => {
+            if (selectable) toggleMsgSelected?.(m.id);
+          }}
+          sx={{
+            alignSelf: msgSelecting ? "stretch" : mine ? "flex-end" : "flex-start",
+            maxWidth: msgSelecting ? "100%" : bubbleMaxWidth,
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "flex-end",
+            justifyContent: msgSelecting ? "flex-start" : mine ? "flex-end" : "flex-start",
+            gap: 0.75,
+            position: "relative",
+            // Extra bottom margin so the hanging reaction chip clears the next row.
+            mb: m.reactions?.length ? 2.25 : 0.4,
+            cursor: selectable ? "pointer" : undefined,
+            "&:hover .msg-reaction-trigger": msgSelecting
+              ? undefined
+              : {
+                  opacity: 1,
+                  pointerEvents: "auto",
+                },
+          }}
+        >
+          {msgSelecting && (
+            <Box
+              sx={{
+                width: 36,
+                flexShrink: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                alignSelf: "center",
+                pointerEvents: selectable ? "auto" : "none",
+              }}
+            >
+              {selectable ? (
+                <Checkbox
+                  size="small"
+                  checked={!!isSelected}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={() => toggleMsgSelected?.(m.id)}
+                  sx={{ p: 0.5 }}
+                  inputProps={{ "aria-label": "Select message" }}
+                />
+              ) : null}
+            </Box>
+          )}
+          <Box
+            sx={{
+              flex: msgSelecting ? 1 : undefined,
+              minWidth: 0,
+              maxWidth: msgSelecting ? "100%" : undefined,
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "flex-end",
+              justifyContent: mine ? "flex-end" : "flex-start",
+              gap: 0.75,
+              // Freeze bubble interactions; row click only toggles selection.
+              pointerEvents: msgSelecting ? "none" : undefined,
+            }}
+          >
+            {rowInner}
+          </Box>
+        </Box>
+      </MsgEnter>
     );
   };
 
@@ -1534,7 +1624,9 @@ export const MessageList = memo(
       prev.vm.fileLocalPaths === next.vm.fileLocalPaths &&
       prev.vm.fileMetaReady === next.vm.fileMetaReady &&
       prev.vm.unreadDivider === next.vm.unreadDivider &&
-      prev.vm.plain === next.vm.plain
+      prev.vm.plain === next.vm.plain &&
+      prev.vm.msgSelecting === next.vm.msgSelecting &&
+      prev.vm.selectedMsgIds === next.vm.selectedMsgIds
     );
   }
 );

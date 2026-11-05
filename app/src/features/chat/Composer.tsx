@@ -5,6 +5,7 @@ import {
   Box, Button, Chip, CircularProgress, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Paper,
   Stack, TextField, Typography,
 } from "@mui/material";
+import { alpha } from "@mui/material/styles";
 import AttachFileIcon from "@mui/icons-material/AttachFileRounded";
 import CampaignIcon from "@mui/icons-material/CampaignRounded";
 import CloseIcon from "@mui/icons-material/CloseRounded";
@@ -285,6 +286,37 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
 
   const [broadcastMode, setBroadcastMode] = useState<"text" | "announcement">("text");
   const [slashMenuAnchor, setSlashMenuAnchor] = useState<HTMLElement | null>(null);
+  const [composerFocused, setComposerFocused] = useState(false);
+
+  const floatingChipSx = {
+    fontWeight: 600,
+    fontSize: 12,
+    height: 28,
+    cursor: "pointer",
+    borderColor: "divider",
+    bgcolor: (theme: { palette: { mode: string; background: { paper: string } } }) =>
+      theme.palette.mode === "dark" ? alpha("#171F2D", 0.92) : alpha("#FFFFFF", 0.92),
+    boxShadow: (theme: { palette: { mode: string } }) =>
+      theme.palette.mode === "dark"
+        ? "0 1px 3px rgba(0,0,0,0.35)"
+        : "0 1px 2px rgba(20,32,28,0.06)",
+    "&:hover": {
+      bgcolor: "action.selected",
+      borderColor: "primary.main",
+    },
+  } as const;
+
+  const floatingMoreChipSx = {
+    ...floatingChipSx,
+    fontWeight: 500,
+    fontSize: 11.5,
+    color: "text.secondary",
+    "&:hover": {
+      bgcolor: "action.hover",
+      color: "text.primary",
+      borderColor: "divider",
+    },
+  } as const;
 
   const isGroup = active?.kind === "group";
   const commandCtx: CommandContext = {
@@ -323,35 +355,6 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
 
   const toolButtons = (
     <Stack direction="row" spacing={0.15} alignItems="center" sx={{ flexShrink: 0 }}>
-      <Tooltip title="Commands & shortcuts (/poll, /announce, ...)">
-        <IconButton
-          aria-label="Commands"
-          size="small"
-          onClick={(e) => setSlashMenuAnchor(e.currentTarget)}
-          sx={{
-            color: "text.secondary",
-            "&:hover": { color: "primary.main", bgcolor: "action.hover" },
-          }}
-        >
-          <Box
-            sx={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: 22,
-              height: 22,
-              borderRadius: "50%",
-              border: "1.5px solid currentColor",
-              fontWeight: 800,
-              fontSize: 12.5,
-              lineHeight: 1,
-              fontFamily: "monospace",
-            }}
-          >
-            /
-          </Box>
-        </IconButton>
-      </Tooltip>
       <IconButton
         aria-label="Emoji picker"
         onClick={(e) => setEmojiAnchor(e.currentTarget)}
@@ -623,29 +626,26 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
         )}
 
         {active && inGroup && !activeDmPeer?.blocked && (!isAnnounceBoard || (isAnnounceBoard && canUserBroadcast && broadcastMode === "text")) && (
-          <Paper
-            square
-            elevation={0}
+          <Box
             sx={{
               flexShrink: 0,
               px: 1.5,
-              py: 1.25,
-              borderTop: "1px solid",
-              borderColor: "divider",
+              pt: active?.kind === "group" && !isAnnounceBoard && !editingMessage ? 1.5 : 1.25,
+              pb: 1.25,
               display: "flex",
               flexDirection: "column",
               gap: 0.85,
-              bgcolor: "background.paper",
+              bgcolor: "transparent",
               zIndex: 2,
             }}
           >
             {isAnnounceBoard && (
-              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.25, flexWrap: "wrap", gap: 0.65 }}>
                 <Chip
                   label="Message"
                   color="primary"
                   size="small"
-                  sx={{ fontWeight: 600, px: 0.5 }}
+                  sx={{ fontWeight: 600, px: 0.5, height: 28 }}
                 />
                 <Chip
                   icon={<CampaignIcon sx={{ fontSize: 16 }} />}
@@ -653,7 +653,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   variant="outlined"
                   size="small"
                   onClick={() => setBroadcastMode("announcement")}
-                  sx={{ fontWeight: 500, cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }}
+                  sx={floatingChipSx}
                 />
                 <Chip
                   icon={<PollIcon sx={{ fontSize: 16 }} />}
@@ -661,7 +661,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   variant="outlined"
                   size="small"
                   onClick={() => setPollOpen?.(true)}
-                  sx={{ fontWeight: 500, cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }}
+                  sx={floatingChipSx}
                 />
                 <Chip
                   icon={<AttachFileIcon sx={{ fontSize: 16 }} />}
@@ -669,26 +669,24 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   variant="outlined"
                   size="small"
                   onClick={() => void pickAndStageFiles?.()}
-                  sx={{ fontWeight: 500, cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }}
+                  sx={floatingChipSx}
                 />
               </Stack>
             )}
             {active?.kind === "group" && !isAnnounceBoard && !editingMessage && (
-              <Stack direction="row" spacing={0.85} alignItems="center" sx={{ mb: 0.5, flexWrap: "wrap", gap: 0.65 }}>
+              <Stack
+                direction="row"
+                spacing={0.85}
+                alignItems="center"
+                sx={{ mb: 0.35, flexWrap: "wrap", gap: 0.65, px: 0.15 }}
+              >
                 <Chip
                   icon={<PollIcon sx={{ fontSize: 16 }} />}
                   label="/poll"
                   size="small"
                   variant="outlined"
                   onClick={() => void runSlash("/poll")}
-                  sx={{
-                    fontWeight: 600,
-                    fontSize: 12,
-                    cursor: "pointer",
-                    borderColor: "divider",
-                    bgcolor: (theme) => theme.palette.mode === "dark" ? "rgba(255, 255, 255, 0.03)" : "action.hover",
-                    "&:hover": { bgcolor: "action.selected", borderColor: "primary.main" },
-                  }}
+                  sx={floatingChipSx}
                 />
                 <Chip
                   icon={<CampaignIcon sx={{ fontSize: 16 }} />}
@@ -696,29 +694,14 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                   size="small"
                   variant="outlined"
                   onClick={() => void runSlash("/announce")}
-                  sx={{
-                    fontWeight: 600,
-                    fontSize: 12,
-                    cursor: "pointer",
-                    borderColor: "divider",
-                    bgcolor: (theme) => theme.palette.mode === "dark" ? "rgba(255, 255, 255, 0.03)" : "action.hover",
-                    "&:hover": { bgcolor: "action.selected", borderColor: "primary.main" },
-                  }}
+                  sx={floatingChipSx}
                 />
                 <Chip
-                  label="More / commands…"
+                  label="More…"
                   size="small"
                   variant="outlined"
                   onClick={(e) => setSlashMenuAnchor(e.currentTarget)}
-                  sx={{
-                    fontWeight: 500,
-                    fontSize: 11.5,
-                    cursor: "pointer",
-                    borderColor: "divider",
-                    color: "text.secondary",
-                    bgcolor: (theme) => theme.palette.mode === "dark" ? "rgba(255, 255, 255, 0.02)" : "transparent",
-                    "&:hover": { bgcolor: "action.hover", color: "text.primary" },
-                  }}
+                  sx={floatingMoreChipSx}
                 />
               </Stack>
             )}
@@ -822,13 +805,16 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                 alignItems: multiline ? "stretch" : "center",
                 gap: multiline ? 0.35 : 0.35,
                 border: "1px solid",
-                borderColor: "divider",
+                borderColor: (theme) =>
+                  composerFocused
+                    ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.42 : 0.38)
+                    : "divider",
                 borderRadius: multiline ? 2 : 999,
                 bgcolor: dark ? "chat.input" : "action.hover",
                 px: multiline ? 1 : 0.75,
                 py: multiline ? 0.75 : 0.35,
                 minWidth: 0,
-                transition: "border-radius 120ms ease",
+                transition: "border-color 140ms ease, border-radius 120ms ease",
               }}
             >
               {/* Fallback for browser preview when native dialog is unavailable */}
@@ -873,6 +859,8 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                 value={text}
                 variant="standard"
                 InputProps={{ disableUnderline: true }}
+                onFocus={() => setComposerFocused(true)}
+                onBlur={() => setComposerFocused(false)}
                 onChange={(e) => {
                   const v = e.target.value;
                   setText(v);
@@ -955,7 +943,7 @@ export function Composer({ vm }: { vm: ChatScreenVm }) {
                 sendButton
               )}
             </Box>
-          </Paper>
+          </Box>
         )}
         {active?.kind === "group" && membersLoaded && !inGroup && (
           <Paper

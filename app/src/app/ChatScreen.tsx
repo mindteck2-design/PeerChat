@@ -2,7 +2,18 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { lazy, Suspense, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  startTransition,
+  Suspense,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { APP_VERSION_FALLBACK, appVersion } from "../version";
 import {
   Alert,
@@ -68,6 +79,8 @@ import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
 import MoreVertIcon from "@mui/icons-material/MoreVertRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import DeleteForeverIcon from "@mui/icons-material/DeleteForeverRounded";
+import CheckBoxOutlinedIcon from "@mui/icons-material/CheckBoxOutlined";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import StopCircleIcon from "@mui/icons-material/StopCircleRounded";
 import PauseIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowIcon from "@mui/icons-material/PlayArrowRounded";
@@ -155,7 +168,6 @@ import {
 } from "../panels";
 import CampaignIcon from "@mui/icons-material/CampaignRounded";
 import type { SavedItem, ScanResult, TransferLog } from "../peer";
-import { ThemeMode } from "../theme";
 const SettingsScreen = lazy(() =>
   import("../features/settings/SettingsScreen").then((m) => ({ default: m.SettingsScreen }))
 );
@@ -220,6 +232,7 @@ import { NavRail, type ShellNav } from "../features/shell/NavRail";
 import { ListPane } from "../features/shell/ListPane";
 import { MessageList } from "../features/chat/MessageList";
 import { Composer } from "../features/chat/Composer";
+import { SelectionActionBar } from "../features/chat/SelectionActionBar";
 import type { ChatScreenVm } from "../features/chat/chatVm";
 import { ScreenshotAnnotator } from "../features/screenshot/ScreenshotAnnotator";
 import { PeerTrustDialogs } from "../features/peers/PeerTrustDialogs";
@@ -314,7 +327,15 @@ export function ChatScreen({
   const [groupKeys, setGroupKeys] = useState<Record<string, Uint8Array>>({});
   // tab 1 = chats list (must match default nav "chats")
   const [tab, setTab] = useState(1);
-  const [nav, setNav] = useState<ShellNav>("chats");
+  const [nav, setNavState] = useState<ShellNav>("chats");
+  /** Lazy screens (games/calendar/settings) suspend on first open — mark as transition. */
+  const setNav = useCallback((next: ShellNav) => {
+    if (next === "games" || next === "calendar" || next === "settings") {
+      startTransition(() => setNavState(next));
+    } else {
+      setNavState(next);
+    }
+  }, []);
   const [announceBoards, setAnnounceBoards] = useState<Conversation[]>([]);
   const [announceCompose, setAnnounceCompose] = useState({ title: "", body: "" });
   const [announceBusy, setAnnounceBusy] = useState(false);
@@ -377,8 +398,11 @@ export function ChatScreen({
   const [renameDraft, setRenameDraft] = useState("");
   const MAX_PINNED_MESSAGES_PER_CHAT = 3;
   const [status, setStatus] = useState("");
+  /** Keep last non-empty toast text so severity/color don’t flash to “info” during exit. */
+  const lastStatusRef = useRef("");
   const statusClearRef = useRef<number | null>(null);
   useEffect(() => {
+    if (status) lastStatusRef.current = status;
     if (!status) return;
     if (statusClearRef.current) window.clearTimeout(statusClearRef.current);
     // Keep in sync with Snackbar autoHideDuration below.
@@ -387,6 +411,7 @@ export function ChatScreen({
       if (statusClearRef.current) window.clearTimeout(statusClearRef.current);
     };
   }, [status]);
+  const toastText = status || lastStatusRef.current;
   const [pinOpen, setPinOpen] = useState<Peer | null>(null);
   /** Inbound first message from someone you have not trusted/pinned yet. */
   const [firstContact, setFirstContact] = useState<{
@@ -414,7 +439,23 @@ export function ChatScreen({
   }, [outgoingFile]);
 
   const [msgMenu, setMsgMenu] = useState<{ anchor: HTMLElement; message: Message } | null>(null);
-  const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
+  /** WhatsApp-style multi-select for bulk delete. */
+  const [msgSelecting, setMsgSelecting] = useState(false);
+  const [selectedMsgIds, setSelectedMsgIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
+  const [selectionBusy, setSelectionBusy] = useState(false);
+  const [msgInfo, setMsgInfo] = useState<{
+    loading: boolean;
+    error?: string;
+    recipients: Array<{
+      user_id: string;
+      display_name: string;
+      delivered_at?: string | null;
+      read_at?: string | null;
+    }>;
+  } | null>(null);
+  const [forwardMessages, setForwardMessages] = useState<Message[]>([]);
   const [forwardPick, setForwardPick] = useState<string[]>([]);
   const [forwardQuery, setForwardQuery] = useState("");
   const [clearChatTarget, setClearChatTarget] = useState<Conversation | null>(null);
@@ -672,7 +713,21 @@ export function ChatScreen({
           continue;
         }
         if (kind === "file_notice") {
-          next[c.id] = "📎 Attachment";
+          const sid = c.last_message_sender || "";
+          const senderName =
+            sid === profile.id
+              ? "You"
+              : c.kind === "dm"
+                ? c.peer_name || "Contact"
+                : peers.find((p) => p.user_id === sid)?.display_name || "Member";
+          next[c.id] = conversationPreviewLine(
+            kind,
+            "",
+            profile.id,
+            c.last_message_sender,
+            senderName,
+            c.kind === "group"
+          );
           continue;
         }
         const ct = c.last_message_ciphertext;
@@ -1013,6 +1068,19 @@ export function ChatScreen({
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
+
+  useEffect(() => {
+    if (!msgSelecting) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (bulkDeleteBusy || selectionBusy) return;
+        e.preventDefault();
+        exitMsgSelection();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [msgSelecting, bulkDeleteBusy, selectionBusy]);
 
   // Toast click: Rust tray toasts + onAction when a listener is registered.
   useEffect(() => {
@@ -1748,6 +1816,9 @@ export function ChatScreen({
     setStagedFiles(stagedDraftsRef.current[c.id] ?? []);
     setInChatSearchOpen(false);
     setInChatQuery("");
+    setMsgSelecting(false);
+    setSelectedMsgIds(new Set());
+    setBulkDeleteOpen(false);
     // Capture unread before markConversationRead clears it; gone after leave+return.
     const unread = Number(c.unread_count) || 0;
     setUnreadDivider(
@@ -2418,63 +2489,125 @@ export function ChatScreen({
     }
   }
 
+  function isTextLikeMessage(m: Message) {
+    return m.kind === "text" || m.kind === "forwarded";
+  }
+
+  function isSelectableMessageKind(kind: string) {
+    return (
+      kind !== "system" &&
+      kind !== "group_event" &&
+      kind !== "deleted" &&
+      kind !== "poll_vote" &&
+      kind !== "reaction"
+    );
+  }
+
+  /** Plaintext suitable for clipboard from a selected message, or null if not copyable. */
+  function copyableTextForMessage(m: Message): string | null {
+    if (!isSelectableMessageKind(m.kind)) return null;
+    const raw = plain[m.id] || "";
+    if (m.kind === "text" || m.kind === "forwarded") {
+      const t = raw.trim();
+      return t ? raw : null;
+    }
+    if (m.kind === "announcement" || m.kind === "snippet" || m.kind === "poll") {
+      try {
+        const parsed = JSON.parse(raw);
+        if (m.kind === "poll") {
+          const q = String(parsed.question || parsed.title || "").trim();
+          return q || null;
+        }
+        if (m.kind === "announcement") {
+          const text = [parsed.title, parsed.body].filter(Boolean).join("\n").trim();
+          return text || null;
+        }
+        // snippet
+        const text = [parsed.title, parsed.body, parsed.filename].filter(Boolean).join("\n").trim();
+        return text || null;
+      } catch {
+        return raw.trim() ? raw : null;
+      }
+    }
+    return null;
+  }
+
+  function messageIsDownloadable(m: Message) {
+    return messageAttachmentIds(m).length > 0 || m.kind === "file_notice";
+  }
+
   function startForward(message: Message) {
-    if (message.kind !== "text" && message.kind !== "forwarded") return;
-    setForwardMessage(message);
+    if (!isTextLikeMessage(message)) return;
+    setForwardMessages([message]);
     setForwardPick([]);
     setForwardQuery("");
     setMsgMenu(null);
   }
 
-  function isTextLikeMessage(m: Message) {
-    return m.kind === "text" || m.kind === "forwarded";
+  function startBulkForward(msgs: Message[]) {
+    const list = msgs.filter(isTextLikeMessage);
+    if (!list.length || list.length !== msgs.length) return;
+    setForwardMessages(list);
+    setForwardPick([]);
+    setForwardQuery("");
+    setMsgMenu(null);
   }
 
   async function confirmForward() {
-    if (!forwardMessage || !forwardPick.length) return;
-    const body = plain[forwardMessage.id];
-    if (!body) {
-      setStatus("Nothing to forward");
-      return;
-    }
+    if (!forwardMessages.length || !forwardPick.length) return;
     try {
       let sent = 0;
-      for (const convId of forwardPick) {
-        const target = convs.find((c) => c.id === convId);
-        if (!target) continue;
-        if (target.kind === "dm" && target.peer_id) {
-          const peer = peers.find((p) => p.user_id === target.peer_id);
-          if (!peer) throw new Error("Peer not found");
-          const pubs: Record<string, string> = {
-            [peer.user_id]: peer.x25519_public,
-            [profile.id]: exportPublic(identity).x25519_public,
-          };
-          const enc = await encryptMessage(body, target.id, profile.id, identity, pubs);
-          await peerApi.sendMessage(
-            target.id,
-            { kind: "forwarded", sender_id: profile.id, ...enc },
-            [peer.user_id]
-          );
-        } else {
-          const gk = await ensureGroupKey(target.id);
-          if (!gk) {
-            setStatus(`Waiting for group encryption key for ${target.title || "group"}…`);
-            continue;
+      for (const forwardMessage of forwardMessages) {
+        const body = plain[forwardMessage.id];
+        if (!body) continue;
+        for (const convId of forwardPick) {
+          const target = convs.find((c) => c.id === convId);
+          if (!target) continue;
+          if (target.kind === "dm" && target.peer_id) {
+            const peer = peers.find((p) => p.user_id === target.peer_id);
+            if (!peer) throw new Error("Peer not found");
+            const pubs: Record<string, string> = {
+              [peer.user_id]: peer.x25519_public,
+              [profile.id]: exportPublic(identity).x25519_public,
+            };
+            const enc = await encryptMessage(body, target.id, profile.id, identity, pubs);
+            await peerApi.sendMessage(
+              target.id,
+              { kind: "forwarded", sender_id: profile.id, ...enc },
+              [peer.user_id]
+            );
+          } else {
+            const gk = await ensureGroupKey(target.id);
+            if (!gk) {
+              setStatus(`Waiting for group encryption key for ${target.title || "group"}…`);
+              continue;
+            }
+            const enc = await encryptWithGroupKey(body, target.id, profile.id, gk, identity);
+            const memberIds = await peerApi.memberIds(target.id);
+            await peerApi.sendMessage(
+              target.id,
+              { kind: "forwarded", sender_id: profile.id, ...enc },
+              memberIds.filter((id) => id !== profile.id)
+            );
           }
-          const enc = await encryptWithGroupKey(body, target.id, profile.id, gk, identity);
-          const memberIds = await peerApi.memberIds(target.id);
-          await peerApi.sendMessage(
-            target.id,
-            { kind: "forwarded", sender_id: profile.id, ...enc },
-            memberIds.filter((id) => id !== profile.id)
-          );
+          if (active?.id === target.id) await refreshNewestMessages(target.id);
+          sent += 1;
         }
-        if (active?.id === target.id) await refreshNewestMessages(target.id);
-        sent += 1;
       }
-      setStatus(sent > 1 ? `Forwarded to ${sent} chats` : "Forwarded");
-      setForwardMessage(null);
+      if (!sent) {
+        setStatus("Nothing to forward");
+        return;
+      }
+      setStatus(
+        forwardMessages.length > 1
+          ? `Forwarded ${forwardMessages.length} messages`
+          : sent > 1
+            ? `Forwarded to ${sent} chats`
+            : "Forwarded"
+      );
+      setForwardMessages([]);
       setForwardPick([]);
+      if (msgSelecting) exitMsgSelection();
       await refresh();
     } catch (err: any) {
       setStatus(err?.message || String(err));
@@ -3218,6 +3351,224 @@ export function ChatScreen({
       setSavedItems(await peerApi.listSavedItems().catch(() => []));
     } catch (err: any) {
       setStatus(err?.message || String(err));
+    }
+  }
+
+  function exitMsgSelection() {
+    setMsgSelecting(false);
+    setSelectedMsgIds(new Set());
+    setBulkDeleteOpen(false);
+    setSelectionBusy(false);
+  }
+
+  function startMsgSelection(message: Message) {
+    if (!isSelectableMessageKind(message.kind)) return;
+    setMsgMenu(null);
+    setEmojiAnchor(null);
+    setInChatSearchOpen(false);
+    setInChatQuery("");
+    setMsgSelecting(true);
+    setSelectedMsgIds(new Set([message.id]));
+  }
+
+  function toggleMsgSelected(messageId: string) {
+    setSelectedMsgIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      return next;
+    });
+  }
+
+  function selectedMessagesList(): Message[] {
+    return messages.filter(
+      (m) => selectedMsgIds.has(m.id) && isSelectableMessageKind(m.kind)
+    );
+  }
+
+  function canBulkDeleteForEveryone(msgs: Message[]): boolean {
+    return (
+      msgs.length > 0 &&
+      msgs.every(
+        (m) =>
+          m.sender_id === profile.id &&
+          m.kind !== "deleted" &&
+          canMutateMessageToday(m.created_at)
+      )
+    );
+  }
+
+  function bulkDeleteEveryoneEligibleCount(msgs: Message[]): number {
+    return msgs.filter(
+      (m) =>
+        m.sender_id === profile.id &&
+        m.kind !== "deleted" &&
+        canMutateMessageToday(m.created_at)
+    ).length;
+  }
+
+  async function copySelectedMessages() {
+    const msgs = selectedMessagesList();
+    const parts = msgs
+      .map((m) => copyableTextForMessage(m))
+      .filter((t): t is string => !!t);
+    if (!parts.length) {
+      setStatus("Nothing to copy");
+      return;
+    }
+    setSelectionBusy(true);
+    try {
+      await navigator.clipboard.writeText(parts.join("\n\n"));
+      setStatus(parts.length > 1 ? `Copied ${parts.length} messages` : "Copied to clipboard");
+    } catch {
+      setStatus("Could not copy");
+    } finally {
+      setSelectionBusy(false);
+    }
+  }
+
+  async function downloadSelectedMessages() {
+    const msgs = selectedMessagesList().filter(messageIsDownloadable);
+    const jobs: { fileId: string; uploaderId: string }[] = [];
+    const seen = new Set<string>();
+    for (const m of msgs) {
+      for (const fid of messageAttachmentIds(m)) {
+        if (seen.has(fid)) continue;
+        seen.add(fid);
+        jobs.push({ fileId: fid, uploaderId: m.sender_id });
+      }
+    }
+    if (!jobs.length) {
+      setStatus("Nothing to download");
+      return;
+    }
+    setSelectionBusy(true);
+    let ok = 0;
+    try {
+      for (const job of jobs) {
+        try {
+          await openAttachment(job.fileId, job.uploaderId);
+          ok += 1;
+        } catch (err: any) {
+          setStatus(err?.message || String(err));
+        }
+      }
+      if (ok > 0) {
+        setStatus(ok > 1 ? `Opened ${ok} files` : "Opened file");
+      }
+    } finally {
+      setSelectionBusy(false);
+    }
+  }
+
+  function forwardSelectedMessages() {
+    const msgs = selectedMessagesList();
+    if (!msgs.length || !msgs.every(isTextLikeMessage)) return;
+    startBulkForward(msgs);
+  }
+
+  async function saveSelectedMessages() {
+    if (!active) return;
+    const msgs = selectedMessagesList();
+    if (!msgs.length) return;
+    setSelectionBusy(true);
+    try {
+      for (const m of msgs) {
+        let preview = (plain[m.id] || m.kind).slice(0, 500);
+        const fids = messageAttachmentIds(m);
+        if ((!preview || preview === m.kind) && fids.length) {
+          preview = fids.map((fid) => fileNames[fid] || "File").join(", ").slice(0, 500);
+        }
+        await peerApi.saveItem({
+          id: `save-${m.id}`,
+          message_id: m.id,
+          conversation_id: active.id,
+          kind: m.kind,
+          preview,
+          created_at: new Date().toISOString(),
+        });
+      }
+      setSavedItems(await peerApi.listSavedItems());
+      setStatus(
+        msgs.length > 1
+          ? `Saved ${msgs.length} messages on this computer`
+          : "Saved on this computer"
+      );
+    } catch (err: any) {
+      setStatus(err?.message || String(err));
+    } finally {
+      setSelectionBusy(false);
+    }
+  }
+
+  function formatReceiptTime(iso: string | null | undefined): string {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "—";
+    const day = formatDay(iso);
+    const clock = formatClock(iso);
+    if (!day) return clock || "—";
+    if (day === "Today") return clock;
+    return `${day}, ${clock}`;
+  }
+
+  async function openMessageInfo(message: Message) {
+    setMsgMenu(null);
+    if (message.sender_id !== profile.id || message.kind === "deleted") return;
+    setMsgInfo({ loading: true, recipients: [] });
+    try {
+      const data = await peerApi.getMessageReceipts(message.id);
+      setMsgInfo({ loading: false, recipients: data.recipients || [] });
+    } catch (err: any) {
+      setMsgInfo({
+        loading: false,
+        error: err?.message || String(err),
+        recipients: [],
+      });
+    }
+  }
+
+  async function runBulkDelete(mode: "me" | "everyone") {
+    const msgs = selectedMessagesList();
+    if (!msgs.length) {
+      exitMsgSelection();
+      return;
+    }
+    if (mode === "everyone" && !canBulkDeleteForEveryone(msgs)) return;
+    const targets = [...msgs];
+    setBulkDeleteBusy(true);
+    const deletedIds: string[] = [];
+    let failed: string | null = null;
+    try {
+      for (const m of targets) {
+        try {
+          if (mode === "everyone") {
+            await peerApi.deleteMessageForEveryone(m.id);
+          } else {
+            await peerApi.deleteMessageForMe(m.id);
+          }
+          deletedIds.push(m.id);
+        } catch (err: any) {
+          failed = err?.message || String(err);
+          break;
+        }
+      }
+      if (active) await refreshNewestMessages(active.id);
+      setSavedItems(await peerApi.listSavedItems().catch(() => []));
+      if (failed) {
+        setStatus(failed);
+        setSelectedMsgIds((prev) => {
+          const next = new Set(prev);
+          for (const id of deletedIds) next.delete(id);
+          return next;
+        });
+        setBulkDeleteOpen(false);
+        return;
+      }
+      exitMsgSelection();
+    } finally {
+      setBulkDeleteBusy(false);
+      setBulkDeleteOpen(false);
     }
   }
 
@@ -4776,6 +5127,9 @@ export function ChatScreen({
     setGroupOpen,
     setMessages,
     setMsgMenu,
+    msgSelecting,
+    selectedMsgIds,
+    toggleMsgSelected,
     setNav,
     setPendingCalendarFocus,
     setPendingGameInvite,
@@ -4888,58 +5242,70 @@ export function ChatScreen({
           </Suspense>
         )}
         {FEATURE_GAMES && nav === "games" && (gamesOn || pendingGameInvite ? (
-          <GamesHub
-            peers={peers}
-            myId={profile.id}
-            myName={profile.display_name}
-            sendGameMsg={sendGameMsg}
-            dispatchRef={gameDispatchRef}
-            pendingInvite={pendingGameInvite}
-            onPendingConsumed={() => setPendingGameInvite(null)}
-            replayLanMoves={async (peerId, matchId) => {
-              const conv = await peerApi.openDm(peerId);
-              const out: GameMsg[] = [];
-              let beforeSortKey: string | null = null;
-              let beforeId: string | null = null;
-              for (let pageN = 0; pageN < 20; pageN++) {
-                const page = await peerApi.listMessages(conv.id, {
-                  limit: MESSAGE_PAGE_SIZE,
-                  beforeSortKey,
-                  beforeId,
-                });
-                for (const m of page.messages) {
-                  if (m.kind !== "game_move") continue;
-                  try {
-                    const senderPub =
-                      m.sender_id === profile.id
-                        ? exportPublic(identity).ed25519_public
-                        : peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
-                    const plaintext = await decryptMessage(
-                      { ...m, wrapped_keys: m.wrapped_keys || {} },
-                      profile.id,
-                      identity,
-                      senderPub
-                    );
-                    const gm = JSON.parse(plaintext) as GameMsg;
-                    if (matchIdOf(gm) === matchId) out.push(gm);
-                  } catch {
-                    /* skip */
+          <Suspense
+            fallback={
+              <Box sx={{ minHeight: "100%", display: "grid", placeItems: "center" }}>
+                <CircularProgress />
+              </Box>
+            }
+          >
+            <GamesHub
+              peers={peers}
+              myId={profile.id}
+              myName={profile.display_name}
+              sendGameMsg={sendGameMsg}
+              dispatchRef={gameDispatchRef}
+              pendingInvite={pendingGameInvite}
+              onPendingConsumed={() => setPendingGameInvite(null)}
+              replayLanMoves={async (peerId, matchId) => {
+                const conv = await peerApi.openDm(peerId);
+                const out: GameMsg[] = [];
+                let beforeSortKey: string | null = null;
+                let beforeId: string | null = null;
+                for (let pageN = 0; pageN < 20; pageN++) {
+                  const page = await peerApi.listMessages(conv.id, {
+                    limit: MESSAGE_PAGE_SIZE,
+                    beforeSortKey,
+                    beforeId,
+                  });
+                  for (const m of page.messages) {
+                    if (m.kind !== "game_move") continue;
+                    try {
+                      const senderPub =
+                        m.sender_id === profile.id
+                          ? exportPublic(identity).ed25519_public
+                          : peers.find((p) => p.user_id === m.sender_id)?.ed25519_public;
+                      const plaintext = await decryptMessage(
+                        { ...m, wrapped_keys: m.wrapped_keys || {} },
+                        profile.id,
+                        identity,
+                        senderPub
+                      );
+                      const gm = JSON.parse(plaintext) as GameMsg;
+                      if (matchIdOf(gm) === matchId) out.push(gm);
+                    } catch {
+                      /* skip */
+                    }
                   }
+                  if (!page.has_more_older || !page.messages.length) break;
+                  const oldest = page.messages[0]!;
+                  beforeSortKey = oldest.sort_at || oldest.created_at;
+                  beforeId = oldest.id;
                 }
-                if (!page.has_more_older || !page.messages.length) break;
-                const oldest = page.messages[0]!;
-                beforeSortKey = oldest.sort_at || oldest.created_at;
-                beforeId = oldest.id;
-              }
-              return out;
-            }}
-          />
+                return out;
+              }}
+            />
+          </Suspense>
         ) : (
           <Box p={3}><Alert severity="info">Games are turned off in Settings.</Alert></Box>
         ))}
         {nav === "saved" && (
           <SavedPanel
             items={savedItems}
+            convs={convs}
+            peers={peers}
+            profile={profile}
+            fileNames={fileNames}
             onOpen={(id, messageId) => {
               const conv = convs.find((c) => c.id === id);
               if (conv) {
@@ -4947,6 +5313,8 @@ export function ChatScreen({
                 selectConversation(conv);
                 setNav("chats");
                 setTab(1);
+              } else {
+                setStatus("That chat is no longer available");
               }
             }}
             onRemove={async (id) => {
@@ -4962,6 +5330,8 @@ export function ChatScreen({
                 profile={profile}
                 identity={identity}
                 version={version}
+                gamesEnabled={gamesOn}
+                onGamesEnabledChange={setGamesOn}
                 onBack={() => {
                   setNav("chats");
                   setTab(1);
@@ -5003,7 +5373,7 @@ export function ChatScreen({
           }}
         >
           <Toolbar sx={{ gap: 1, minHeight: 64 }}>
-            {active && inChatSearchOpen ? (
+            {active && inChatSearchOpen && !msgSelecting ? (
               <>
                 <TextField
                   inputRef={inChatSearchInputRef}
@@ -5049,6 +5419,7 @@ export function ChatScreen({
                 {active && (
                   <Avatar
                     onClick={() => {
+                      if (msgSelecting) return;
                       if (isAnnounceBoard) {
                         setBroadcastInfoOpen(true);
                       } else if (active.kind === "group") {
@@ -5066,7 +5437,7 @@ export function ChatScreen({
                       color: "#FFFFFF",
                       fontSize: active.kind === "group" ? 22 : 18,
                       fontWeight: 700,
-                      cursor: "pointer",
+                      cursor: msgSelecting ? "default" : "pointer",
                     }}
                   >
                     {active.kind === "group" ? (
@@ -5084,7 +5455,7 @@ export function ChatScreen({
                   flex={1}
                   minWidth={0}
                   onClick={() => {
-                    if (!active) return;
+                    if (!active || msgSelecting) return;
                     if (isAnnounceBoard) {
                       setBroadcastInfoOpen(true);
                     } else if (active.kind === "group") {
@@ -5095,7 +5466,7 @@ export function ChatScreen({
                       setChatInfoOpen(true);
                     }
                   }}
-                  sx={{ cursor: active ? "pointer" : "default" }}
+                  sx={{ cursor: active && !msgSelecting ? "pointer" : "default" }}
                 >
                   <Typography variant="subtitle1" fontWeight={700} noWrap sx={{ display: "flex", alignItems: "center", minWidth: 0 }}>
                     <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -5149,21 +5520,27 @@ export function ChatScreen({
                 )}
                 {active && (
                   <Tooltip title="Search in chat">
-                    <IconButton
-                      aria-label="Search in chat"
-                      onClick={() => {
-                        setInChatSearchOpen(true);
-                        requestAnimationFrame(() => inChatSearchInputRef.current?.focus());
-                      }}
-                    >
-                      <SearchIcon />
-                    </IconButton>
+                    <span>
+                      <IconButton
+                        aria-label="Search in chat"
+                        disabled={msgSelecting}
+                        onClick={() => {
+                          if (msgSelecting) return;
+                          setInChatSearchOpen(true);
+                          requestAnimationFrame(() => inChatSearchInputRef.current?.focus());
+                        }}
+                      >
+                        <SearchIcon />
+                      </IconButton>
+                    </span>
                   </Tooltip>
                 )}
                 {active?.kind === "group" && (
                   <IconButton
                     aria-label={isAnnounceBoard ? "Channel info" : "Group details"}
+                    disabled={msgSelecting}
                     onClick={() => {
+                      if (msgSelecting) return;
                       if (isAnnounceBoard) {
                         setBroadcastInfoOpen(true);
                       } else {
@@ -5179,7 +5556,11 @@ export function ChatScreen({
                 {active && (
                   <IconButton
                     aria-label="Chat options"
-                    onClick={(e) => setConvMenu({ anchor: e.currentTarget, conv: active })}
+                    disabled={msgSelecting}
+                    onClick={(e) => {
+                      if (msgSelecting) return;
+                      setConvMenu({ anchor: e.currentTarget, conv: active });
+                    }}
                   >
                     <MoreVertIcon />
                   </IconButton>
@@ -5275,6 +5656,7 @@ export function ChatScreen({
                   <Box
                     key={m.id}
                     onClick={() => {
+                      if (msgSelecting) return;
                       stickToBottomRef.current = false;
                       setHighlightMsgId(m.id);
                     }}
@@ -5282,11 +5664,11 @@ export function ChatScreen({
                       display: "flex",
                       alignItems: "center",
                       gap: 0.75,
-                      cursor: "pointer",
+                      cursor: msgSelecting ? "default" : "pointer",
                       borderRadius: 1,
                       px: 0.5,
                       py: 0.25,
-                      "&:hover": { bgcolor: "action.hover" },
+                      "&:hover": msgSelecting ? undefined : { bgcolor: "action.hover" },
                     }}
                   >
                     <PushPinIcon sx={{ fontSize: 14, color: "primary.main" }} />
@@ -5457,7 +5839,28 @@ export function ChatScreen({
           </Fade>
         </Box>
 
-        <Composer vm={vm} />
+        {msgSelecting ? (
+          <SelectionActionBar
+            count={selectedMsgIds.size}
+            busy={bulkDeleteBusy || selectionBusy}
+            showCopy={selectedMessagesList().some((m) => !!copyableTextForMessage(m))}
+            showDownload={selectedMessagesList().some(messageIsDownloadable)}
+            showForward={
+              selectedMessagesList().length > 0 &&
+              selectedMessagesList().every(isTextLikeMessage)
+            }
+            showSave={selectedMessagesList().length > 0}
+            showDelete={selectedMessagesList().length > 0}
+            onCopy={() => void copySelectedMessages()}
+            onDownload={() => void downloadSelectedMessages()}
+            onForward={forwardSelectedMessages}
+            onSave={() => void saveSelectedMessages()}
+            onDelete={() => setBulkDeleteOpen(true)}
+            onCancel={exitMsgSelection}
+          />
+        ) : (
+          <Composer vm={vm} />
+        )}
         <ScreenshotAnnotator
           open={!!screenshotCaptureId}
           captureId={screenshotCaptureId}
@@ -5653,12 +6056,17 @@ export function ChatScreen({
         <MenuItem
           onClick={async () => {
             if (!msgMenu || !active) return;
-            const preview = (plain[msgMenu.message.id] || msgMenu.message.kind).slice(0, 500);
+            const m = msgMenu.message;
+            let preview = (plain[m.id] || m.kind).slice(0, 500);
+            const fids = messageAttachmentIds(m);
+            if ((!preview || preview === m.kind) && fids.length) {
+              preview = fids.map((fid) => fileNames[fid] || "File").join(", ").slice(0, 500);
+            }
             await peerApi.saveItem({
-              id: `save-${msgMenu.message.id}`,
-              message_id: msgMenu.message.id,
+              id: `save-${m.id}`,
+              message_id: m.id,
               conversation_id: active.id,
-              kind: msgMenu.message.kind,
+              kind: m.kind,
               preview,
               created_at: new Date().toISOString(),
             });
@@ -5678,6 +6086,25 @@ export function ChatScreen({
           </ListItemIcon>
           {msgMenu?.message.pinned ? "Unpin message" : "Pin message"}
         </MenuItem>
+        {msgMenu && isSelectableMessageKind(msgMenu.message.kind) && (
+            <MenuItem onClick={() => msgMenu && startMsgSelection(msgMenu.message)}>
+              <ListItemIcon>
+                <CheckBoxOutlinedIcon fontSize="small" />
+              </ListItemIcon>
+              Select messages
+            </MenuItem>
+          )}
+        {msgMenu &&
+          msgMenu.message.sender_id === profile.id &&
+          msgMenu.message.kind !== "deleted" &&
+          msgMenu.message.kind !== "system" && (
+            <MenuItem onClick={() => msgMenu && void openMessageInfo(msgMenu.message)}>
+              <ListItemIcon>
+                <InfoOutlinedIcon fontSize="small" />
+              </ListItemIcon>
+              Info
+            </MenuItem>
+          )}
         <Divider />
         <MenuItem onClick={() => msgMenu && deleteForMe(msgMenu.message)}>
           <ListItemIcon>
@@ -5702,6 +6129,163 @@ export function ChatScreen({
 
 
       <GroupCreateDialog vm={vm} />
+
+      <Dialog
+        open={!!msgInfo}
+        onClose={() => setMsgInfo(null)}
+        fullWidth
+        maxWidth="xs"
+        PaperProps={{ sx: { borderRadius: 2 } }}
+      >
+        <DialogTitle sx={{ fontWeight: 800, pr: 6 }}>
+          Message info
+          <IconButton
+            aria-label="Close"
+            onClick={() => setMsgInfo(null)}
+            sx={{ position: "absolute", right: 10, top: 10 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers sx={{ px: 0, py: 0 }}>
+          {msgInfo?.loading ? (
+            <Box sx={{ display: "grid", placeItems: "center", py: 4 }}>
+              <CircularProgress size={28} />
+            </Box>
+          ) : msgInfo?.error ? (
+            <Typography variant="body2" color="error" sx={{ px: 2.5, py: 2 }}>
+              {msgInfo.error}
+            </Typography>
+          ) : !msgInfo?.recipients.length ? (
+            <Typography variant="body2" color="text.secondary" sx={{ px: 2.5, py: 2 }}>
+              No delivery details yet. The message may still be waiting to send.
+            </Typography>
+          ) : (
+            <List dense disablePadding>
+              {msgInfo.recipients.map((r) => (
+                <ListItemButton key={r.user_id} disableRipple sx={{ cursor: "default", py: 1.25, px: 2.5 }}>
+                  <ListItemAvatar sx={{ minWidth: 44 }}>
+                    <Avatar
+                      sx={{
+                        width: 36,
+                        height: 36,
+                        fontSize: 14,
+                        fontWeight: 700,
+                        bgcolor: avatarColor(r.display_name || r.user_id),
+                      }}
+                    >
+                      {(r.display_name || r.user_id).slice(0, 1).toUpperCase()}
+                    </Avatar>
+                  </ListItemAvatar>
+                  <ListItemText
+                    primary={
+                      <Typography variant="body2" fontWeight={700} noWrap>
+                        {r.display_name || "Peer"}
+                      </Typography>
+                    }
+                    secondary={
+                      <Stack spacing={0.2} sx={{ mt: 0.35 }}>
+                        <Typography variant="caption" color="text.secondary" component="span">
+                          Delivered · {formatReceiptTime(r.delivered_at)}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" component="span">
+                          Read · {formatReceiptTime(r.read_at)}
+                        </Typography>
+                      </Stack>
+                    }
+                    secondaryTypographyProps={{ component: "div" }}
+                  />
+                  <Box sx={{ ml: 1, display: "flex", alignItems: "center" }}>
+                    {r.read_at ? (
+                      <DoneAllIcon sx={{ fontSize: 18, color: "#53bdeb" }} />
+                    ) : r.delivered_at ? (
+                      <DoneAllIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+                    ) : (
+                      <DoneIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+                    )}
+                  </Box>
+                </ListItemButton>
+              ))}
+            </List>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 2.5, pb: 2 }}>
+          <Button onClick={() => setMsgInfo(null)} sx={{ textTransform: "none", fontWeight: 600 }}>
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={bulkDeleteOpen}
+        onClose={() => !bulkDeleteBusy && setBulkDeleteOpen(false)}
+        fullWidth
+        maxWidth="xs"
+        PaperProps={{ sx: { borderRadius: 2 } }}
+      >
+        {(() => {
+          const bulkMsgs = selectedMessagesList();
+          const n = bulkMsgs.length || selectedMsgIds.size;
+          const everyoneOk = canBulkDeleteForEveryone(bulkMsgs);
+          const everyoneEligible = bulkDeleteEveryoneEligibleCount(bulkMsgs);
+          return (
+            <>
+              <DialogTitle sx={{ fontWeight: 800, pr: 6 }}>
+                Delete {n} message{n === 1 ? "" : "s"}?
+                <IconButton
+                  aria-label="Close"
+                  disabled={bulkDeleteBusy}
+                  onClick={() => setBulkDeleteOpen(false)}
+                  sx={{ position: "absolute", right: 10, top: 10 }}
+                >
+                  <CloseIcon />
+                </IconButton>
+              </DialogTitle>
+              <DialogContent>
+                <Typography variant="body2" color="text.secondary">
+                  {everyoneOk
+                    ? "Remove these messages from this chat on your device, or for everyone."
+                    : everyoneEligible > 0 && everyoneEligible < bulkMsgs.length
+                      ? `Delete for everyone isn’t available for this selection — only ${everyoneEligible} of ${bulkMsgs.length} are yours and from today. Others can only be deleted for you.`
+                      : bulkMsgs.some((m) => m.sender_id !== profile.id)
+                        ? "Delete for everyone isn’t available because some selected messages aren’t yours. You can still delete them for yourself."
+                        : "Delete for everyone isn’t available (messages must be yours and from today). You can still delete them for yourself."}
+                </Typography>
+              </DialogContent>
+              <DialogActions sx={{ px: 2.5, pb: 2, flexWrap: "wrap", gap: 1 }}>
+                <Button
+                  disabled={bulkDeleteBusy}
+                  onClick={() => setBulkDeleteOpen(false)}
+                  sx={{ textTransform: "none", mr: "auto" }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="outlined"
+                  disabled={bulkDeleteBusy || bulkMsgs.length === 0}
+                  onClick={() => void runBulkDelete("me")}
+                  startIcon={<DeleteOutlineIcon />}
+                  sx={{ textTransform: "none", fontWeight: 700 }}
+                >
+                  Delete for me
+                </Button>
+                {everyoneOk && (
+                  <Button
+                    color="error"
+                    variant="contained"
+                    disabled={bulkDeleteBusy}
+                    onClick={() => void runBulkDelete("everyone")}
+                    startIcon={<DeleteForeverIcon />}
+                    sx={{ textTransform: "none", fontWeight: 700 }}
+                  >
+                    Delete for everyone
+                  </Button>
+                )}
+              </DialogActions>
+            </>
+          );
+        })()}
+      </Dialog>
 
       <Dialog
         open={!!confirmDialog}
@@ -5806,8 +6390,8 @@ export function ChatScreen({
       </Dialog>
 
       <Dialog
-        open={!!forwardMessage}
-        onClose={() => setForwardMessage(null)}
+        open={forwardMessages.length > 0}
+        onClose={() => setForwardMessages([])}
         fullWidth
         maxWidth="xs"
         PaperProps={{ sx: { borderRadius: 2, overflow: "hidden" } }}
@@ -5817,16 +6401,16 @@ export function ChatScreen({
             <ForwardIcon color="primary" sx={{ transform: "scaleX(-1)" }} />
             <Box minWidth={0}>
               <Typography fontWeight={800} fontSize={18} lineHeight={1.2}>
-                Forward message
+                Forward {forwardMessages.length > 1 ? "messages" : "message"}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                1 message
+                {forwardMessages.length} message{forwardMessages.length === 1 ? "" : "s"}
               </Typography>
             </Box>
           </Stack>
           <IconButton
             aria-label="Close"
-            onClick={() => setForwardMessage(null)}
+            onClick={() => setForwardMessages([])}
             sx={{ position: "absolute", right: 10, top: 10 }}
           >
             <CloseIcon />
@@ -5931,13 +6515,13 @@ export function ChatScreen({
           </List>
         </DialogContent>
         <DialogActions sx={{ px: 2.5, pb: 2, pt: 0.5 }}>
-          <Button onClick={() => setForwardMessage(null)} sx={{ textTransform: "none" }}>
+          <Button onClick={() => setForwardMessages([])} sx={{ textTransform: "none" }}>
             Cancel
           </Button>
           <Button
             variant="contained"
             disabled={!forwardPick.length}
-            onClick={confirmForward}
+            onClick={() => void confirmForward()}
             sx={{ textTransform: "none", borderRadius: 2, px: 2, fontWeight: 700 }}
           >
             Forward{forwardPick.length ? ` (${forwardPick.length})` : ""}
@@ -6088,12 +6672,12 @@ export function ChatScreen({
         sx={{ top: { xs: 72, sm: 80 } }}
       >
         <Alert
-          severity={statusAlertSeverity(status)}
+          severity={statusAlertSeverity(toastText)}
           variant="filled"
           onClose={() => setStatus("")}
           sx={{ maxWidth: 520, boxShadow: 3, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
         >
-          {status}
+          {toastText}
         </Alert>
       </Snackbar>
 

@@ -38,10 +38,40 @@ declare module "@mui/material/styles" {
   }
 }
 
+/** User preference; `system` follows OS light/dark. */
+export type ThemePreference = "light" | "dark" | "system";
+
 export const ThemeMode = createContext<{
+  /** Resolved MUI palette mode (never `system`). */
   mode: PaletteMode;
+  preference: ThemePreference;
+  setPreference: (preference: ThemePreference) => void;
+  /** @deprecated Prefer setPreference; maps light/dark only. */
   setMode: (mode: PaletteMode) => void;
-}>({ mode: "dark", setMode: () => {} });
+}>({
+  mode: "dark",
+  preference: "system",
+  setPreference: () => {},
+  setMode: () => {},
+});
+
+export function readThemePreference(): ThemePreference {
+  try {
+    const v = localStorage.getItem("peerchat.theme");
+    if (v === "light" || v === "dark" || v === "system") return v;
+  } catch {
+    /* ignore */
+  }
+  return "system";
+}
+
+export function resolveThemeMode(preference: ThemePreference): PaletteMode {
+  if (preference === "light" || preference === "dark") return preference;
+  if (typeof window !== "undefined" && window.matchMedia) {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  return "dark";
+}
 
 export function buildTheme(mode: PaletteMode) {
   const dark = mode === "dark";
