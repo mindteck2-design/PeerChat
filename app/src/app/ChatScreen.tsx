@@ -298,7 +298,7 @@ export function ChatScreen({
       .catch(() => {});
   }, []);
 
-  // Title bar badge on top: e.g. "(3) PeerChat v1.0.3"
+  // Title bar badge on top: e.g. "(3) PeerChat v1.0.4"
   const totalUnread = useMemo(
     () => convs.reduce((sum, c) => sum + (c.unread_count || 0), 0),
     [convs]
@@ -540,6 +540,21 @@ export function ChatScreen({
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLInputElement | null>(null);
+
+  // Land the caret in the composer whenever a person or group chat is opened.
+  useEffect(() => {
+    if (!active?.id) return;
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => {
+        composerRef.current?.focus();
+      });
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
+  }, [active?.id]);
   const olderScrollAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const chatSearchRef = useRef<HTMLInputElement | null>(null);
   const groupKeysRef = useRef(groupKeys);
@@ -1792,6 +1807,7 @@ export function ChatScreen({
     // Re-clicking the already-open chat must not wipe messages / re-decrypt / jump scroll.
     if (activeRef.current?.id === c.id) {
       setActive(c); // refresh metadata (title, unread, etc.) only
+      requestAnimationFrame(() => composerRef.current?.focus());
       return;
     }
     const prev = activeRef.current;

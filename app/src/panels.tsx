@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Box,
@@ -938,6 +938,7 @@ export function PollDialog({
   const [allowVoteChange, setAllowVoteChange] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const optionsListRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -961,9 +962,12 @@ export function PollDialog({
   };
 
   const handleAddOption = () => {
-    if (options.length < 10) {
-      setOptions((prev) => [...prev, ""]);
-    }
+    if (options.length >= 10) return;
+    setOptions((prev) => [...prev, ""]);
+    requestAnimationFrame(() => {
+      const el = optionsListRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
   };
 
   const handleRemoveOption = (idx: number) => {
@@ -1086,23 +1090,52 @@ export function PollDialog({
           </Box>
         </Box>
 
-        {/* Options section */}
-        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.25 }}>
-          <Typography sx={{ fontSize: "0.92rem", fontWeight: 700, color: "text.primary" }}>
-            Options
-          </Typography>
-          <Typography sx={{ fontSize: "0.8rem", color: "text.secondary" }}>
-            Options (2–10)
-          </Typography>
+        {/* Options section — Add sits on the header; list shows 3 rows then scrolls */}
+        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, mb: 1.25 }}>
+          <Box sx={{ display: "flex", alignItems: "baseline", gap: 1, minWidth: 0 }}>
+            <Typography sx={{ fontSize: "0.92rem", fontWeight: 700, color: "text.primary" }}>
+              Options
+            </Typography>
+            <Typography sx={{ fontSize: "0.75rem", color: "text.secondary" }}>
+              {options.length}/10
+            </Typography>
+          </Box>
+          <Button
+            size="small"
+            disabled={options.length >= 10}
+            onClick={handleAddOption}
+            startIcon={<AddRoundedIcon sx={{ fontSize: 16 }} />}
+            sx={{
+              flexShrink: 0,
+              py: 0.35,
+              px: 1.25,
+              minHeight: 0,
+              color: "primary.main",
+              border: "1px dashed",
+              borderColor: "primary.main",
+              borderRadius: 2,
+              bgcolor: isDark ? "rgba(37, 99, 235, 0.05)" : "rgba(37, 99, 235, 0.04)",
+              fontWeight: 600,
+              fontSize: "0.8rem",
+              textTransform: "none",
+              "&.Mui-disabled": { borderColor: "divider", color: "text.disabled" },
+              "&:hover": {
+                bgcolor: isDark ? "rgba(37, 99, 235, 0.12)" : "rgba(37, 99, 235, 0.08)",
+                borderColor: "primary.dark",
+              },
+            }}
+          >
+            Add option
+          </Button>
         </Box>
 
-        {/* ~4 option rows visible; scroll for 5–10 so the dialog height stays fixed */}
         <Box
+          ref={optionsListRef}
           sx={{
-            maxHeight: 4 * 52 + 3 * 10,
-            overflowY: options.length > 4 ? "auto" : "visible",
+            maxHeight: options.length > 3 ? 3 * 40 + 2 * 10 : "none",
+            overflowY: options.length > 3 ? "auto" : "visible",
             mb: 1.5,
-            pr: options.length > 4 ? 0.5 : 0,
+            pr: options.length > 3 ? 0.5 : 0,
           }}
         >
           <Stack spacing={1.25}>
@@ -1113,6 +1146,9 @@ export function PollDialog({
                   display: "flex",
                   alignItems: "center",
                   gap: 1.25,
+                  height: 40,
+                  minHeight: 40,
+                  flexShrink: 0,
                 }}
               >
                 <Box
@@ -1125,7 +1161,7 @@ export function PollDialog({
                     borderColor: "divider",
                     borderRadius: 2,
                     px: 1.75,
-                    py: 0.85,
+                    height: "100%",
                     transition: "border-color 0.15s ease",
                     "&:focus-within": {
                       borderColor: "primary.main",
@@ -1168,33 +1204,6 @@ export function PollDialog({
             ))}
           </Stack>
         </Box>
-
-        {/* Add option button */}
-        {options.length < 10 && (
-          <Button
-            fullWidth
-            onClick={handleAddOption}
-            startIcon={<AddRoundedIcon sx={{ fontSize: 18 }} />}
-            sx={{
-              py: 1.25,
-              mb: 2,
-              color: "primary.main",
-              border: "1px dashed",
-              borderColor: "primary.main",
-              borderRadius: 2,
-              bgcolor: isDark ? "rgba(37, 99, 235, 0.05)" : "rgba(37, 99, 235, 0.04)",
-              fontWeight: 600,
-              fontSize: "0.88rem",
-              textTransform: "none",
-              "&:hover": {
-                bgcolor: isDark ? "rgba(37, 99, 235, 0.12)" : "rgba(37, 99, 235, 0.08)",
-                borderColor: "primary.dark",
-              },
-            }}
-          >
-            Add option
-          </Button>
-        )}
 
         {/* Poll settings — collapsed by default */}
         <Box
