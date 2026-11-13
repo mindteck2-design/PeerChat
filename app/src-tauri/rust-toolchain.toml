@@ -1,0 +1,5 @@
+# Keep in sync with .github/workflows/build-installers.yml.
+# rustc ≥1.85 fails to compile xcap 0.0.14 Wayland (dbus never-type fallback).
+[toolchain]
+channel = "1.82.0"
+components = ["rustfmt", "clippy"]

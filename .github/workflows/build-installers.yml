@@ -39,8 +39,9 @@ jobs:
           cache: 'npm'
           cache-dependency-path: app/package-lock.json
 
-      - name: Set up Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      # Pin: rustc ≥1.85 breaks xcap 0.0.14 Wayland (dbus ReadAll / never-type fallback).
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.82.0
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -117,8 +118,9 @@ jobs:
           cache: 'npm'
           cache-dependency-path: app/package-lock.json
 
-      - name: Set up Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      # Pin: rustc ≥1.85 breaks xcap 0.0.14 Wayland (dbus ReadAll / never-type fallback).
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.82.0
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2

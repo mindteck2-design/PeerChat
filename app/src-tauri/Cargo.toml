@@ -33,6 +33,8 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 aes-gcm = "0.10"
 getrandom = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+# Pin until CI rustc is controlled: newer rustc breaks xcap 0.0.14 Wayland dbus
+# (never-type fallback / ReadAll). Prefer bumping xcap when crates.io is reachable.
 xcap = "0.0.14"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
