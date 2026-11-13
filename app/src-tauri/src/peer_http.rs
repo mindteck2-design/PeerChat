@@ -594,16 +594,17 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     .get("tls_fingerprint")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                // Reachability updates immediately. A changed certificate or key set
-                // is stored as pending and does not replace the saved identity.
+                // Do NOT take last_ip/last_port from from_peer. Self-reported IPs
+                // are often a VPN tunnel (OpenVPN 10.8.x) and poison reverse
+                // delivery. LAN reachability comes from UDP beacon source only.
                 let _ = db::upsert_peer(
                     &conn,
                     &uid,
                     &dn,
                     &x,
                     &e,
-                    peer.get("last_ip").and_then(|v| v.as_str()),
-                    peer.get("last_port").and_then(|v| v.as_i64()),
+                    None,
+                    None,
                     fp.as_deref(),
                     true,
                 );
@@ -1386,8 +1387,9 @@ impl PeerSession {
             .map_err(|e| e.to_string())?
             .next()
             .ok_or("resolve failed")?;
+        // 3s is enough on LAN; 8s made one firewalled peer stall the whole outbox batch.
         let tcp =
-            tokio::time::timeout(Duration::from_secs(8), tokio::net::TcpStream::connect(addr))
+            tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(addr))
                 .await
                 .map_err(|_| "connect timeout".to_string())?
                 .map_err(|e| e.to_string())?;

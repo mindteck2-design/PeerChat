@@ -422,7 +422,13 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
             </Typography>
           </Tooltip>
         ) : m.queued || (mine && !m.delivered && m.kind !== "deleted") ? (
-          <Tooltip title="Saved on this PC — will send when their PeerChat is open on the LAN">
+          <Tooltip
+            title={
+              m.last_error
+                ? `Not delivered yet: ${m.last_error}`
+                : "Saved on this PC — will send when their PeerChat is open on the LAN"
+            }
+          >
             <Typography
               component="span"
               variant="caption"

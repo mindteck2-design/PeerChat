@@ -117,11 +117,36 @@ fn is_virtual_adapter_name(name: &str) -> bool {
         || n.contains("loopback")
         || n.contains("bluetooth")
         || n.contains("docker")
+        // VPN tunnels must not win lan_ip() — peers then try to reply via the
+        // tunnel address (e.g. OpenVPN 10.8.x) and DMs fail while LAN beacons
+        // still show Online.
+        || n.contains("openvpn")
+        || n.contains("wintun")
+        || n.contains("tap-windows")
+        || n.contains("tap adapter")
+        || n.contains("wireguard")
+        || n.contains("nordlynx")
+        || n.contains("cisco anyconnect")
+        || n.contains("globalprotect")
+}
+
+/// True for common VPN client tunnel address ranges (not office LAN).
+pub fn is_likely_vpn_tunnel_ip(ip: &str) -> bool {
+    // OpenVPN / many SSL VPNs default to 10.8.0.0/16 or 10.7.0.0/16.
+    ip.starts_with("10.8.") || ip.starts_with("10.7.")
 }
 
 fn resolve_lan_ip() -> String {
-    // Prefer a real NIC from the OS list (skip Hyper-V / WSL switches).
-    if let Some(ip) = lan_ips_from_os(true).into_iter().next() {
+    // Prefer a real NIC from the OS list (skip Hyper-V / WSL / VPN tunnels).
+    // Among physical IPs, prefer non-VPN ranges so OpenVPN 10.8.x never wins
+    // over Ethernet 172.16.x when both appear in ipconfig.
+    let physical = lan_ips_from_os(true);
+    if let Some(ip) = physical
+        .iter()
+        .find(|ip| !is_likely_vpn_tunnel_ip(ip))
+        .cloned()
+        .or_else(|| physical.into_iter().next())
+    {
         return ip;
     }
     // UDP "connect" only selects a route; destinations need not be reachable.
@@ -194,8 +219,62 @@ fn lan_ips_from_os(physical_only: bool) -> Vec<String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = physical_only;
-        Vec::new()
+        fn is_virtual_iface(name: &str) -> bool {
+            let n = name.to_ascii_lowercase();
+            n == "lo"
+                || n.starts_with("docker")
+                || n.starts_with("br-")
+                || n.starts_with("veth")
+                || n.starts_with("virbr")
+                || n.starts_with("tun")
+                || n.starts_with("tap")
+                || n.starts_with("wg")
+                || n.starts_with("vnet")
+                || n.starts_with("vmnet")
+                || n.starts_with("cni")
+                || n.starts_with("flannel")
+                || n.starts_with("tailscale")
+        }
+        let mut preferred = Vec::new();
+        let mut other = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        // `ip -4 -o addr show` → "2: eth0    inet 172.16.69.10/23 brd ... scope global ..."
+        if let Ok(out) = silent_command("ip")
+            .args(["-4", "-o", "addr", "show"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let iface = parts
+                    .get(1)
+                    .map(|s| s.trim_end_matches(':'))
+                    .unwrap_or("");
+                if physical_only && is_virtual_iface(iface) {
+                    continue;
+                }
+                let Some(inet_i) = parts.iter().position(|p| *p == "inet") else {
+                    continue;
+                };
+                let Some(addr) = parts.get(inet_i + 1) else {
+                    continue;
+                };
+                let candidate = addr.split('/').next().unwrap_or("").trim().to_string();
+                if !is_usable_lan_ip(&candidate) || !seen.insert(candidate.clone()) {
+                    continue;
+                }
+                if candidate.starts_with("172.")
+                    || candidate.starts_with("10.")
+                    || candidate.starts_with("192.168.")
+                {
+                    preferred.push(candidate);
+                } else {
+                    other.push(candidate);
+                }
+            }
+        }
+        preferred.extend(other);
+        preferred
     }
 }
 
@@ -409,8 +488,14 @@ async fn handle_packet(
                 true,
                 Some(peer.team.as_str()),
             );
-            if was_offline || ip_changed {
+            // Only clear backoff when the peer's LAN address actually changed.
+            // Clearing on every offline→online flap (common with stale-peer prune)
+            // re-queues hundreds of gev-* rows and creates SYN storms toward peers
+            // whose TCP port is firewalled while UDP beacons still say "Online".
+            if ip_changed {
                 let _ = crate::db::clear_peer_outbox_backoff(&conn, &peer.user_id);
+                kick_flush = true;
+            } else if was_offline {
                 kick_flush = true;
             }
         } else {

@@ -185,6 +185,7 @@ pub(crate) fn start_runtime_inner(
 use std::os::windows::process::CommandExt;
 
 /// Allow inbound TCP/UDP for this PeerChat.exe so LAN beacons and DMs work.
+/// Re-applies when the running exe path changes (installed vs `tauri:dev` debug).
 #[cfg(windows)]
 pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
     let Ok(exe) = std::env::current_exe() else {
@@ -194,7 +195,14 @@ pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
         return;
     };
     let marker = data_dir.join(".firewall_ok");
-    if marker.exists() {
+    // Marker stores the allowed exe path. A bare "1" from older builds (or a
+    // different install/dev path) must be refreshed — otherwise inbound deliver
+    // fails while outbound still works (Online + typing, single ticks on peers).
+    let marker_ok = std::fs::read_to_string(&marker)
+        .ok()
+        .map(|s| s.trim() == exe_str)
+        .unwrap_or(false);
+    if marker_ok {
         return;
     }
     let _ = std::process::Command::new("netsh")
@@ -225,7 +233,7 @@ pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
             .creation_flags(0x08000000)
             .output();
     }
-    let _ = std::fs::write(&marker, b"1");
+    let _ = std::fs::write(&marker, exe_str.as_bytes());
 }
 
 #[cfg(not(windows))]

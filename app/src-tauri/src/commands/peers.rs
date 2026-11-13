@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::util::*;
-use crate::runtime::outbox::{kick_flush, kick_flush_for_peer, flush_outbox};
+use crate::runtime::outbox::{kick_flush, kick_flush_for_peer_opts, flush_outbox};
 use crate::runtime::group_events::{enqueue_group_event, enqueue_group_event_extra};
 use crate::runtime::bootstrap::{start_runtime_inner, show_main_window};
 
@@ -50,7 +50,8 @@ pub async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, St
     let online_ids: Vec<String> = map.keys().cloned().collect();
     // Collect peers whose reachable address changed so we can kick delivery after releasing
     // the DB lock (avoid deadlock: kick_flush_for_peer spawns tasks that also lock the DB).
-    let mut peers_to_kick: Vec<String> = Vec::new();
+    // (peer_id, reset_backoff) — only reset backoff when LAN IP actually changed.
+    let mut peers_to_kick: Vec<(String, bool)> = Vec::new();
     {
         let conn = state.db.lock();
         for p in map.values() {
@@ -74,7 +75,7 @@ pub async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, St
                 Some(p.team.as_str()),
             )?;
             if ip_changed || was_offline {
-                peers_to_kick.push(p.user_id.clone());
+                peers_to_kick.push((p.user_id.clone(), ip_changed));
             }
             let stored = db::get_peer(&conn, &p.user_id).ok().flatten();
             out.push(json!({
@@ -95,8 +96,8 @@ pub async fn discover_peers(state: State<'_, AppState>) -> Result<Vec<Value>, St
     }
     // Kick delivery for peers that came online or moved to a new address.
     // Done after releasing conn to avoid any potential lock ordering issue.
-    for peer_id in peers_to_kick {
-        kick_flush_for_peer(&state, peer_id);
+    for (peer_id, reset_backoff) in peers_to_kick {
+        kick_flush_for_peer_opts(&state, peer_id, reset_backoff);
     }
     Ok(out)
 }

@@ -298,7 +298,7 @@ export function ChatScreen({
       .catch(() => {});
   }, []);
 
-  // Title bar badge on top: e.g. "(3) PeerChat v1.0.4"
+  // Title bar badge on top: e.g. "(3) PeerChat v1.0.5"
   const totalUnread = useMemo(
     () => convs.reduce((sum, c) => sum + (c.unread_count || 0), 0),
     [convs]

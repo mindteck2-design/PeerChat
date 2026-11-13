@@ -487,7 +487,7 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<Value>, String> {
 
 pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, String> {
     conn.query_row(
-        "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, online, COALESCE(blocked,0) FROM peers WHERE user_id=?1",
+        "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, online, COALESCE(blocked,0), COALESCE(identity_changed,0), pending_tls_fingerprint FROM peers WHERE user_id=?1",
         params![user_id],
         |r| {
             Ok(serde_json::json!({
@@ -501,6 +501,8 @@ pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, Strin
                 "pinned": r.get::<_, i64>(7)? == 1,
                 "online": r.get::<_, i64>(8)? == 1,
                 "blocked": r.get::<_, i64>(9)? == 1,
+                "identity_changed": r.get::<_, i64>(10)? == 1,
+                "pending_tls_fingerprint": r.get::<_, Option<String>>(11)?,
             }))
         },
     )

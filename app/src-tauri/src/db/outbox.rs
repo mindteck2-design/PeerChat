@@ -28,8 +28,9 @@ pub fn enqueue_outbox(
 }
 
 pub fn pending_outbox(conn: &Connection) -> Result<Vec<Value>, String> {
-    // Filter by next_retry_at in SQL so the index can skip non-due rows.
-    // Rows that have never failed (next_retry_at IS NULL) are always included.
+    // Fair drain: one unreachable peer used to monopolize LIMIT 100 (oldest-first),
+    // starving chat to everyone else while group-event (gev-*) rows retried forever.
+    // Prefer non-gev payloads, then round-robin a small batch per recipient.
     let now = chrono::Utc::now().to_rfc3339();
     let mut stmt = conn
         .prepare(
@@ -37,8 +38,10 @@ pub fn pending_outbox(conn: &Connection) -> Result<Vec<Value>, String> {
                FROM outbox
                WHERE delivered_at IS NULL
                  AND (next_retry_at IS NULL OR next_retry_at <= ?1)
-               ORDER BY created_at ASC
-               LIMIT 100"#,
+               ORDER BY
+                 CASE WHEN id LIKE 'gev-%' THEN 1 ELSE 0 END ASC,
+                 created_at ASC
+               LIMIT 400"#,
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -55,9 +58,39 @@ pub fn pending_outbox(conn: &Connection) -> Result<Vec<Value>, String> {
             }))
         })
         .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
+    let mut by_peer: std::collections::HashMap<String, Vec<Value>> = Default::default();
+    let mut peer_order: Vec<String> = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| e.to_string())?);
+        let item = row.map_err(|e| e.to_string())?;
+        let recipient = item["recipient_id"].as_str().unwrap_or("").to_string();
+        if !by_peer.contains_key(&recipient) {
+            peer_order.push(recipient.clone());
+        }
+        by_peer.entry(recipient).or_default().push(item);
+    }
+    // Cap per peer so a connect-timeout storm cannot fill the whole flush.
+    const PER_PEER: usize = 8;
+    const MAX_TOTAL: usize = 64;
+    let mut out: Vec<Value> = Vec::new();
+    let mut idx = 0usize;
+    while out.len() < MAX_TOTAL {
+        let mut progressed = false;
+        for peer in &peer_order {
+            let Some(q) = by_peer.get_mut(peer) else {
+                continue;
+            };
+            if idx < q.len().min(PER_PEER) {
+                out.push(q[idx].clone());
+                progressed = true;
+                if out.len() >= MAX_TOTAL {
+                    break;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+        idx += 1;
     }
     Ok(out)
 }
@@ -72,8 +105,10 @@ pub fn pending_outbox_for_peer(conn: &Connection, recipient_id: &str) -> Result<
                WHERE delivered_at IS NULL
                  AND recipient_id=?1
                  AND (next_retry_at IS NULL OR next_retry_at <= ?2)
-               ORDER BY created_at ASC
-               LIMIT 50"#,
+               ORDER BY
+                 CASE WHEN id LIKE 'gev-%' THEN 1 ELSE 0 END ASC,
+                 created_at ASC
+               LIMIT 8"#,
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
