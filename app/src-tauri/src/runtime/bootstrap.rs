@@ -185,7 +185,12 @@ pub(crate) fn start_runtime_inner(
 use std::os::windows::process::CommandExt;
 
 /// Allow inbound TCP/UDP for this PeerChat.exe so LAN beacons and DMs work.
-/// Re-applies when the running exe path changes (installed vs `tauri:dev` debug).
+///
+/// Strategy (Windows):
+/// 1. Silent `netsh` for the current exe (works if already elevated / rule exists).
+/// 2. If that fails, one UAC consent prompt (`RunAs`) — user approves once.
+/// 3. Only then write `.firewall_ok` (must match current exe path). Never mark
+///    success on failure — that was why debug builds stayed blocked after install.
 #[cfg(windows)]
 pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
     let Ok(exe) = std::env::current_exe() else {
@@ -195,28 +200,50 @@ pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
         return;
     };
     let marker = data_dir.join(".firewall_ok");
-    // Marker stores the allowed exe path. A bare "1" from older builds (or a
-    // different install/dev path) must be refreshed — otherwise inbound deliver
-    // fails while outbound still works (Online + typing, single ticks on peers).
     let marker_ok = std::fs::read_to_string(&marker)
         .ok()
         .map(|s| s.trim() == exe_str)
         .unwrap_or(false);
-    if marker_ok {
+    if marker_ok && firewall_rule_covers_exe(exe_str) {
         return;
     }
+
+    if apply_firewall_rules_silent(exe_str) || apply_firewall_rules_elevated(exe_str) {
+        let _ = std::fs::write(&marker, exe_str.as_bytes());
+    } else {
+        // Leave marker absent/stale so the next launch retries (or after IT unlocks netsh).
+        let _ = std::fs::remove_file(&marker);
+    }
+}
+
+#[cfg(windows)]
+fn firewall_rule_covers_exe(exe_str: &str) -> bool {
+    let Ok(out) = std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "show", "rule", "name=PeerChat LAN", "verbose"])
+        .creation_flags(0x08000000)
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
+    let exe_l = exe_str.to_ascii_lowercase();
+    text.contains(&exe_l) && text.contains("enabled:") && text.contains("yes")
+}
+
+#[cfg(windows)]
+fn apply_firewall_rules_silent(exe_str: &str) -> bool {
     let _ = std::process::Command::new("netsh")
-        .args([
-            "advfirewall",
-            "firewall",
-            "delete",
-            "rule",
-            "name=PeerChat LAN",
-        ])
+        .args(["advfirewall", "firewall", "delete", "rule", "name=PeerChat LAN"])
         .creation_flags(0x08000000)
         .output();
+    let _ = std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "delete", "rule", "name=PeerChat Ports"])
+        .creation_flags(0x08000000)
+        .output();
+
+    let mut ok = true;
     for proto in ["UDP", "TCP"] {
-        let _ = std::process::Command::new("netsh")
+        let out = std::process::Command::new("netsh")
             .args([
                 "advfirewall",
                 "firewall",
@@ -232,8 +259,81 @@ pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
             ])
             .creation_flags(0x08000000)
             .output();
+        ok = ok && matches!(out, Ok(ref o) if o.status.success());
     }
-    let _ = std::fs::write(&marker, exe_str.as_bytes());
+    // Port rules as a safety net when program path changes (updates / sideloads).
+    let tcp_ports = std::process::Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            "name=PeerChat Ports",
+            "dir=in",
+            "action=allow",
+            "protocol=TCP",
+            "localport=9876-9899",
+            "profile=any",
+            "enable=yes",
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    let udp_port = std::process::Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            "name=PeerChat Ports",
+            "dir=in",
+            "action=allow",
+            "protocol=UDP",
+            "localport=41234",
+            "profile=any",
+            "enable=yes",
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    ok = ok
+        && matches!(tcp_ports, Ok(ref o) if o.status.success())
+        && matches!(udp_port, Ok(ref o) if o.status.success());
+    ok && firewall_rule_covers_exe(exe_str)
+}
+
+/// One Windows UAC consent prompt — user must Approve. Used when silent netsh fails
+/// (normal for current-user installs without admin).
+#[cfg(windows)]
+fn apply_firewall_rules_elevated(exe_str: &str) -> bool {
+    // Escape for PowerShell single-quoted string (double any ').
+    let exe_ps = exe_str.replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         netsh advfirewall firewall delete rule name='PeerChat LAN' | Out-Null; \
+         netsh advfirewall firewall delete rule name='PeerChat Ports' | Out-Null; \
+         netsh advfirewall firewall add rule name='PeerChat LAN' dir=in action=allow program='{exe_ps}' protocol=TCP profile=any enable=yes; \
+         netsh advfirewall firewall add rule name='PeerChat LAN' dir=in action=allow program='{exe_ps}' protocol=UDP profile=any enable=yes; \
+         netsh advfirewall firewall add rule name='PeerChat Ports' dir=in action=allow protocol=TCP localport=9876-9899 profile=any enable=yes; \
+         netsh advfirewall firewall add rule name='PeerChat Ports' dir=in action=allow protocol=UDP localport=41234 profile=any enable=yes;"
+    );
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &format!(
+                "Start-Process -FilePath powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command',{arg}",
+                arg = powershell_single_quote(&script)
+            ),
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    matches!(out, Ok(ref o) if o.status.success()) && firewall_rule_covers_exe(exe_str)
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 #[cfg(not(windows))]

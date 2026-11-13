@@ -47,7 +47,8 @@
         "installMode": "currentUser",
         "startMenuFolder": "PeerChat",
         "displayLanguageSelector": false,
-        "installerIcon": "icons/peerchat-nsis.ico"
+        "installerIcon": "icons/peerchat-nsis.ico",
+        "installerHooks": "./windows/hooks.nsh"
       }
     },
     "linux": {

@@ -233,13 +233,43 @@ foreach ($k in $props.Keys) {
 Remove-Item -Recurse -Force "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$LegacyAppId" -ErrorAction SilentlyContinue
 Write-Step "Registered in Add/Remove Programs (HKCU)"
 
-# -- Windows Firewall (best-effort; may need elevation on locked-down PCs) -----
+# -- Windows Firewall (default on install; elevates once with UAC if needed) ---
+function Test-PeerChatFirewall([string]$exePath) {
+    $show = netsh advfirewall firewall show rule name="PeerChat LAN" verbose 2>$null | Out-String
+    return ($show -match [regex]::Escape($exePath)) -and ($show -match '(?i)Enabled:\s+Yes')
+}
+function Add-PeerChatFirewall([string]$exePath) {
+    netsh advfirewall firewall delete rule name="PeerChat LAN" >$null 2>&1
+    netsh advfirewall firewall delete rule name="PeerChat Ports" >$null 2>&1
+    netsh advfirewall firewall add rule name="PeerChat LAN" dir=in action=allow program="$exePath" protocol=UDP profile=any enable=yes >$null 2>&1
+    netsh advfirewall firewall add rule name="PeerChat LAN" dir=in action=allow program="$exePath" protocol=TCP profile=any enable=yes >$null 2>&1
+    netsh advfirewall firewall add rule name="PeerChat Ports" dir=in action=allow protocol=TCP localport=9876-9899 profile=any enable=yes >$null 2>&1
+    netsh advfirewall firewall add rule name="PeerChat Ports" dir=in action=allow protocol=UDP localport=41234 profile=any enable=yes >$null 2>&1
+    return (Test-PeerChatFirewall $exePath)
+}
 try {
-    $ruleName = "PeerChat LAN"
-    netsh advfirewall firewall delete rule name="$ruleName" >$null 2>&1
-    netsh advfirewall firewall add rule name="$ruleName" dir=in action=allow program="$destExe" protocol=UDP profile=any enable=yes >$null 2>&1
-    netsh advfirewall firewall add rule name="$ruleName" dir=in action=allow program="$destExe" protocol=TCP profile=any enable=yes >$null 2>&1
-    Write-Step "Firewall: allowed inbound TCP/UDP for PeerChat (all profiles)"
+    if (Add-PeerChatFirewall $destExe) {
+        Write-Step "Firewall: allowed inbound TCP/UDP for PeerChat (all profiles)"
+    } else {
+        # One Windows UAC consent prompt — Approve to enable LAN chat.
+        $exeEsc = $destExe.Replace("'", "''")
+        $fwCmd = @"
+netsh advfirewall firewall delete rule name='PeerChat LAN' | Out-Null
+netsh advfirewall firewall delete rule name='PeerChat Ports' | Out-Null
+netsh advfirewall firewall add rule name='PeerChat LAN' dir=in action=allow program='$exeEsc' protocol=TCP profile=any enable=yes
+netsh advfirewall firewall add rule name='PeerChat LAN' dir=in action=allow program='$exeEsc' protocol=UDP profile=any enable=yes
+netsh advfirewall firewall add rule name='PeerChat Ports' dir=in action=allow protocol=TCP localport=9876-9899 profile=any enable=yes
+netsh advfirewall firewall add rule name='PeerChat Ports' dir=in action=allow protocol=UDP localport=41234 profile=any enable=yes
+"@
+        Start-Process -FilePath powershell -Verb RunAs -Wait -ArgumentList @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-Command', $fwCmd
+        ) -ErrorAction SilentlyContinue | Out-Null
+        if (Test-PeerChatFirewall $destExe) {
+            Write-Step "Firewall: allowed after UAC consent"
+        } else {
+            Write-Step "Firewall: not configured — Approve the UAC prompt next launch, or allow PeerChat in Windows Security"
+        }
+    }
 } catch {
     Write-Step "Firewall: could not add rules automatically — allow PeerChat when Windows asks"
 }

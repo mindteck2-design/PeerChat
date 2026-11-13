@@ -39,11 +39,18 @@ Requirements
 PeerChat needs Microsoft Edge WebView2 Runtime.
 Most Windows 10/11 PCs already have it.
 
+Firewall / LAN chat
+-------------------
+Installers try to allow PeerChat through Windows Firewall by default (inbound
+TCP 9876–9899 + UDP 41234, and the PeerChat.exe program). If Windows needs
+permission, you get one UAC prompt — click Yes so peers can deliver messages.
+
 If people don't appear under People → refresh:
 - Both PCs must be on the same LAN / VLAN with PeerChat running.
-- Allow PeerChat in Windows Firewall when prompted (UDP 41234 + TCP).
+- Approve the Firewall/UAC prompt if shown (or allow PeerChat in Windows Security).
 - On corporate Domain networks, an admin may need to allow the app.
 - Click the refresh icon in the sidebar (People) after both apps are open.
+- Turn off VPN tunnels if messages send but replies never arrive.
 
 Start with Windows
 ------------------
