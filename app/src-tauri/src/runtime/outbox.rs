@@ -109,7 +109,7 @@ pub(crate) async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
 
         match result {
             Err(_elapsed) => {
-                let err = "request timed out after 10 s".to_string();
+                let err = "connect/request timed out — peer UDP online but TCP blocked? Allow PeerChat through Windows Firewall (TCP 9876+) on both PCs".to_string();
                 let conn = db.lock();
                 let _ = db::bump_outbox_error(&conn, &id, &err);
                 peer_unreachable = Some(err);
@@ -148,16 +148,25 @@ pub(crate) async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
                 );
             }
             Ok(Err(e)) => {
-                let conn = db.lock();
-                let _ = db::bump_outbox_error(&conn, &id, &e);
                 let el = e.to_lowercase();
-                if el.contains("connect timeout")
+                let unreachable = el.contains("connect timeout")
                     || el.contains("10061")
                     || el.contains("10060")
+                    || el.contains("10065")
                     || el.contains("actively refused")
                     || el.contains("timed out")
-                {
-                    peer_unreachable = Some(e);
+                    || el.contains("unreachable");
+                let err = if unreachable {
+                    format!(
+                        "{e} — allow PeerChat through Windows Firewall (TCP listen port) on both PCs; UDP discovery alone is not enough"
+                    )
+                } else {
+                    e.clone()
+                };
+                let conn = db.lock();
+                let _ = db::bump_outbox_error(&conn, &id, &err);
+                if unreachable {
+                    peer_unreachable = Some(err);
                 }
             }
         }

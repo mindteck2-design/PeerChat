@@ -19,7 +19,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::util::*;
-use crate::runtime::outbox::{kick_flush, kick_flush_for_peer, flush_outbox};
+use crate::runtime::outbox::{
+    flush_outbox, kick_flush, kick_flush_for_peer, kick_flush_for_peer_opts,
+};
 use crate::runtime::group_events::{enqueue_group_event, enqueue_group_event_extra};
 use crate::runtime::bootstrap::{start_runtime_inner, show_main_window};
 
@@ -389,10 +391,14 @@ pub fn send_message(
     };
 
     let _ = profile;
-    // Do NOT clear_peer_outbox_backoff here. Clearing on every send re-queues
-    // thousands of failed gev-* rows (connect-timeout peers) and starves the
-    // new chat message. Fresh outbox rows already have next_retry_at=NULL.
-    kick_flush(&state);
+    // Deliver to each recipient immediately (newest-first outbox). Do not clear
+    // global backoff for all peers — that re-queues thousands of dead gev-* rows.
+    for rid in &recipient_ids {
+        if rid.is_empty() {
+            continue;
+        }
+        kick_flush_for_peer_opts(&state, rid.clone(), false);
+    }
     Ok(msg)
 }
 

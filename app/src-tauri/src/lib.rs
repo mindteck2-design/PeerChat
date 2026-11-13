@@ -68,6 +68,22 @@ pub fn run() {
                 let conn = shared.lock();
                 let _ = db::dedupe_peers_by_ip(&conn);
                 let _ = db::heal_unpinned_identity_flags(&conn);
+                let purged = db::purge_stale_group_outbox(&conn).unwrap_or(0);
+                if purged > 0 {
+                    use std::io::Write;
+                    let log_path = data.join("peerchat.log");
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
+                        let _ = writeln!(
+                            f,
+                            "[{}] [INFO] purged {purged} stale group outbox rows",
+                            chrono::Utc::now().to_rfc3339()
+                        );
+                    }
+                }
             }
             commands::screenshot::cleanup_stale_captures_dir(&data);
             app.manage(AppState {

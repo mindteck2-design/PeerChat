@@ -40,7 +40,7 @@ pub fn pending_outbox(conn: &Connection) -> Result<Vec<Value>, String> {
                  AND (next_retry_at IS NULL OR next_retry_at <= ?1)
                ORDER BY
                  CASE WHEN id LIKE 'gev-%' THEN 1 ELSE 0 END ASC,
-                 created_at ASC
+                 created_at DESC
                LIMIT 400"#,
         )
         .map_err(|e| e.to_string())?;
@@ -107,7 +107,7 @@ pub fn pending_outbox_for_peer(conn: &Connection, recipient_id: &str) -> Result<
                  AND (next_retry_at IS NULL OR next_retry_at <= ?2)
                ORDER BY
                  CASE WHEN id LIKE 'gev-%' THEN 1 ELSE 0 END ASC,
-                 created_at ASC
+                 created_at DESC
                LIMIT 8"#,
         )
         .map_err(|e| e.to_string())?;
@@ -210,7 +210,9 @@ pub fn cancel_outbox_for_message(conn: &Connection, message_id: &str) -> Result<
 
 pub fn latest_outbox_error(conn: &Connection, recipient_id: &str) -> Result<Option<Value>, String> {
     conn.query_row(
-        "SELECT last_error, attempts, created_at FROM outbox WHERE recipient_id=?1 AND delivered_at IS NULL AND last_error IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+        r#"SELECT last_error, attempts, created_at FROM outbox
+           WHERE recipient_id=?1 AND delivered_at IS NULL AND last_error IS NOT NULL
+           ORDER BY COALESCE(last_attempt_at, created_at) DESC LIMIT 1"#,
         params![recipient_id],
         |r| {
             Ok(serde_json::json!({
@@ -222,5 +224,30 @@ pub fn latest_outbox_error(conn: &Connection, recipient_id: &str) -> Result<Opti
     )
     .optional()
     .map_err(|e| e.to_string())
+}
+
+/// Drop dead group-event backlog that SYN-storms firewalled peers and starves chat.
+/// Chat/file outbox rows are kept.
+pub fn purge_stale_group_outbox(conn: &Connection) -> Result<u64, String> {
+    let week_ago = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+    let n1 = conn
+        .execute(
+            r#"DELETE FROM outbox
+               WHERE delivered_at IS NULL
+                 AND id LIKE 'gev-%'
+                 AND attempts >= 20"#,
+            [],
+        )
+        .map_err(|e| e.to_string())? as u64;
+    let n2 = conn
+        .execute(
+            r#"DELETE FROM outbox
+               WHERE delivered_at IS NULL
+                 AND id LIKE 'gev-%'
+                 AND created_at < ?1"#,
+            params![week_ago],
+        )
+        .map_err(|e| e.to_string())? as u64;
+    Ok(n1 + n2)
 }
 

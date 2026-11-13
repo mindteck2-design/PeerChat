@@ -436,6 +436,35 @@ export function ChatScreen({
     peer: Peer;
     conversationId: string;
   } | null>(null);
+  /** Outbox TCP/firewall failure while UDP still shows the peer online. */
+  const [dmDeliveryHint, setDmDeliveryHint] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const peerId = active?.kind === "dm" ? active.peer_id : null;
+    if (!peerId) {
+      setDmDeliveryHint(null);
+      return;
+    }
+    const poll = () => {
+      void peerApi
+        .peerDeliveryError(peerId)
+        .then((row) => {
+          if (cancelled) return;
+          const err = (row?.last_error || "").trim();
+          setDmDeliveryHint(err || null);
+        })
+        .catch(() => {
+          if (!cancelled) setDmDeliveryHint(null);
+        });
+    };
+    poll();
+    const t = window.setInterval(poll, 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [active?.id, active?.kind, active?.peer_id]);
 
   const [members, setMembers] = useState<Member[]>([]);
   const [membersLoaded, setMembersLoaded] = useState(false);
@@ -5884,6 +5913,12 @@ export function ChatScreen({
           >
             First contact with <strong>{activeDmPeer.display_name}</strong>. You can chat now —
             tap Trust and compare fingerprints when you can (pins their certificate).
+          </Alert>
+        )}
+        {active?.kind === "dm" && activeDmPeer && !activeDmPeer.blocked && dmDeliveryHint && (
+          <Alert severity="error" sx={{ borderRadius: 0, flexShrink: 0 }}>
+            Messages are not reaching <strong>{activeDmPeer.display_name}</strong> over TCP
+            (Trust/UDP can still look fine). {dmDeliveryHint}
           </Alert>
         )}
 
