@@ -105,12 +105,17 @@ export function SettingsScreen(props: {
   const [fp, setFp] = useState("");
   const [downloadDir, setDownloadDir] = useState("");
   const [status, setStatus] = useState("");
+  const [netHint, setNetHint] = useState<{ lan_ip: string; corp_friendly: boolean } | null>(null);
 
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
   const accent = theme.palette.primary.main;
 
   useEffect(() => {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
+    peerApi
+      .networkHint()
+      .then(setNetHint)
+      .catch(() => setNetHint(null));
     peerApi.getNotificationsEnabled().then(setNotifOn).catch(() => setNotifOn(true));
     peerApi.getAppSetting("download_dir").then((v) => setDownloadDir(v || "")).catch(() => {});
     peerApi.shellExtensionInstalled().then(setShellExt).catch(() => setShellExt(false));
@@ -1012,6 +1017,21 @@ export function SettingsScreen(props: {
                 Cryptographic Fingerprints
               </Typography>
             </Box>
+            <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mb: 1.5, lineHeight: 1.5 }}>
+              Coworkers compare these values when they tap Trust on your chat. Install PeerChat only
+              from your team&apos;s trusted share — not random downloads.
+            </Typography>
+            {netHint && !netHint.corp_friendly && (
+              <Alert severity="warning" sx={{ mb: 1.75 }}>
+                This PC looks like it is on a public address ({netHint.lan_ip || "unknown"}). Prefer
+                corporate LAN or VPN so discovery stays on the internal network.
+              </Alert>
+            )}
+            {netHint?.corp_friendly && (
+              <Typography sx={{ fontSize: "0.75rem", color: mutedColor, mb: 1.5 }}>
+                LAN address for peers: {netHint.lan_ip}
+              </Typography>
+            )}
             <Box sx={{ mb: 2 }}>
               <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
                 Your Public Identity Key Fingerprint (X25519)

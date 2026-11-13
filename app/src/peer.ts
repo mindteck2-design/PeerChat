@@ -126,6 +126,13 @@ export const peerApi = {
       team: team ?? null,
     }),
   myFingerprint: () => inv<string>("my_fingerprint"),
+  syncProfileKeys: (x25519Public: string, ed25519Public: string) =>
+    inv<Profile>("sync_profile_keys", {
+      x25519Public,
+      ed25519Public,
+    }),
+  networkHint: () =>
+    inv<{ lan_ip: string; corp_friendly: boolean }>("network_hint"),
   discoverPeers: () => inv<Peer[]>("discover_peers"),
   listLanHosts: () => inv<LanHost[]>("list_lan_hosts"),
   listPeers: () => inv<Peer[]>("list_peers"),

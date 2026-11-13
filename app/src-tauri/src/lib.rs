@@ -67,6 +67,7 @@ pub fn run() {
             {
                 let conn = shared.lock();
                 let _ = db::dedupe_peers_by_ip(&conn);
+                let _ = db::heal_unpinned_identity_flags(&conn);
             }
             commands::screenshot::cleanup_stale_captures_dir(&data);
             app.manage(AppState {
@@ -243,6 +244,8 @@ pub fn run() {
             set_notifications_enabled,
             conversation_is_muted,
             my_fingerprint,
+            sync_profile_keys,
+            network_hint,
             discover_peers,
             list_lan_hosts,
             list_peers,

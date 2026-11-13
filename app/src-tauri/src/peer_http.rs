@@ -1,7 +1,7 @@
 use crate::db;
 use crate::runtime::group_events::enqueue_group_event;
 use crate::tls_cert::{self, LocalCert};
-use crate::util::from_peer_json;
+use crate::util::{enforce_inbound_message_signature, from_peer_json};
 use base64::Engine;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension};
@@ -409,6 +409,15 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let sender_id = msg.get("sender_id").and_then(|v| v.as_str()).unwrap_or("");
+                // Known peers: verify Ed25519. Soft-fail (warn only) so profile/store key
+                // drift cannot freeze chat while typing still works over /v1/typing.
+                if let Err(e) = enforce_inbound_message_signature(&conn, msg) {
+                    let ts = chrono::Utc::now().to_rfc3339();
+                    let _ = std::io::Write::write_fmt(
+                        &mut std::io::stderr(),
+                        format_args!("[{ts}] [WARN] PeerChat inbound signature: {e}\n"),
+                    );
+                }
                 let is_group = payload.get("wrapped_group_key").is_some()
                     || payload.get("group_event").is_some()
                     || msg_conv.starts_with("group:")

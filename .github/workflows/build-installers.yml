@@ -39,9 +39,9 @@ jobs:
           cache: 'npm'
           cache-dependency-path: app/package-lock.json
 
-      # Pin: rustc ≥1.85 breaks xcap 0.0.14 Wayland (dbus ReadAll / never-type fallback).
+      # Pin: ≥1.90 for Tauri 2.x + time-core edition2024; matches rust-toolchain.toml.
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.82.0
+        uses: dtolnay/rust-toolchain@1.90.0
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -118,9 +118,9 @@ jobs:
           cache: 'npm'
           cache-dependency-path: app/package-lock.json
 
-      # Pin: rustc ≥1.85 breaks xcap 0.0.14 Wayland (dbus ReadAll / never-type fallback).
+      # Pin: ≥1.90 for Tauri 2.x + time-core edition2024; matches rust-toolchain.toml.
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.82.0
+        uses: dtolnay/rust-toolchain@1.90.0
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2

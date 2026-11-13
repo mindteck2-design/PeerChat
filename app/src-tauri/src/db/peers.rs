@@ -219,10 +219,13 @@ pub fn stage_peer_identity(
         .map_err(|e| e.to_string())?;
         return Ok(());
     }
-    // Nothing trusted yet — take the first real keys. A pinned row stays pending.
-    if !pinned && old_x.is_empty() && old_e.is_empty() && old_fp.is_empty() {
+    // Untrusted (not pinned): TOFU — always take the latest advertised keys so DMs
+    // keep flowing. Blocking on identity_changed here left typing working (no check)
+    // while outbox refused /v1/deliver forever (single ticks, peer never receives).
+    if !pinned {
         return adopt_peer_identity(conn, user_id, incoming_fp, incoming_x, incoming_e);
     }
+    // Pinned: keep active keys for encrypt/verify until the user Accepts.
     conn.execute(
         r#"UPDATE peers SET identity_changed=1,
                pending_tls_fingerprint=?2,
@@ -233,6 +236,45 @@ pub fn stage_peer_identity(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Clear stuck `identity_changed` on unpinned peers (older builds could set this and
+/// permanently stall the outbox while discovery/typing still looked fine).
+pub fn heal_unpinned_identity_flags(conn: &Connection) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"SELECT user_id,
+                      COALESCE(pending_tls_fingerprint,''),
+                      COALESCE(pending_x25519_public,''),
+                      COALESCE(pending_ed25519_public,'')
+               FROM peers
+               WHERE COALESCE(pinned,0)=0 AND COALESCE(identity_changed,0)=1"#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    let mut n = 0usize;
+    for (uid, fp, x, e) in rows {
+        if !fp.is_empty() || !x.is_empty() || !e.is_empty() {
+            adopt_peer_identity(conn, &uid, &fp, &x, &e)?;
+        } else {
+            conn.execute(
+                r#"UPDATE peers SET identity_changed=0,
+                       pending_tls_fingerprint=NULL,
+                       pending_x25519_public=NULL,
+                       pending_ed25519_public=NULL
+                   WHERE user_id=?1"#,
+                params![uid],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        n += 1;
+    }
+    Ok(n)
 }
 
 pub fn upsert_peer_with_team(
@@ -324,28 +366,16 @@ pub fn claim_unique_peer_ip(
     }
 
     let keep = get_peer(conn, keep_user_id)?;
-    let mut keep_pinned = keep
-        .as_ref()
-        .and_then(|p| p.get("pinned").and_then(|v| v.as_bool()))
-        .unwrap_or(false);
     let mut keep_blocked = keep
         .as_ref()
         .and_then(|p| p.get("blocked").and_then(|v| v.as_bool()))
         .unwrap_or(false);
 
-    for (dup_id, pinned, fp, blocked) in rows {
-        if pinned == 1 && !keep_pinned {
-            let use_fp = fp.unwrap_or_default();
-            if !use_fp.is_empty() {
-                let _ = pin_peer(conn, keep_user_id, &use_fp);
-            } else {
-                let _ = conn.execute(
-                    "UPDATE peers SET pinned=1 WHERE user_id=?1",
-                    params![keep_user_id],
-                );
-            }
-            keep_pinned = true;
-        }
+    for (dup_id, _pinned, _fp, blocked) in rows {
+        // Do NOT transfer `pinned` across different user_ids at the same IP.
+        // The displaced row's TLS fingerprint belongs to another identity; pinning
+        // it onto the new peer breaks /v1/deliver (fingerprint mismatch) while UDP
+        // discovery and typing can still look fine.
         if blocked == 1 && !keep_blocked {
             let _ = set_peer_blocked(conn, keep_user_id, true);
             keep_blocked = true;
@@ -482,6 +512,7 @@ pub fn pin_peer(conn: &Connection, user_id: &str, fingerprint: &str) -> Result<(
 
 pub fn list_peers(conn: &Connection) -> Result<Vec<Value>, String> {
     // Hot path (discovery ticker, who, UI). Dedupe only at startup / discover — not every call.
+    let _ = heal_unpinned_identity_flags(conn);
     list_peers_raw(conn)
 }
 
@@ -508,6 +539,37 @@ pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, Strin
     )
     .optional()
     .map_err(|e| e.to_string())
+}
+
+/// Active + pending Ed25519 pubs for inbound signature checks (pending covers reinstall TOFU).
+pub fn peer_ed25519_verify_keys(conn: &Connection, user_id: &str) -> Result<Vec<String>, String> {
+    if user_id.is_empty() {
+        return Ok(Vec::new());
+    }
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            r#"SELECT COALESCE(ed25519_public,''), pending_ed25519_public
+               FROM peers WHERE user_id=?1"#,
+            params![user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((active, pending)) = row else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    let active = active.trim();
+    if !active.is_empty() {
+        out.push(active.to_string());
+    }
+    if let Some(p) = pending {
+        let p = p.trim();
+        if !p.is_empty() && !out.iter().any(|k| k == p) {
+            out.push(p.to_string());
+        }
+    }
+    Ok(out)
 }
 
 pub fn update_peer_display_name_everywhere(
@@ -622,6 +684,7 @@ mod tests {
             true,
         )
         .unwrap();
+        pin_peer(&conn, "u1", "fp-old").unwrap();
         upsert_peer(
             &conn,
             "u1",
@@ -650,6 +713,73 @@ mod tests {
         assert_eq!(row["identity_changed"], false);
         assert_eq!(row["x25519_public"], "x-old");
         assert_eq!(row["tls_fingerprint"], "fp-old");
+    }
+
+    #[test]
+    fn unpinned_key_change_auto_adopts() {
+        let conn = mem();
+        upsert_peer(
+            &conn,
+            "u1",
+            "Ada",
+            "x-old",
+            "e-old",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-old"),
+            true,
+        )
+        .unwrap();
+        upsert_peer(
+            &conn,
+            "u1",
+            "Ada",
+            "x-new",
+            "e-new",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-new"),
+            true,
+        )
+        .unwrap();
+        let row = get_peer(&conn, "u1").unwrap().unwrap();
+        assert_eq!(row["identity_changed"], false);
+        assert_eq!(row["x25519_public"], "x-new");
+        assert_eq!(row["ed25519_public"], "e-new");
+        assert_eq!(row["tls_fingerprint"], "fp-new");
+        assert_eq!(row["pinned"], false);
+    }
+
+    #[test]
+    fn heal_clears_stuck_unpinned_identity_changed() {
+        let conn = mem();
+        upsert_peer(
+            &conn,
+            "u1",
+            "Ada",
+            "x-old",
+            "e-old",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-old"),
+            true,
+        )
+        .unwrap();
+        // Simulate older buggy state: unpinned + identity_changed with pending keys.
+        conn.execute(
+            r#"UPDATE peers SET identity_changed=1,
+                   pending_tls_fingerprint='fp-new',
+                   pending_x25519_public='x-new',
+                   pending_ed25519_public='e-new'
+               WHERE user_id='u1'"#,
+            [],
+        )
+        .unwrap();
+        assert_eq!(heal_unpinned_identity_flags(&conn).unwrap(), 1);
+        let row = get_peer(&conn, "u1").unwrap().unwrap();
+        assert_eq!(row["identity_changed"], false);
+        assert_eq!(row["x25519_public"], "x-new");
+        assert_eq!(row["tls_fingerprint"], "fp-new");
     }
 }
 

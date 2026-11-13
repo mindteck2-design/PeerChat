@@ -5882,8 +5882,8 @@ export function ChatScreen({
               </Button>
             }
           >
-            First contact with <strong>{activeDmPeer.display_name}</strong>. You can read their
-            messages now — tap Trust to pin their identity.
+            First contact with <strong>{activeDmPeer.display_name}</strong>. You can chat now —
+            tap Trust and compare fingerprints when you can (pins their certificate).
           </Alert>
         )}
 

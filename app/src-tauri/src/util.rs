@@ -2,9 +2,104 @@
 use crate::db;
 use crate::discovery;
 use crate::state::AppState;
+use base64::Engine;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
+
+/// Match JS `verifyMessageSignature` in crypto.ts — sign(sha256(`${cid}|${sid}|${nonce}|${ct}`)).
+pub(crate) fn verify_message_ed25519(msg: &Value, ed25519_public_b64: &str) -> Result<(), String> {
+    let ciphertext = msg
+        .get("ciphertext")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing ciphertext".to_string())?;
+    let nonce = msg
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing nonce".to_string())?;
+    let signature_b64 = msg
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "missing signature".to_string())?;
+    let conversation_id = msg
+        .get("conversation_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let sender_id = msg.get("sender_id").and_then(|v| v.as_str()).unwrap_or("");
+    let to_sign = format!("{conversation_id}|{sender_id}|{nonce}|{ciphertext}");
+    let digest = Sha256::digest(to_sign.as_bytes());
+    let pub_bytes = base64::engine::general_purpose::STANDARD
+        .decode(ed25519_public_b64.trim())
+        .map_err(|_| "bad ed25519 public key".to_string())?;
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature_b64.trim())
+        .map_err(|_| "bad signature encoding".to_string())?;
+    let pub_arr: [u8; 32] = pub_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "ed25519 public key must be 32 bytes".to_string())?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "ed25519 signature must be 64 bytes".to_string())?;
+    let vk = VerifyingKey::from_bytes(&pub_arr).map_err(|e| e.to_string())?;
+    let sig = Signature::from_bytes(&sig_arr);
+    vk.verify(digest.as_slice(), &sig)
+        .map_err(|_| "invalid message signature".to_string())
+}
+
+/// Verify against any known key for the sender (active or pending). Skip if unknown / unsigned.
+pub(crate) fn enforce_inbound_message_signature(
+    conn: &rusqlite::Connection,
+    msg: &Value,
+) -> Result<(), String> {
+    let sender_id = msg
+        .get("sender_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if sender_id.is_empty() {
+        return Ok(());
+    }
+    let has_sig = msg
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !has_sig {
+        // Older / control payloads without signatures stay accepted.
+        return Ok(());
+    }
+    let keys = db::peer_ed25519_verify_keys(conn, sender_id)?;
+    if keys.is_empty() {
+        // First contact — no stored key yet; TOFU via from_peer upsert later.
+        return Ok(());
+    }
+    let mut last_err = "invalid message signature".to_string();
+    for pk in &keys {
+        match verify_message_ed25519(msg, pk) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+/// True for typical corp LAN / VPN private ranges (not a hard block — UI hint only).
+pub(crate) fn is_corp_friendly_lan_ip(ip: &str) -> bool {
+    let Ok(addr) = ip.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match addr {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private() || v4.is_loopback() || matches!(v4.octets(), [100, 64..=127, _, _])
+        }
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
 
 pub(crate) fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -263,5 +358,49 @@ mod tests {
         assert_eq!(format_bytes(1023), "1023 B");
         assert!(format_bytes(MAX_FILE_BYTES as u64).contains("GB"));
         assert_eq!(format_bytes(10 * 1024 * 1024 * 1024), "10.0 GB");
+    }
+
+    #[test]
+    fn test_corp_friendly_lan_ip() {
+        assert!(is_corp_friendly_lan_ip("10.1.2.3"));
+        assert!(is_corp_friendly_lan_ip("192.168.0.10"));
+        assert!(is_corp_friendly_lan_ip("172.16.5.5"));
+        assert!(is_corp_friendly_lan_ip("100.64.1.2"));
+        assert!(!is_corp_friendly_lan_ip("8.8.8.8"));
+    }
+
+    #[test]
+    fn test_verify_message_ed25519_roundtrip() {
+        use ed25519_dalek::Signer;
+        use ed25519_dalek::SigningKey;
+
+        let mut rng_bytes = [0u8; 32];
+        getrandom::getrandom(&mut rng_bytes).unwrap();
+        let sk = SigningKey::from_bytes(&rng_bytes);
+        let pk = sk.verifying_key();
+        let cid = "dm:a:b";
+        let sid = "user-a";
+        let nonce = "bm9uY2U=";
+        let ct = "Y3Q=";
+        let to_sign = format!("{cid}|{sid}|{nonce}|{ct}");
+        let digest = Sha256::digest(to_sign.as_bytes());
+        let sig = sk.sign(digest.as_slice());
+        let msg = json!({
+            "conversation_id": cid,
+            "sender_id": sid,
+            "nonce": nonce,
+            "ciphertext": ct,
+            "signature": base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
+        });
+        let pk_b64 = base64::engine::general_purpose::STANDARD.encode(pk.as_bytes());
+        verify_message_ed25519(&msg, &pk_b64).unwrap();
+        let bad = json!({
+            "conversation_id": cid,
+            "sender_id": sid,
+            "nonce": nonce,
+            "ciphertext": "YmFk",
+            "signature": msg["signature"],
+        });
+        assert!(verify_message_ed25519(&bad, &pk_b64).is_err());
     }
 }

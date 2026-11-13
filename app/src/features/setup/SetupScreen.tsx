@@ -92,8 +92,9 @@ export function SetupScreen(props: {
             Your desk identity
           </Typography>
           <Typography color="text.secondary" sx={{ mb: 3 }}>
-            Peer-to-peer on your LAN. No central server — chats live on your PC (SQLite) and
-            deliver when peers are online. Your listening port is managed automatically.
+            Peer-to-peer on your corporate LAN/VPN. No central server — chats live on your PC
+            (SQLite) and deliver when peers are online. When you first chat with someone, compare
+            fingerprints before tapping Trust (Settings shows yours).
           </Typography>
           <Stack spacing={2}>
             <TextField

@@ -132,6 +132,51 @@ pub fn my_fingerprint(state: State<AppState>) -> String {
     state.fingerprint.lock().clone()
 }
 
+/// Keep SQLite profile pubs aligned with the JS identity used to sign messages.
+/// Drift made beacons advertise key A while the UI signed with key B — peers then
+/// failed signature checks / decrypt while /v1/typing (unsigned) still worked.
+#[tauri::command]
+pub fn sync_profile_keys(
+    state: State<AppState>,
+    x25519_public: String,
+    ed25519_public: String,
+) -> Result<Value, String> {
+    let x = x25519_public.trim();
+    let e = ed25519_public.trim();
+    if x.is_empty() || e.is_empty() {
+        return Err("public keys required".into());
+    }
+    let conn = state.db.lock();
+    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let id = profile["id"].as_str().unwrap_or("");
+    let cur_x = profile["x25519_public"].as_str().unwrap_or("");
+    let cur_e = profile["ed25519_public"].as_str().unwrap_or("");
+    if cur_x == x && cur_e == e {
+        return Ok(profile);
+    }
+    db::upsert_profile(
+        &conn,
+        id,
+        profile["display_name"].as_str().unwrap_or(""),
+        x,
+        e,
+        profile["listen_port"].as_i64().unwrap_or(9876),
+        profile["team"].as_str().unwrap_or(""),
+    )?;
+    db::get_profile(&conn)?.ok_or_else(|| "profile missing".into())
+}
+
+/// Soft network posture for Settings — never blocks messaging.
+#[tauri::command]
+pub fn network_hint() -> Value {
+    let lan_ip = discovery::lan_ip();
+    let corp_friendly = util::is_corp_friendly_lan_ip(&lan_ip);
+    json!({
+        "lan_ip": lan_ip,
+        "corp_friendly": corp_friendly,
+    })
+}
+
 #[tauri::command]
 pub fn accept_pending_identity(state: State<AppState>, user_id: String) -> Result<(), String> {
     let conn = state.db.lock();

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Box, CircularProgress } from "@mui/material";
 import { APP_VERSION_FALLBACK, appVersion } from "../version";
 import { peerApi, type Profile } from "../peer";
-import { type Identity } from "../crypto";
+import { exportPublic, type Identity } from "../crypto";
 import { getOrCreateIdentity } from "../storage";
 import { SetupScreen } from "../features/setup/SetupScreen";
 import { ChatScreen } from "./ChatScreen";
@@ -30,8 +30,9 @@ export default function App() {
       } catch (e) {
         appLog("warn", "setTitle failed (browser preview?)", e);
       }
+      let id: Identity | null = null;
       try {
-        const id = await getOrCreateIdentity();
+        id = await getOrCreateIdentity();
         setIdentity(id);
         appLog("info", "identity ready");
       } catch (e) {
@@ -40,7 +41,23 @@ export default function App() {
         return;
       }
       try {
-        const p = await peerApi.getProfile();
+        let p = await peerApi.getProfile();
+        if (p && id) {
+          // Beacons advertise SQLite pubs; messages are signed with the store identity.
+          // Keep them identical or peers see typing but never get delivered ciphertext.
+          const pubs = exportPublic(id);
+          if (
+            p.x25519_public !== pubs.x25519_public ||
+            p.ed25519_public !== pubs.ed25519_public
+          ) {
+            try {
+              p = await peerApi.syncProfileKeys(pubs.x25519_public, pubs.ed25519_public);
+              appLog("warn", "synced profile keys to match local identity");
+            } catch (e) {
+              appLog("warn", "syncProfileKeys failed", e);
+            }
+          }
+        }
         if (p) {
           setProfile(p);
           setScreen("chat");

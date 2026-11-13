@@ -66,8 +66,19 @@ pub(crate) async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
             continue;
         };
         let pinned = peer["pinned"].as_bool().unwrap_or(false);
-        let identity_changed = peer["identity_changed"].as_bool().unwrap_or(false);
-        if identity_changed {
+        let mut identity_changed = peer["identity_changed"].as_bool().unwrap_or(false);
+        // Only pinned peers require an explicit Accept. Unpinned TOFU must not stall
+        // the outbox (typing never checked this flag — classic "online + typing, single ticks").
+        if identity_changed && !pinned {
+            let conn = db.lock();
+            let _ = db::heal_unpinned_identity_flags(&conn);
+            identity_changed = db::get_peer(&conn, &recipient)
+                .ok()
+                .flatten()
+                .and_then(|p| p["identity_changed"].as_bool())
+                .unwrap_or(false);
+        }
+        if identity_changed && pinned {
             let conn = db.lock();
             let _ = db::bump_outbox_error(
                 &conn,

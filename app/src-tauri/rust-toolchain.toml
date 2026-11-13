@@ -1,5 +1,5 @@
 # Keep in sync with .github/workflows/build-installers.yml.
-# rustc ≥1.85 fails to compile xcap 0.0.14 Wayland (dbus never-type fallback).
+# ≥1.90 for current Tauri 2.x lockfile; time-core needs edition2024 (≥1.85); xcap ≥0.2 for Wayland.
 [toolchain]
-channel = "1.82.0"
+channel = "1.90.0"
 components = ["rustfmt", "clippy"]
