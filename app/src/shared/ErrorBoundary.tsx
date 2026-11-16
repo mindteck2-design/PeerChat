@@ -1,12 +1,12 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { Box, Button, Typography } from "@mui/material";
-import { appLog, appLogPath } from "./appLog";
+import { appLog, appErrorLogPath, appLogPath } from "./appLog";
 
 type Props = { children: ReactNode };
-type State = { error: Error | null; logPath: string | null };
+type State = { error: Error | null; logPath: string | null; errorLogPath: string | null };
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null, logPath: null };
+  state: State = { error: null, logPath: null, errorLogPath: null };
 
   static getDerivedStateFromError(error: Error): Partial<State> {
     return { error };
@@ -18,11 +18,13 @@ export class ErrorBoundary extends Component<Props, State> {
       stack: error.stack,
       componentStack: info.componentStack,
     });
-    void appLogPath().then((logPath) => this.setState({ logPath }));
+    void Promise.all([appLogPath(), appErrorLogPath()]).then(([logPath, errorLogPath]) =>
+      this.setState({ logPath, errorLogPath })
+    );
   }
 
   render() {
-    const { error, logPath } = this.state;
+    const { error, logPath, errorLogPath } = this.state;
     if (!error) return this.props.children;
 
     return (
@@ -43,14 +45,14 @@ export class ErrorBoundary extends Component<Props, State> {
           <Typography color="text.secondary" sx={{ mb: 2 }}>
             {error.message}
           </Typography>
-          {logPath && (
+          {(errorLogPath || logPath) && (
             <Typography
               variant="body2"
               sx={{ mb: 2, wordBreak: "break-all", fontFamily: "monospace" }}
             >
               Details were written to:{" "}
               <Box component="span" fontWeight={700}>
-                {logPath}
+                {errorLogPath || logPath}
               </Box>
             </Typography>
           )}

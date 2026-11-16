@@ -277,26 +277,80 @@ fn log_file_path(state: &AppState) -> PathBuf {
     state.data_dir.join("peerchat.log")
 }
 
+fn error_log_file_path(state: &AppState) -> PathBuf {
+    state.data_dir.join("peerchat-error.log")
+}
+
+/// Rotate a log file when it grows too large (shared Windows + Linux).
+fn rotate_log_if_needed(path: &std::path::Path) {
+    const MAX_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() < MAX_BYTES {
+        return;
+    }
+    // peerchat.log → peerchat.log.1 ; peerchat-error.log → peerchat-error.log.1
+    let backup = path.with_file_name(format!(
+        "{}.1",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("peerchat.log")
+    ));
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::rename(path, &backup);
+}
+
+fn append_line_to(path: &std::path::Path, cleaned: &str) -> Result<(), String> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    rotate_log_if_needed(path);
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "{cleaned}").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn app_log_path(state: State<AppState>) -> Result<String, String> {
     Ok(log_file_path(&state).to_string_lossy().into_owned())
 }
 
 #[tauri::command]
+pub fn app_error_log_path(state: State<AppState>) -> Result<String, String> {
+    Ok(error_log_file_path(&state).to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 pub fn append_app_log(state: State<AppState>, line: String) -> Result<(), String> {
-    use std::io::Write;
-    let path = log_file_path(&state);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
     let cleaned = line.replace('\r', " ").replace('\n', " ");
-    writeln!(f, "{cleaned}").map_err(|e| e.to_string())?;
+    append_line_to(&log_file_path(&state), &cleaned)?;
+    // Mirror warn/error into a dedicated file for easier later debugging.
+    let upper = cleaned.to_ascii_uppercase();
+    if upper.contains("[ERROR]") || upper.contains("[WARN]") {
+        let _ = append_line_to(&error_log_file_path(&state), &cleaned);
+    }
     Ok(())
+}
+
+#[tauri::command]
+pub fn windows_firewall_status(
+    state: State<AppState>,
+) -> runtime::bootstrap::WindowsFirewallStatus {
+    runtime::bootstrap::windows_firewall_status(&state.data_dir)
+}
+
+#[tauri::command]
+pub fn enable_windows_firewall(state: State<AppState>) -> Result<bool, String> {
+    runtime::bootstrap::enable_windows_firewall_rules(&state.data_dir)
+}
+
+#[tauri::command]
+pub fn decline_windows_firewall(state: State<AppState>) -> Result<(), String> {
+    runtime::bootstrap::decline_windows_firewall(&state.data_dir)
 }
 
 

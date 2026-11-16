@@ -6,8 +6,67 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
+
+/// App data dir for backend error-log writes (set once at startup).
+static ERROR_LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn set_error_log_dir(dir: PathBuf) {
+    let _ = ERROR_LOG_DIR.set(dir);
+}
+
+/// Append a backend error/warn line to `peerchat-error.log` (and stderr).
+pub(crate) fn log_error(message: impl AsRef<str>) {
+    let msg = message.as_ref();
+    eprintln!("{msg}");
+    let Some(dir) = ERROR_LOG_DIR.get() else {
+        return;
+    };
+    let path = dir.join("peerchat-error.log");
+    write_error_log_line(&path, "ERROR", msg);
+}
+
+pub(crate) fn log_warn(message: impl AsRef<str>) {
+    let msg = message.as_ref();
+    eprintln!("{msg}");
+    let Some(dir) = ERROR_LOG_DIR.get() else {
+        return;
+    };
+    let path = dir.join("peerchat-error.log");
+    write_error_log_line(&path, "WARN", msg);
+}
+
+fn write_error_log_line(path: &Path, level: &str, message: &str) {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Light rotate (same 2 MiB cap as settings append).
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() >= 2 * 1024 * 1024 {
+            let backup = path.with_file_name(format!(
+                "{}.1",
+                path.file_name().and_then(|s| s.to_str()).unwrap_or("peerchat-error.log")
+            ));
+            let _ = std::fs::remove_file(&backup);
+            let _ = std::fs::rename(path, &backup);
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let cleaned = message.replace('\r', " ").replace('\n', " ");
+        let _ = writeln!(
+            f,
+            "[{}] [{level}] {cleaned}",
+            chrono::Utc::now().to_rfc3339()
+        );
+    }
+}
 
 /// Match JS `verifyMessageSignature` in crypto.ts — sign(sha256(`${cid}|${sid}|${nonce}|${ct}`)).
 pub(crate) fn verify_message_ed25519(msg: &Value, ed25519_public_b64: &str) -> Result<(), String> {

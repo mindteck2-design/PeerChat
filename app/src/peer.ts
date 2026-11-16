@@ -448,6 +448,12 @@ export const peerApi = {
   installShellExtension: (exePath: string) => inv<void>("install_shell_extension", { exePath }),
   uninstallShellExtension: () => inv<void>("uninstall_shell_extension"),
   shellExtensionInstalled: () => inv<boolean>("shell_extension_installed"),
+  windowsFirewallStatus: () =>
+    inv<{ available: boolean; ok: boolean; declined: boolean; needed: boolean }>(
+      "windows_firewall_status"
+    ),
+  enableWindowsFirewall: () => inv<boolean>("enable_windows_firewall"),
+  declineWindowsFirewall: () => inv<void>("decline_windows_firewall"),
   beginScreenshotSession: () => inv<{ sessionId: string }>("begin_screenshot_session"),
   completeRegionCapture: (
     sessionId: string,

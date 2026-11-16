@@ -1383,15 +1383,15 @@ export function ChatScreen({
   useEffect(() => {
     let cancelled = false;
     const unsubs: Array<() => void> = [];
+    /** Debounce + single-flight per conversation so board wrap storms don't freeze the UI. */
+    const keyUpdateTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const keyUpdateInflight = new Map<string, Promise<void>>();
+    const keyUpdateBurstLogged = new Set<string>();
 
-    listen<{ conversation_id?: string; member_id?: string }>("group-key-updated", (ev) => {
-      const cid = ev.payload?.conversation_id || "";
-      if (!cid) return;
-      appLog("info", "[GroupCrypto:event:group-key-updated]", {
-        group_id: cid,
-        member_id: ev.payload?.member_id || profile.id,
-      });
-      void (async () => {
+    const runGroupKeyUpdate = (cid: string) => {
+      const existing = keyUpdateInflight.get(cid);
+      if (existing) return existing;
+      const work = (async () => {
         try {
           await syncGroupKeyIfRotated(cid);
           await ensureGroupKey(cid);
@@ -1400,8 +1400,35 @@ export function ChatScreen({
             group_id: cid,
             err: String(err),
           });
+        } finally {
+          keyUpdateInflight.delete(cid);
         }
       })();
+      keyUpdateInflight.set(cid, work);
+      return work;
+    };
+
+    listen<{ conversation_id?: string; member_id?: string }>("group-key-updated", (ev) => {
+      const cid = ev.payload?.conversation_id || "";
+      if (!cid) return;
+      // Log once per burst/window instead of every emit (was tens of thousands of IPC writes).
+      if (!keyUpdateBurstLogged.has(cid)) {
+        keyUpdateBurstLogged.add(cid);
+        appLog("debug", "[GroupCrypto:event:group-key-updated:burst]", {
+          group_id: cid,
+          member_id: ev.payload?.member_id || profile.id,
+        });
+        setTimeout(() => keyUpdateBurstLogged.delete(cid), 5000);
+      }
+      const prev = keyUpdateTimers.get(cid);
+      if (prev) clearTimeout(prev);
+      keyUpdateTimers.set(
+        cid,
+        setTimeout(() => {
+          keyUpdateTimers.delete(cid);
+          void runGroupKeyUpdate(cid);
+        }, 400)
+      );
     }).then((fn) => {
       if (cancelled) fn();
       else unsubs.push(fn);
@@ -1422,6 +1449,20 @@ export function ChatScreen({
       });
       void (async () => {
         try {
+          // Only re-wrap for people already on the roster — never enroll outsiders.
+          let memberIds: string[] = [];
+          try {
+            memberIds = await peerApi.memberIds(cid);
+          } catch {
+            /* ignore */
+          }
+          if (!memberIds.includes(requesterId)) {
+            appLog("warn", "[GroupCrypto:repair:not_member]", {
+              group_id: cid,
+              requester_id: requesterId,
+            });
+            return;
+          }
           const gk = await ensureGroupKey(cid);
           if (!gk) {
             appLog("warn", "[GroupCrypto:repair:no_local_key]", {
@@ -1473,6 +1514,8 @@ export function ChatScreen({
 
     return () => {
       cancelled = true;
+      for (const t of keyUpdateTimers.values()) clearTimeout(t);
+      keyUpdateTimers.clear();
       for (const u of unsubs) u();
     };
     // identity / profile.id / ensureGroupKey / syncGroupKeyIfRotated are stable enough via refs+hooks

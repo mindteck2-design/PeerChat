@@ -669,81 +669,135 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     let _ = db::set_conversation_title(&conn, group_cid, title);
                 }
 
-                // Ingest full members roster if attached to message or event
+                // Roster / wrap mutations are trusted only from known members (or first
+                // invite bootstrap when this device has no roster yet).
+                let local_member_count =
+                    db::member_ids(&conn, group_cid).ok().map(|v| v.len()).unwrap_or(0);
+                // Only the first invite (empty local roster) may bootstrap membership.
+                let bootstrapping = local_member_count == 0;
+                let sender_already_member = !deliver_sender_id.is_empty()
+                    && db::is_conversation_member(&conn, group_cid, deliver_sender_id)
+                        .unwrap_or(false);
+                let sender_is_admin = sender_already_member
+                    && db::is_group_admin(&conn, group_cid, deliver_sender_id).unwrap_or(false);
+
                 let inbound_members = payload
                     .get("members")
                     .or_else(|| payload.pointer("/group_event/members"))
                     .and_then(|v| v.as_array());
+                let mut inbound_keep_ids: Vec<String> = Vec::new();
+                let mut inbound_sender_admin = false;
                 if let Some(arr) = inbound_members {
-                    let mut upserted_count = 0;
-                    let mut keep_ids: Vec<String> = Vec::new();
                     for m in arr {
                         let uid = m.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
                         if uid.is_empty() {
                             continue;
                         }
-                        keep_ids.push(uid.to_string());
-                        let name = m.get("display_name").and_then(|v| v.as_str());
-                        let _ = db::upsert_member(&conn, group_cid, uid, None, name);
-                        if let Some(role) = m.get("role").and_then(|v| v.as_str()) {
-                            let _ = db::set_member_role(&conn, group_cid, uid, role);
-                        }
-                        upserted_count += 1;
-                    }
-                    // Authoritative roster: drop stale local members so peers converge.
-                    if keep_ids.len() >= 2 {
-                        match db::reconcile_members(&conn, group_cid, &keep_ids) {
-                            Ok(removed) if removed > 0 => {
-                                println!(
-                                    "[GroupSync:deliver:roster] group_id={} reconciled removed_stale={}",
-                                    group_cid, removed
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "[GroupSync:deliver:roster:reconcile_err] group_id={} err={}",
-                                    group_cid, e
-                                );
-                            }
-                            _ => {}
+                        inbound_keep_ids.push(uid.to_string());
+                        if uid == deliver_sender_id
+                            && m.get("role").and_then(|v| v.as_str()) == Some("admin")
+                        {
+                            inbound_sender_admin = true;
                         }
                     }
-                    println!(
-                        "[GroupSync:deliver:roster] group_id={} ingested {} members from payload",
-                        group_cid, upserted_count
-                    );
+                }
+                let trust_roster = bootstrapping || sender_is_admin || inbound_sender_admin;
+                if trust_roster {
+                    if let Some(arr) = inbound_members {
+                        let mut upserted_count = 0;
+                        for m in arr {
+                            let uid = m.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                            if uid.is_empty() {
+                                continue;
+                            }
+                            let name = m.get("display_name").and_then(|v| v.as_str());
+                            let _ = db::upsert_member(&conn, group_cid, uid, None, name);
+                            if let Some(role) = m.get("role").and_then(|v| v.as_str()) {
+                                let _ = db::set_member_role(&conn, group_cid, uid, role);
+                            }
+                            upserted_count += 1;
+                        }
+                        // Deletions only from an admin roster (or bootstrap invite).
+                        if inbound_keep_ids.len() >= 2 && (sender_is_admin || inbound_sender_admin || bootstrapping)
+                        {
+                            match db::reconcile_members(&conn, group_cid, &inbound_keep_ids) {
+                                Ok(removed) if removed > 0 => {
+                                    println!(
+                                        "[GroupSync:deliver:roster] group_id={} reconciled removed_stale={}",
+                                        group_cid, removed
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::util::log_error(format!(
+                                        "[GroupSync:deliver:roster:reconcile_err] group_id={} err={}",
+                                        group_cid, e
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                        println!(
+                            "[GroupSync:deliver:roster] group_id={} ingested {} members from payload",
+                            group_cid, upserted_count
+                        );
+                    }
                 }
 
-                // Ingest sender identity as a member of this group
-                if !deliver_sender_id.is_empty() {
+                let sender_in_inbound = !deliver_sender_id.is_empty()
+                    && inbound_keep_ids.iter().any(|id| id == deliver_sender_id);
+                let me_in_inbound =
+                    !my_id.is_empty() && inbound_keep_ids.iter().any(|id| id == &my_id);
+
+                // Do not let strangers self-enroll; invite bootstrap lists them in roster.
+                if !deliver_sender_id.is_empty()
+                    && (sender_already_member || (trust_roster && sender_in_inbound))
+                {
                     let sender_name = payload.pointer("/from_peer/display_name").and_then(|v| v.as_str());
                     let _ = db::upsert_member(&conn, group_cid, deliver_sender_id, None, sender_name);
                 }
 
-                // Ingest my_id as a member of this group
-                if !my_id.is_empty() {
+                if !my_id.is_empty()
+                    && (db::is_conversation_member(&conn, group_cid, my_id).unwrap_or(false)
+                        || (trust_roster && me_in_inbound))
+                {
                     let _ = db::upsert_member(&conn, group_cid, my_id, None, None);
                 }
 
-                // Update my wrapped_group_key if provided
+                // Update my wrapped_group_key only when the sender is a trusted member.
+                let sender_trusted_for_wrap = !deliver_sender_id.is_empty()
+                    && (db::is_conversation_member(&conn, group_cid, deliver_sender_id)
+                        .unwrap_or(false)
+                        || (trust_roster && sender_in_inbound));
                 let inbound_wrap = payload
                     .get("wrapped_group_key")
                     .or_else(|| payload.pointer("/group_event/wrapped_group_key"))
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty());
                 if let Some(wrap) = inbound_wrap {
-                    let _ = db::upsert_member(&conn, group_cid, my_id, Some(wrap), None);
-                    println!(
-                        "[GroupSync:deliver:wrap] updated wrapped_group_key for my_id={} in group_id={} wrap_len={}",
-                        my_id,
-                        group_cid,
-                        wrap.len()
-                    );
-                    pending_group_key_updated = Some(json!({
-                        "conversation_id": group_cid,
-                        "member_id": my_id,
-                        "source": "deliver",
-                    }));
+                    if sender_trusted_for_wrap
+                        && db::is_conversation_member(&conn, group_cid, my_id).unwrap_or(false)
+                    {
+                        let _ = db::upsert_member(&conn, group_cid, my_id, Some(wrap), None);
+                        println!(
+                            "[GroupSync:deliver:wrap] updated wrapped_group_key for my_id={} in group_id={} wrap_len={}",
+                            my_id,
+                            group_cid,
+                            wrap.len()
+                        );
+                        pending_group_key_updated = Some(json!({
+                            "conversation_id": group_cid,
+                            "member_id": my_id,
+                            "source": "deliver",
+                        }));
+                    } else {
+                        println!(
+                            "[GroupSync:deliver:wrap:rejected] group_id={} sender={} trusted={} i_am_member={}",
+                            group_cid,
+                            deliver_sender_id,
+                            sender_trusted_for_wrap,
+                            db::is_conversation_member(&conn, group_cid, my_id).unwrap_or(false)
+                        );
+                    }
                 }
             }
 
@@ -756,7 +810,11 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                 let op = ev.get("op").and_then(|v| v.as_str()).unwrap_or("");
                 let is_admin = !deliver_sender_id.is_empty()
                     && db::is_group_admin(&conn, cid, deliver_sender_id).unwrap_or(false);
-                if !cid.is_empty() && (op == "sync" || op == "add") {
+                if !cid.is_empty()
+                    && (op == "sync" || op == "add")
+                    && (is_admin
+                        || db::member_ids(&conn, cid).ok().map(|v| v.len()).unwrap_or(0) == 0)
+                {
                     if let Some(mca) = ev
                         .get("members_can_add")
                         .and_then(|v| v.as_bool())
@@ -766,53 +824,63 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     }
                 }
                 if op == "request_sync" && !cid.is_empty() && !deliver_sender_id.is_empty() {
-                    let title = db::conversation_title(&conn, cid)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| "Group".to_string());
-                    let roster = Value::Array(db::list_members(&conn, cid).unwrap_or_default());
-                    let wrap = db::get_wrapped_group_key(&conn, cid, deliver_sender_id).ok().flatten();
-                    let profile_opt = db::get_profile(&conn).ok().flatten();
-                    if let Some(profile) = profile_opt {
-                        let state = app.state::<crate::state::AppState>();
-                        let fingerprint = state.fingerprint.lock().clone();
-                        let from_peer = from_peer_json(&profile, &fingerprint);
+                    let requester_is_member =
+                        db::is_conversation_member(&conn, cid, deliver_sender_id).unwrap_or(false);
+                    if !requester_is_member {
                         println!(
-                            "[GroupSync:handle_request_sync] received request_sync from sender={} group_id={} has_wrap={}",
-                            deliver_sender_id,
-                            cid,
-                            wrap.is_some()
+                            "[GroupSync:handle_request_sync:rejected] group_id={} sender={} not a member",
+                            cid, deliver_sender_id
                         );
-                        if wrap.is_some() {
-                            let _ = enqueue_group_event(
-                                &conn,
-                                &from_peer,
-                                cid,
-                                deliver_sender_id,
-                                &title,
-                                wrap,
-                                &roster,
-                                "sync",
-                                None,
-                            );
-                        } else {
-                            // No stored wrap for requester — ask local UI to re-wrap from plaintext key.
+                    } else {
+                        let title = db::conversation_title(&conn, cid)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| "Group".to_string());
+                        let roster = Value::Array(db::list_members(&conn, cid).unwrap_or_default());
+                        let wrap =
+                            db::get_wrapped_group_key(&conn, cid, deliver_sender_id).ok().flatten();
+                        let profile_opt = db::get_profile(&conn).ok().flatten();
+                        if let Some(profile) = profile_opt {
+                            let state = app.state::<crate::state::AppState>();
+                            let fingerprint = state.fingerprint.lock().clone();
+                            let from_peer = from_peer_json(&profile, &fingerprint);
                             println!(
-                                "[GroupSync:handle_request_sync:needs_repair] group_id={} requester={} — emitting group-sync-request",
-                                cid, deliver_sender_id
+                                "[GroupSync:handle_request_sync] received request_sync from sender={} group_id={} has_wrap={}",
+                                deliver_sender_id,
+                                cid,
+                                wrap.is_some()
                             );
-                            pending_group_sync_request = Some(json!({
-                                "conversation_id": cid,
-                                "requester_id": deliver_sender_id,
-                                "requester_name": payload
-                                    .pointer("/from_peer/display_name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(""),
-                            }));
+                            if wrap.is_some() {
+                                let _ = enqueue_group_event(
+                                    &conn,
+                                    &from_peer,
+                                    cid,
+                                    deliver_sender_id,
+                                    &title,
+                                    wrap,
+                                    &roster,
+                                    "sync",
+                                    None,
+                                );
+                            } else {
+                                // No stored wrap for requester — ask local UI to re-wrap from plaintext key.
+                                println!(
+                                    "[GroupSync:handle_request_sync:needs_repair] group_id={} requester={} — emitting group-sync-request",
+                                    cid, deliver_sender_id
+                                );
+                                pending_group_sync_request = Some(json!({
+                                    "conversation_id": cid,
+                                    "requester_id": deliver_sender_id,
+                                    "requester_name": payload
+                                        .pointer("/from_peer/display_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(""),
+                                }));
+                            }
                         }
                     }
                 }
-                if op == "rename" && !cid.is_empty() {
+                if op == "rename" && !cid.is_empty() && is_admin {
                     let title = payload
                         .get("group_title")
                         .and_then(|v| v.as_str())

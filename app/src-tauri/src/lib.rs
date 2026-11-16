@@ -61,6 +61,7 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&data).ok();
+            crate::util::set_error_log_dir(data.clone());
             let db_path = data.join("peerchat.sqlite");
             let conn = db::open(&db_path)?;
             let shared: SharedDb = Arc::new(Mutex::new(conn));
@@ -362,7 +363,11 @@ pub fn run() {
             uninstall_shell_extension,
             shell_extension_installed,
             app_log_path,
+            app_error_log_path,
             append_app_log,
+            windows_firewall_status,
+            enable_windows_firewall,
+            decline_windows_firewall,
             begin_screenshot_session,
             capture_overlay_mode,
             show_capture_overlay,

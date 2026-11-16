@@ -21,6 +21,7 @@ echo  Installing for current user only - no administrator rights required.
 echo  Existing chat data will NOT be touched.
 echo.
 
+rem Main installer UI stays visible; firewall helpers inside the .ps1 use Hidden windows.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-PeerChat.ps1" -SourceExe "%~dp0PeerChat.exe"
 set ERR=%ERRORLEVEL%
 

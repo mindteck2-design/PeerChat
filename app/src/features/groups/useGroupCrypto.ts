@@ -217,10 +217,7 @@ export function useGroupCrypto(opts: {
       const wrap = await peerApi.getGroupKey(convId);
       const current = groupKeysRef.current[convId];
       if (!wrap) {
-        appLog("info", "[GroupCrypto:syncGroupKeyIfRotated:no_wrap]", {
-          group_id: convId,
-          member_id: profileIdRef.current,
-        });
+        // Missing wrap is common during board storms — avoid info-level disk spam.
         return;
       }
       try {
@@ -231,7 +228,7 @@ export function useGroupCrypto(opts: {
           setGroupKeyHistory((h) => ({ ...h, [convId]: hist }));
           groupKeysRef.current = { ...groupKeysRef.current, [convId]: gk };
           setGroupKeys((g) => ({ ...g, [convId]: gk }));
-          appLog("info", "[GroupCrypto:syncGroupKeyIfRotated:loaded]", {
+          appLog("debug", "[GroupCrypto:syncGroupKeyIfRotated:loaded]", {
             group_id: convId,
             member_id: profileIdRef.current,
             key_id: keyId(gk),
@@ -239,15 +236,17 @@ export function useGroupCrypto(opts: {
           });
           return;
         }
-        if (!groupKeysEqual(current, gk)) {
-          appLog("info", "[GroupCrypto:syncGroupKeyIfRotated:rotated]", {
-            group_id: convId,
-            member_id: profileIdRef.current,
-            old_key_id: keyId(current),
-            new_key_id: keyId(gk),
-          });
-          await adoptGroupKey(convId, gk);
+        // Unchanged key: do not adopt, re-wrap, or log (stops feedback storms).
+        if (groupKeysEqual(current, gk)) {
+          return;
         }
+        appLog("info", "[GroupCrypto:syncGroupKeyIfRotated:rotated]", {
+          group_id: convId,
+          member_id: profileIdRef.current,
+          old_key_id: keyId(current),
+          new_key_id: keyId(gk),
+        });
+        await adoptGroupKey(convId, gk);
       } catch (err) {
         appLog("warn", "[GroupCrypto:syncGroupKeyIfRotated:unwrap_err]", {
           group_id: convId,

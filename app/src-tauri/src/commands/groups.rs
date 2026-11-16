@@ -86,7 +86,9 @@ pub fn create_group(
             "sync",
             None,
         ) {
-            eprintln!("[GroupSync:create_group:err] failed to enqueue sync for mid={mid} group_id={id}: {e}");
+            crate::util::log_error(format!(
+                "[GroupSync:create_group:err] failed to enqueue sync for mid={mid} group_id={id}: {e}"
+            ));
         } else {
             notified_count += 1;
             println!(
@@ -256,23 +258,15 @@ pub fn repair_group_member_key(
     if !db::is_conversation_member(&conn, &conversation_id, &me)? {
         return Err("not a member of this group".into());
     }
+    // Never enroll strangers via repair — they must be added through add_group_members.
     if !db::is_conversation_member(&conn, &conversation_id, &user_id)? {
-        // Requester may not be in our roster yet — still enroll them with the wrap.
-        let name = db::display_name_for(&conn, &user_id);
-        db::upsert_member(
-            &conn,
-            &conversation_id,
-            &user_id,
-            Some(wrapped_group_key.as_str()),
-            Some(name.as_str()),
-        )?;
-    } else {
-        db::update_member_wraps(
-            &conn,
-            &conversation_id,
-            &[(user_id.clone(), wrapped_group_key.clone())],
-        )?;
+        return Err("target is not a member of this group".into());
     }
+    db::update_member_wraps(
+        &conn,
+        &conversation_id,
+        &[(user_id.clone(), wrapped_group_key.clone())],
+    )?;
     let title = db::conversation_title(&conn, &conversation_id)?.unwrap_or_else(|| "Group".into());
     let roster = Value::Array(db::list_members(&conn, &conversation_id)?);
     let from_peer = from_peer_json(&profile, &state.fingerprint.lock());

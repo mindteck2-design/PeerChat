@@ -52,6 +52,7 @@ import {
   type NotificationSoundId,
 } from "../../shared/sound";
 import { ENTERPRISE_ROLES, canBroadcastRole } from "../profile/roles";
+import { appErrorLogPath, appLogPath } from "../../shared/appLog";
 
 function sanitizeNameOrTeam(val: string): string {
   return val.replace(/[^a-zA-Z0-9 _-]/g, "");
@@ -100,18 +101,29 @@ export function SettingsScreen(props: {
   // Network tab state
   const [scanFreq, setScanFreq] = useState("1m");
   const [scanningNow, setScanningNow] = useState(false);
+  const [fwStatus, setFwStatus] = useState<{
+    available: boolean;
+    ok: boolean;
+    declined: boolean;
+    needed: boolean;
+  } | null>(null);
+  const [fwBusy, setFwBusy] = useState(false);
 
   // Storage & Security tab state
   const [fp, setFp] = useState("");
   const [downloadDir, setDownloadDir] = useState("");
   const [status, setStatus] = useState("");
   const [netHint, setNetHint] = useState<{ lan_ip: string; corp_friendly: boolean } | null>(null);
+  const [diagLogPath, setDiagLogPath] = useState("");
+  const [diagErrorLogPath, setDiagErrorLogPath] = useState("");
 
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
   const accent = theme.palette.primary.main;
 
   useEffect(() => {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
+    void appLogPath().then((p) => setDiagLogPath(p || "")).catch(() => {});
+    void appErrorLogPath().then((p) => setDiagErrorLogPath(p || "")).catch(() => {});
     peerApi
       .networkHint()
       .then(setNetHint)
@@ -119,6 +131,10 @@ export function SettingsScreen(props: {
     peerApi.getNotificationsEnabled().then(setNotifOn).catch(() => setNotifOn(true));
     peerApi.getAppSetting("download_dir").then((v) => setDownloadDir(v || "")).catch(() => {});
     peerApi.shellExtensionInstalled().then(setShellExt).catch(() => setShellExt(false));
+    peerApi
+      .windowsFirewallStatus()
+      .then(setFwStatus)
+      .catch(() => setFwStatus({ available: false, ok: true, declined: false, needed: false }));
     peerApi
       .getAutostartEnabled()
       .then((enabled) => setAutostartOn(enabled))
@@ -674,50 +690,52 @@ export function SettingsScreen(props: {
             </Typography>
           </Paper>
 
-          {/* Windows Shell Integration */}
-          <Paper sx={cardSx} elevation={0}>
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
-              <LinkRoundedIcon sx={{ color: accent, fontSize: 22 }} />
-              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
-                File Explorer Context Menu
-              </Typography>
-            </Box>
-            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
-                'Share in PeerChat' on right-click
-              </Typography>
-              <Switch
-                checked={shellExt}
-                disabled={shellBusy}
-                onChange={async (_, v) => {
-                  setShellBusy(true);
-                  try {
-                    if (v) {
-                      const exePath =
-                        (window as any).__TAURI_INTERNALS__?.metadata?.currentExe ||
-                        (window as any).__TAURI__?.metadata?.currentExe ||
-                        "PeerChat.exe";
-                      await peerApi.installShellExtension(exePath);
-                      setShellExt(true);
-                      setStatus("Right-click 'Share in PeerChat' registered");
-                    } else {
-                      await peerApi.uninstallShellExtension();
-                      setShellExt(false);
-                      setStatus("Right-click 'Share in PeerChat' removed");
+          {/* Windows Shell Integration — omit on Linux */}
+          {fwStatus?.available === true && (
+            <Paper sx={cardSx} elevation={0}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, mb: 1.75 }}>
+                <LinkRoundedIcon sx={{ color: accent, fontSize: 22 }} />
+                <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
+                  File Explorer Context Menu
+                </Typography>
+              </Box>
+              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <Typography sx={{ fontSize: "0.875rem", fontWeight: 500, color: bodyColor }}>
+                  'Share in PeerChat' on right-click
+                </Typography>
+                <Switch
+                  checked={shellExt}
+                  disabled={shellBusy}
+                  onChange={async (_, v) => {
+                    setShellBusy(true);
+                    try {
+                      if (v) {
+                        const exePath =
+                          (window as any).__TAURI_INTERNALS__?.metadata?.currentExe ||
+                          (window as any).__TAURI__?.metadata?.currentExe ||
+                          "PeerChat.exe";
+                        await peerApi.installShellExtension(exePath);
+                        setShellExt(true);
+                        setStatus("Right-click 'Share in PeerChat' registered");
+                      } else {
+                        await peerApi.uninstallShellExtension();
+                        setShellExt(false);
+                        setStatus("Right-click 'Share in PeerChat' removed");
+                      }
+                    } catch (err: any) {
+                      setStatus(err?.message || String(err));
+                    } finally {
+                      setShellBusy(false);
                     }
-                  } catch (err: any) {
-                    setStatus(err?.message || String(err));
-                  } finally {
-                    setShellBusy(false);
-                  }
-                }}
-                sx={switchSx}
-              />
-            </Box>
-            <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
-              Adds a shortcut in Windows File Explorer to quickly beam files to LAN peers.
-            </Typography>
-          </Paper>
+                  }}
+                  sx={switchSx}
+                />
+              </Box>
+              <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 1 }}>
+                Adds a shortcut in Windows File Explorer to quickly beam files to LAN peers.
+              </Typography>
+            </Paper>
+          )}
 
           {FEATURE_GAMES && (
             <Paper sx={cardSx} elevation={0}>
@@ -931,6 +949,84 @@ export function SettingsScreen(props: {
             </Box>
           </Paper>
 
+          {fwStatus?.available === true ? (
+            <Paper sx={cardSx} elevation={0}>
+              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor, mb: 1 }}>
+                Windows Firewall
+              </Typography>
+              <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mb: 1.5 }}>
+                PeerChat never elevates itself. Allow inbound LAN once so coworkers can deliver
+                messages (UDP 41234 + TCP peer ports). Windows may show a single consent prompt.
+              </Typography>
+              {fwStatus.ok ? (
+                <Alert severity="success" sx={{ mb: 1.5 }}>
+                  LAN firewall rules look OK for this install.
+                </Alert>
+              ) : (
+                <Alert severity="warning" sx={{ mb: 1.5 }}>
+                  Firewall rules are missing or stale. Peers may show online but messages may not
+                  arrive until you allow LAN.
+                </Alert>
+              )}
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+                <Button
+                  variant="contained"
+                  disabled={fwBusy || fwStatus.ok}
+                  onClick={async () => {
+                    setFwBusy(true);
+                    try {
+                      const ok = await peerApi.enableWindowsFirewall();
+                      const next = await peerApi.windowsFirewallStatus();
+                      setFwStatus(next);
+                      setStatus(
+                        ok
+                          ? "LAN firewall rules enabled"
+                          : "Could not add rules — approve UAC or allow PeerChat in Windows Security"
+                      );
+                    } catch (err: any) {
+                      setStatus(err?.message || String(err));
+                    } finally {
+                      setFwBusy(false);
+                    }
+                  }}
+                  sx={{ textTransform: "none", fontWeight: 600, borderRadius: 1.25 }}
+                >
+                  {fwBusy ? "Working…" : "Allow LAN through Firewall"}
+                </Button>
+                {!fwStatus.ok && !fwStatus.declined && (
+                  <Button
+                    variant="text"
+                    disabled={fwBusy}
+                    onClick={async () => {
+                      try {
+                        await peerApi.declineWindowsFirewall();
+                        const next = await peerApi.windowsFirewallStatus();
+                        setFwStatus(next);
+                        setStatus("Firewall prompt dismissed — you can enable it later here");
+                      } catch (err: any) {
+                        setStatus(err?.message || String(err));
+                      }
+                    }}
+                    sx={{ textTransform: "none" }}
+                  >
+                    Not now
+                  </Button>
+                )}
+              </Box>
+            </Paper>
+          ) : fwStatus && !fwStatus.available ? (
+            <Paper sx={cardSx} elevation={0}>
+              <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor, mb: 1 }}>
+                LAN connectivity
+              </Typography>
+              <Typography sx={{ fontSize: "0.8125rem", color: mutedColor }}>
+                On Linux, allow UDP 41234 and your peer TLS TCP port (default 9876–9899) in your
+                distro firewall (ufw/firewalld) if peers cannot deliver messages. PeerChat does not
+                run sudo or change firewall rules automatically.
+              </Typography>
+            </Paper>
+          ) : null}
+
           <Paper sx={cardSx} elevation={0}>
             <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor, mb: 1.5 }}>
               Network Protocol Ports
@@ -1098,10 +1194,42 @@ export function SettingsScreen(props: {
             <Typography sx={{ fontWeight: 700, fontSize: "0.9375rem", color: bodyColor, mb: 0.5 }}>
               PeerChat Desktop v{props.version}
             </Typography>
-            <Typography sx={{ fontSize: "0.875rem", color: mutedColor, lineHeight: 1.5 }}>
+            <Typography sx={{ fontSize: "0.875rem", color: mutedColor, lineHeight: 1.5, mb: 1.25 }}>
               Decentralized, zero-server local-first peer-to-peer workspace chat application.
               End-to-end encrypted (X25519/Ed25519/AES-256-GCM) with persistent SQLite storage.
             </Typography>
+            {(diagErrorLogPath || diagLogPath) && (
+              <Box sx={{ mt: 0.5 }}>
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+                  Diagnostics (for support)
+                </Typography>
+                {diagErrorLogPath && (
+                  <Typography
+                    sx={{
+                      fontSize: "0.75rem",
+                      fontFamily: "monospace",
+                      color: mutedColor,
+                      wordBreak: "break-all",
+                      mb: 0.5,
+                    }}
+                  >
+                    Errors: {diagErrorLogPath}
+                  </Typography>
+                )}
+                {diagLogPath && (
+                  <Typography
+                    sx={{
+                      fontSize: "0.75rem",
+                      fontFamily: "monospace",
+                      color: mutedColor,
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    Full log: {diagLogPath}
+                  </Typography>
+                )}
+              </Box>
+            )}
           </Paper>
         </Box>
       )}

@@ -234,44 +234,65 @@ Remove-Item -Recurse -Force "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uni
 Write-Step "Registered in Add/Remove Programs (HKCU)"
 
 # -- Windows Firewall (default on install; elevates once with UAC if needed) ---
+function Invoke-HiddenNetsh([string[]]$NetshArgs) {
+    # Hide conhost flashes; redirect so failures stay quiet.
+    $p = Start-Process -FilePath "netsh.exe" -ArgumentList $NetshArgs `
+        -WindowStyle Hidden -Wait -PassThru `
+        -RedirectStandardOutput "$env:TEMP\peerchat-netsh-out.txt" `
+        -RedirectStandardError "$env:TEMP\peerchat-netsh-err.txt" `
+        -ErrorAction SilentlyContinue
+    return ($p -and $p.ExitCode -eq 0)
+}
 function Test-PeerChatFirewall([string]$exePath) {
-    $show = netsh advfirewall firewall show rule name="PeerChat LAN" verbose 2>$null | Out-String
+    $tmp = Join-Path $env:TEMP "peerchat-fw-show.txt"
+    $p = Start-Process -FilePath "netsh.exe" `
+        -ArgumentList @("advfirewall","firewall","show","rule","name=PeerChat LAN","verbose") `
+        -WindowStyle Hidden -Wait -PassThru `
+        -RedirectStandardOutput $tmp `
+        -RedirectStandardError "$env:TEMP\peerchat-fw-show-err.txt" `
+        -ErrorAction SilentlyContinue
+    if (-not $p) { return $false }
+    $show = if (Test-Path $tmp) { Get-Content -Raw $tmp } else { "" }
     return ($show -match [regex]::Escape($exePath)) -and ($show -match '(?i)Enabled:\s+Yes')
 }
 function Add-PeerChatFirewall([string]$exePath) {
-    netsh advfirewall firewall delete rule name="PeerChat LAN" >$null 2>&1
-    netsh advfirewall firewall delete rule name="PeerChat Ports" >$null 2>&1
-    netsh advfirewall firewall add rule name="PeerChat LAN" dir=in action=allow program="$exePath" protocol=UDP profile=any enable=yes >$null 2>&1
-    netsh advfirewall firewall add rule name="PeerChat LAN" dir=in action=allow program="$exePath" protocol=TCP profile=any enable=yes >$null 2>&1
-    netsh advfirewall firewall add rule name="PeerChat Ports" dir=in action=allow protocol=TCP localport=9876-9899 profile=any enable=yes >$null 2>&1
-    netsh advfirewall firewall add rule name="PeerChat Ports" dir=in action=allow protocol=UDP localport=41234 profile=any enable=yes >$null 2>&1
+    Invoke-HiddenNetsh @("advfirewall","firewall","delete","rule","name=PeerChat LAN") | Out-Null
+    Invoke-HiddenNetsh @("advfirewall","firewall","delete","rule","name=PeerChat Ports") | Out-Null
+    Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat LAN","dir=in","action=allow","program=$exePath","protocol=UDP","profile=any","enable=yes") | Out-Null
+    Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat LAN","dir=in","action=allow","program=$exePath","protocol=TCP","profile=any","enable=yes") | Out-Null
+    Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat Ports","dir=in","action=allow","protocol=TCP","localport=9876-9899","profile=any","enable=yes") | Out-Null
+    Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat Ports","dir=in","action=allow","protocol=UDP","localport=41234","profile=any","enable=yes") | Out-Null
     return (Test-PeerChatFirewall $exePath)
 }
 try {
     if (Add-PeerChatFirewall $destExe) {
         Write-Step "Firewall: allowed inbound TCP/UDP for PeerChat (all profiles)"
     } else {
-        # One Windows UAC consent prompt — Approve to enable LAN chat.
+        # One Windows UAC consent prompt — Approve to enable LAN chat. Helper window stays hidden.
         $exeEsc = $destExe.Replace("'", "''")
         $fwCmd = @"
-netsh advfirewall firewall delete rule name='PeerChat LAN' | Out-Null
-netsh advfirewall firewall delete rule name='PeerChat Ports' | Out-Null
-netsh advfirewall firewall add rule name='PeerChat LAN' dir=in action=allow program='$exeEsc' protocol=TCP profile=any enable=yes
-netsh advfirewall firewall add rule name='PeerChat LAN' dir=in action=allow program='$exeEsc' protocol=UDP profile=any enable=yes
-netsh advfirewall firewall add rule name='PeerChat Ports' dir=in action=allow protocol=TCP localport=9876-9899 profile=any enable=yes
-netsh advfirewall firewall add rule name='PeerChat Ports' dir=in action=allow protocol=UDP localport=41234 profile=any enable=yes
+`$ErrorActionPreference='SilentlyContinue'
+function HNetsh([string[]]`$a) {
+  Start-Process netsh.exe -ArgumentList `$a -WindowStyle Hidden -Wait | Out-Null
+}
+HNetsh @('advfirewall','firewall','delete','rule','name=PeerChat LAN')
+HNetsh @('advfirewall','firewall','delete','rule','name=PeerChat Ports')
+HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=in','action=allow',"program=$exeEsc",'protocol=TCP','profile=any','enable=yes')
+HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=in','action=allow',"program=$exeEsc",'protocol=UDP','profile=any','enable=yes')
+HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=in','action=allow','protocol=TCP','localport=9876-9899','profile=any','enable=yes')
+HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=in','action=allow','protocol=UDP','localport=41234','profile=any','enable=yes')
 "@
-        Start-Process -FilePath powershell -Verb RunAs -Wait -ArgumentList @(
-            '-NoProfile','-ExecutionPolicy','Bypass','-Command', $fwCmd
+        Start-Process -FilePath powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-Command', $fwCmd
         ) -ErrorAction SilentlyContinue | Out-Null
         if (Test-PeerChatFirewall $destExe) {
             Write-Step "Firewall: allowed after UAC consent"
         } else {
-            Write-Step "Firewall: not configured — Approve the UAC prompt next launch, or allow PeerChat in Windows Security"
+            Write-Step "Firewall: not configured — use Settings → Network → Allow LAN through Firewall, or allow PeerChat in Windows Security"
         }
     }
 } catch {
-    Write-Step "Firewall: could not add rules automatically — allow PeerChat when Windows asks"
+    Write-Step "Firewall: could not add rules automatically — use Settings → Network after launch"
 }
 
 # -- Right-click shell integration --------------------------------------------

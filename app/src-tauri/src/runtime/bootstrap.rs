@@ -186,11 +186,8 @@ use std::os::windows::process::CommandExt;
 
 /// Allow inbound TCP/UDP for this PeerChat.exe so LAN beacons and DMs work.
 ///
-/// Strategy (Windows):
-/// 1. Silent `netsh` for the current exe (works if already elevated / rule exists).
-/// 2. If that fails, one UAC consent prompt (`RunAs`) — user approves once.
-/// 3. Only then write `.firewall_ok` (must match current exe path). Never mark
-///    success on failure — that was why debug builds stayed blocked after install.
+/// Startup (Windows): silent `netsh` only — never auto UAC / RunAs (creepy admin feel).
+/// If silent fails, leave `.firewall_needed` so Settings can offer one consent elevate.
 #[cfg(windows)]
 pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
     let Ok(exe) = std::env::current_exe() else {
@@ -200,19 +197,115 @@ pub(crate) fn ensure_windows_firewall_rules(data_dir: &std::path::Path) {
         return;
     };
     let marker = data_dir.join(".firewall_ok");
+    let needed = data_dir.join(".firewall_needed");
     let marker_ok = std::fs::read_to_string(&marker)
         .ok()
         .map(|s| s.trim() == exe_str)
         .unwrap_or(false);
     if marker_ok && firewall_rule_covers_exe(exe_str) {
+        let _ = std::fs::remove_file(&needed);
         return;
     }
 
-    if apply_firewall_rules_silent(exe_str) || apply_firewall_rules_elevated(exe_str) {
+    if apply_firewall_rules_silent(exe_str) {
         let _ = std::fs::write(&marker, exe_str.as_bytes());
+        let _ = std::fs::remove_file(&needed);
     } else {
-        // Leave marker absent/stale so the next launch retries (or after IT unlocks netsh).
+        // Do not elevate from background. Flag for Settings / soft prompt.
         let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::write(&needed, exe_str.as_bytes());
+    }
+}
+
+/// Status for Settings UI (Windows-only; Linux reports available=false).
+#[derive(serde::Serialize, Clone)]
+pub struct WindowsFirewallStatus {
+    pub available: bool,
+    pub ok: bool,
+    pub declined: bool,
+    pub needed: bool,
+}
+
+pub(crate) fn windows_firewall_status(data_dir: &std::path::Path) -> WindowsFirewallStatus {
+    #[cfg(windows)]
+    {
+        let declined = data_dir.join(".firewall_declined").is_file();
+        let needed_marker = data_dir.join(".firewall_needed").is_file();
+        let Ok(exe) = std::env::current_exe() else {
+            return WindowsFirewallStatus {
+                available: true,
+                ok: false,
+                declined,
+                needed: needed_marker,
+            };
+        };
+        let Some(exe_str) = exe.to_str() else {
+            return WindowsFirewallStatus {
+                available: true,
+                ok: false,
+                declined,
+                needed: needed_marker,
+            };
+        };
+        let marker = data_dir.join(".firewall_ok");
+        let marker_ok = std::fs::read_to_string(&marker)
+            .ok()
+            .map(|s| s.trim() == exe_str)
+            .unwrap_or(false);
+        let ok = marker_ok && firewall_rule_covers_exe(exe_str);
+        WindowsFirewallStatus {
+            available: true,
+            ok,
+            declined,
+            needed: !ok && (needed_marker || !declined),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = data_dir;
+        WindowsFirewallStatus {
+            available: false,
+            ok: true,
+            declined: false,
+            needed: false,
+        }
+    }
+}
+
+/// User-initiated elevate (Settings). One hidden UAC helper; never elevates PeerChat.exe.
+pub(crate) fn enable_windows_firewall_rules(data_dir: &std::path::Path) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe_str = exe
+            .to_str()
+            .ok_or_else(|| "exe path is not valid UTF-8".to_string())?;
+        let ok = apply_firewall_rules_silent(exe_str) || apply_firewall_rules_elevated(exe_str);
+        if ok {
+            let _ = std::fs::write(data_dir.join(".firewall_ok"), exe_str.as_bytes());
+            let _ = std::fs::remove_file(data_dir.join(".firewall_needed"));
+            let _ = std::fs::remove_file(data_dir.join(".firewall_declined"));
+        }
+        Ok(ok)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = data_dir;
+        Err("Windows Firewall rules are only available on Windows".into())
+    }
+}
+
+pub(crate) fn decline_windows_firewall(data_dir: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _ = std::fs::write(data_dir.join(".firewall_declined"), b"1");
+        let _ = std::fs::remove_file(data_dir.join(".firewall_needed"));
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = data_dir;
+        Ok(())
     }
 }
 
@@ -300,29 +393,32 @@ fn apply_firewall_rules_silent(exe_str: &str) -> bool {
     ok && firewall_rule_covers_exe(exe_str)
 }
 
-/// One Windows UAC consent prompt — user must Approve. Used when silent netsh fails
-/// (normal for current-user installs without admin).
+/// One Windows UAC consent prompt — user must Approve (Settings only).
+/// Elevated helper runs hidden so PeerChat.exe itself never looks "admin".
 #[cfg(windows)]
 fn apply_firewall_rules_elevated(exe_str: &str) -> bool {
     // Escape for PowerShell single-quoted string (double any ').
     let exe_ps = exe_str.replace('\'', "''");
     let script = format!(
-        "$ErrorActionPreference='Stop'; \
-         netsh advfirewall firewall delete rule name='PeerChat LAN' | Out-Null; \
-         netsh advfirewall firewall delete rule name='PeerChat Ports' | Out-Null; \
-         netsh advfirewall firewall add rule name='PeerChat LAN' dir=in action=allow program='{exe_ps}' protocol=TCP profile=any enable=yes; \
-         netsh advfirewall firewall add rule name='PeerChat LAN' dir=in action=allow program='{exe_ps}' protocol=UDP profile=any enable=yes; \
-         netsh advfirewall firewall add rule name='PeerChat Ports' dir=in action=allow protocol=TCP localport=9876-9899 profile=any enable=yes; \
-         netsh advfirewall firewall add rule name='PeerChat Ports' dir=in action=allow protocol=UDP localport=41234 profile=any enable=yes;"
+        "$ErrorActionPreference='SilentlyContinue'; \
+         function HNetsh([string[]]$a) {{ Start-Process netsh.exe -ArgumentList $a -WindowStyle Hidden -Wait | Out-Null }}; \
+         HNetsh @('advfirewall','firewall','delete','rule','name=PeerChat LAN'); \
+         HNetsh @('advfirewall','firewall','delete','rule','name=PeerChat Ports'); \
+         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=in','action=allow','program={exe_ps}','protocol=TCP','profile=any','enable=yes'); \
+         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=in','action=allow','program={exe_ps}','protocol=UDP','profile=any','enable=yes'); \
+         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=in','action=allow','protocol=TCP','localport=9876-9899','profile=any','enable=yes'); \
+         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=in','action=allow','protocol=UDP','localport=41234','profile=any','enable=yes');"
     );
     let out = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
+            "-WindowStyle",
+            "Hidden",
             "-Command",
             &format!(
-                "Start-Process -FilePath powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command',{arg}",
+                "Start-Process -FilePath powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-Command',{arg}",
                 arg = powershell_single_quote(&script)
             ),
         ])
