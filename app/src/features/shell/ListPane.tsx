@@ -17,6 +17,7 @@ import MoreVertIcon from "@mui/icons-material/MoreVertRounded";
 import VolumeOffIcon from "@mui/icons-material/VolumeOffRounded";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import { peerApi } from "../../peer";
+import { useShellNav, useShellTab } from "./shellNav";
 import { avatarColor, formatPreviewTime, lastSeenLabel, conversationPreviewLine } from "../../shared/format";
 import type { ChatScreenVm } from "../chat/chatVm";
 
@@ -31,7 +32,6 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
     lanHosts,
     lastPreviews,
     messages,
-    nav,
     openDm,
     openSidebarMsgHit,
     others,
@@ -46,10 +46,11 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
     setGroupOpen,
     sidebarMsgHits,
     sidebarMsgSearchBusy,
-    tab,
     text,
     version
   } = vm;
+  const nav = useShellNav();
+  const tab = useShellTab();
   const searchingChats = tab === 1 && !!chatSearch.trim();
   return (
     <Box
@@ -589,7 +590,6 @@ export const ListPane = memo(
       prev.vm.convs === next.vm.convs &&
       prev.vm.filteredConvs === next.vm.filteredConvs &&
       prev.vm.active?.id === next.vm.active?.id &&
-      prev.vm.tab === next.vm.tab &&
       prev.vm.chatSearch === next.vm.chatSearch &&
       prev.vm.peers === next.vm.peers &&
       prev.vm.lanHosts === next.vm.lanHosts &&
@@ -598,8 +598,7 @@ export const ListPane = memo(
       prev.vm.lastPreviews === next.vm.lastPreviews &&
       prev.vm.sidebarMsgHits === next.vm.sidebarMsgHits &&
       prev.vm.sidebarMsgSearchBusy === next.vm.sidebarMsgSearchBusy &&
-      prev.vm.scanning === next.vm.scanning &&
-      prev.vm.nav === next.vm.nav
+      prev.vm.scanning === next.vm.scanning
     );
   }
 );

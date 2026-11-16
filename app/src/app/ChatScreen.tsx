@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   lazy,
-  startTransition,
   Suspense,
   useCallback,
   useContext,
@@ -230,6 +229,7 @@ import {
 } from "../shared/transferTypes";
 import { NavRail, type ShellNav } from "../features/shell/NavRail";
 import { ListPane } from "../features/shell/ListPane";
+import { getShellNav, getShellTab, setShellNav, setShellTab, ShellMain } from "../features/shell/shellNav";
 import { MessageList } from "../features/chat/MessageList";
 import { Composer } from "../features/chat/Composer";
 import { SelectionActionBar } from "../features/chat/SelectionActionBar";
@@ -325,16 +325,13 @@ export function ChatScreen({
   const thumbGenRef = useRef(0);
   const [plain, setPlain] = useState<Record<string, string>>({});
   const [groupKeys, setGroupKeys] = useState<Record<string, Uint8Array>>({});
-  // tab 1 = chats list (must match default nav "chats")
-  const [tab, setTab] = useState(1);
-  const [nav, setNavState] = useState<ShellNav>("chats");
-  /** Lazy screens (games/calendar/settings) suspend on first open — mark as transition. */
+  // List tab + shell nav live in an external store so switching them does not
+  // re-render this screen (the transcript reconciliation was freezing the window).
+  const setTab = useCallback((next: number) => {
+    setShellTab(next);
+  }, []);
   const setNav = useCallback((next: ShellNav) => {
-    if (next === "games" || next === "calendar" || next === "settings") {
-      startTransition(() => setNavState(next));
-    } else {
-      setNavState(next);
-    }
+    setShellNav(next);
   }, []);
   const [announceBoards, setAnnounceBoards] = useState<Conversation[]>([]);
   const [announceCompose, setAnnounceCompose] = useState({ title: "", body: "" });
@@ -883,7 +880,7 @@ export function ChatScreen({
   // Chats sidebar: collect exact message hits (snippet + jump), not just conversation ids.
   useEffect(() => {
     const q = chatSearch.trim().toLowerCase();
-    if (tab !== 1 || q.length < 2) {
+    if (getShellTab() !== 1 || q.length < 2) {
       setSidebarMsgHits([]);
       setSidebarMsgSearchBusy(false);
       return;
@@ -988,7 +985,7 @@ export function ChatScreen({
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatSearch, tab, convs, identity, profile.id]);
+  }, [chatSearch, convs, identity, profile.id]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -5335,7 +5332,7 @@ export function ChatScreen({
     lastPreviews,
     membersLoaded,
     messages,
-    nav,
+    nav: getShellNav(),
     notifyTyping,
     openAttachment,
     openDm,
@@ -5388,7 +5385,7 @@ export function ChatScreen({
     startScreenshotCapture,
     status,
     submitComposer,
-    tab,
+    tab: getShellTab(),
     text,
     thumbInflightRef,
     toggleBlockPeer,
@@ -5449,7 +5446,7 @@ export function ChatScreen({
       }}
     >
       <NavRail
-        nav={nav}
+        nav={getShellNav()}
         gamesOn={gamesOn}
         onSettings={() => {
           setNav("settings");
@@ -5474,7 +5471,8 @@ export function ChatScreen({
         height="100%"
         overflow="hidden"
       >
-        {nav === "calendar" && (
+        <ShellMain
+          calendar={
           <Suspense fallback={<Box sx={{ minHeight: "100%", display: "grid", placeItems: "center" }}><CircularProgress /></Box>}>
             <CalendarScreen
               peers={peers}
@@ -5486,8 +5484,9 @@ export function ChatScreen({
               onNotifyShare={sendCalendarShareMsg}
             />
           </Suspense>
-        )}
-        {FEATURE_GAMES && nav === "games" && (gamesOn || pendingGameInvite ? (
+          }
+          games={
+          FEATURE_GAMES ? (gamesOn || pendingGameInvite ? (
           <Suspense
             fallback={
               <Box sx={{ minHeight: "100%", display: "grid", placeItems: "center" }}>
@@ -5544,8 +5543,9 @@ export function ChatScreen({
           </Suspense>
         ) : (
           <Box p={3}><Alert severity="info">Games are turned off in Settings.</Alert></Box>
-        ))}
-        {nav === "saved" && (
+        )) : null
+          }
+          saved={
           <SavedPanel
             items={savedItems}
             convs={convs}
@@ -5568,8 +5568,8 @@ export function ChatScreen({
               setSavedItems(await peerApi.listSavedItems());
             }}
           />
-        )}
-        {nav === "settings" && (
+          }
+          settings={
           <Box sx={{ flex: 1, height: "100%", overflowY: "auto", bgcolor: "background.default" }}>
             <Suspense fallback={<Box sx={{ minHeight: "100%", display: "grid", placeItems: "center" }}><CircularProgress /></Box>}>
               <SettingsScreen
@@ -5596,16 +5596,9 @@ export function ChatScreen({
               />
             </Suspense>
           </Box>
-        )}
-        <Box
-          sx={{
-            display:
-              nav === "chats" || nav === "people" || nav === "announcements" ? "flex" : "none",
-            flexDirection: "column",
-            flex: 1,
-            minHeight: 0,
-          }}
-        >
+          }
+          chat={
+          <>
         <AppBar
           position="static"
           elevation={0}
@@ -6120,7 +6113,9 @@ export function ChatScreen({
             void stageCapturePath(path, name, captureId);
           }}
         />
-        </Box>
+          </>
+          }
+        />
       <EmojiPicker
         open={!!emojiAnchor}
         anchorEl={emojiAnchor}

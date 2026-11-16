@@ -777,18 +777,18 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     if sender_trusted_for_wrap
                         && db::is_conversation_member(&conn, group_cid, my_id).unwrap_or(false)
                     {
-                        let _ = db::upsert_member(&conn, group_cid, my_id, Some(wrap), None);
-                        println!(
-                            "[GroupSync:deliver:wrap] updated wrapped_group_key for my_id={} in group_id={} wrap_len={}",
-                            my_id,
-                            group_cid,
-                            wrap.len()
-                        );
-                        pending_group_key_updated = Some(json!({
-                            "conversation_id": group_cid,
-                            "member_id": my_id,
-                            "source": "deliver",
-                        }));
+                        let existing = db::get_wrapped_group_key(&conn, group_cid, my_id)
+                            .ok()
+                            .flatten();
+                        // Identical wraps were re-emitted on every board message and froze the UI.
+                        if existing.as_deref() != Some(wrap) {
+                            let _ = db::upsert_member(&conn, group_cid, my_id, Some(wrap), None);
+                            pending_group_key_updated = Some(json!({
+                                "conversation_id": group_cid,
+                                "member_id": my_id,
+                                "source": "deliver",
+                            }));
+                        }
                     } else {
                         println!(
                             "[GroupSync:deliver:wrap:rejected] group_id={} sender={} trusted={} i_am_member={}",

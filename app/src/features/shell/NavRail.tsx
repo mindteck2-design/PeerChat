@@ -8,6 +8,7 @@ import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorderRounded";
 import SettingsIcon from "@mui/icons-material/SettingsRounded";
 import { FEATURE_GAMES } from "../../features";
 import type { Conversation, Profile } from "../../peer";
+import { useShellNav } from "./shellNav";
 
 export type ShellNav =
   | "people"
@@ -30,7 +31,6 @@ export function NavRail(props: {
   profile?: Profile;
 }) {
   const {
-    nav,
     gamesOn,
     onSettings,
     setNav,
@@ -40,6 +40,7 @@ export function NavRail(props: {
     listConversations,
     profile,
   } = props;
+  const nav = useShellNav();
 
   return (
     <Box

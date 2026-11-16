@@ -337,15 +337,23 @@ pub fn append_app_log(state: State<AppState>, line: String) -> Result<(), String
 }
 
 #[tauri::command]
-pub fn windows_firewall_status(
-    state: State<AppState>,
-) -> runtime::bootstrap::WindowsFirewallStatus {
-    runtime::bootstrap::windows_firewall_status(&state.data_dir)
+pub async fn windows_firewall_status(
+    state: State<'_, AppState>,
+) -> Result<runtime::bootstrap::WindowsFirewallStatus, String> {
+    let dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || runtime::bootstrap::windows_firewall_status(&dir))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn enable_windows_firewall(state: State<AppState>) -> Result<bool, String> {
-    runtime::bootstrap::enable_windows_firewall_rules(&state.data_dir)
+pub async fn enable_windows_firewall(state: State<'_, AppState>) -> Result<bool, String> {
+    let dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime::bootstrap::enable_windows_firewall_rules(&dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
