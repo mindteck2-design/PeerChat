@@ -109,7 +109,7 @@ pub(crate) async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
 
         match result {
             Err(_elapsed) => {
-                let err = "connect/request timed out — peer UDP online but TCP blocked? Allow PeerChat through Windows Firewall (TCP 9876+) on both PCs".to_string();
+                let err = "connect timeout".to_string();
                 let conn = db.lock();
                 let _ = db::bump_outbox_error(&conn, &id, &err);
                 peer_unreachable = Some(err);
@@ -157,9 +157,7 @@ pub(crate) async fn deliver_peer_items(db: &SharedDb, items: Vec<Value>) {
                     || el.contains("timed out")
                     || el.contains("unreachable");
                 let err = if unreachable {
-                    format!(
-                        "{e} — allow PeerChat through Windows Firewall (TCP listen port) on both PCs; UDP discovery alone is not enough"
-                    )
+                    "connect timeout".to_string()
                 } else {
                     e.clone()
                 };

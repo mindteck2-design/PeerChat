@@ -260,6 +260,23 @@ import {
   silenceNotificationAudio,
 } from "../shared/sound";
 
+function shortDeliveryBanner(name: string, err: string): string {
+  const e = err.toLowerCase();
+  if (e.includes("fingerprint") || e.includes("identity") || e.includes("keys changed")) {
+    return `${name} needs a trust check before messages can deliver.`;
+  }
+  if (
+    e.includes("timeout") ||
+    e.includes("timed out") ||
+    e.includes("refused") ||
+    e.includes("unreachable") ||
+    e.includes("firewall")
+  ) {
+    return `Can't reach ${name}. Ask them to allow PeerChat in Windows Firewall.`;
+  }
+  return `Message to ${name} was not delivered.`;
+}
+
 export function ChatScreen({
   profile: initialProfile,
   identity,
@@ -5953,8 +5970,7 @@ export function ChatScreen({
         )}
         {active?.kind === "dm" && activeDmPeer && !activeDmPeer.blocked && dmDeliveryHint && (
           <Alert severity="error" sx={{ borderRadius: 0, flexShrink: 0 }}>
-            Messages are not reaching <strong>{activeDmPeer.display_name}</strong> over TCP
-            (Trust/UDP can still look fine). {dmDeliveryHint}
+            {shortDeliveryBanner(activeDmPeer.display_name, dmDeliveryHint)}
           </Alert>
         )}
 

@@ -209,21 +209,40 @@ pub fn cancel_outbox_for_message(conn: &Connection, message_id: &str) -> Result<
 }
 
 pub fn latest_outbox_error(conn: &Connection, recipient_id: &str) -> Result<Option<Value>, String> {
-    conn.query_row(
-        r#"SELECT last_error, attempts, created_at FROM outbox
-           WHERE recipient_id=?1 AND delivered_at IS NULL AND last_error IS NOT NULL
-           ORDER BY COALESCE(last_attempt_at, created_at) DESC LIMIT 1"#,
-        params![recipient_id],
-        |r| {
-            Ok(serde_json::json!({
-                "last_error": r.get::<_, Option<String>>(0)?,
-                "attempts": r.get::<_, i64>(1)?,
-                "created_at": r.get::<_, String>(2)?,
-            }))
-        },
-    )
-    .optional()
-    .map_err(|e| e.to_string())
+    // Banner follows the newest chat send, not a leftover timeout or group-sync row.
+    // If a later message to this peer already delivered, the warning is stale.
+    let row = conn
+        .query_row(
+            r#"SELECT last_error, attempts, created_at, delivered_at FROM outbox
+               WHERE recipient_id=?1 AND id NOT LIKE 'gev-%'
+               ORDER BY created_at DESC LIMIT 1"#,
+            params![recipient_id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((last_error, attempts, created_at, delivered_at)) = row else {
+        return Ok(None);
+    };
+    if delivered_at.is_some() {
+        return Ok(None);
+    }
+    let err = last_error.unwrap_or_default();
+    if err.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::json!({
+        "last_error": err,
+        "attempts": attempts,
+        "created_at": created_at,
+    })))
 }
 
 /// Drop dead group-event backlog that SYN-storms firewalled peers and starves chat.

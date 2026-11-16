@@ -42,7 +42,7 @@ Most Windows 10/11 PCs already have it.
 Firewall / LAN chat
 -------------------
 Install-PeerChat.bat tries to allow PeerChat through Windows Firewall quietly
-(inbound TCP 9876–9899 + UDP 41234, and the PeerChat.exe program). If Windows
+(inbound and outbound TCP 9876–9899 + UDP 41234, for PeerChat.exe). If Windows
 needs permission, you get one UAC prompt — click Yes so peers can deliver
 messages. The helper window stays hidden (no cascading black consoles).
 

@@ -955,8 +955,8 @@ export function SettingsScreen(props: {
                 Windows Firewall
               </Typography>
               <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mb: 1.5 }}>
-                PeerChat never elevates itself. Allow inbound LAN once so coworkers can deliver
-                messages (UDP 41234 + TCP peer ports). Windows may show a single consent prompt.
+                PeerChat never elevates itself. Install allows inbound and outbound LAN
+                (UDP 41234 + TCP peer ports) when Windows permits it. One consent prompt may appear.
               </Typography>
               {fwStatus.ok ? (
                 <Alert severity="success" sx={{ mb: 1.5 }}>

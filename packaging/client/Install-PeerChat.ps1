@@ -260,13 +260,17 @@ function Add-PeerChatFirewall([string]$exePath) {
     Invoke-HiddenNetsh @("advfirewall","firewall","delete","rule","name=PeerChat Ports") | Out-Null
     Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat LAN","dir=in","action=allow","program=$exePath","protocol=UDP","profile=any","enable=yes") | Out-Null
     Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat LAN","dir=in","action=allow","program=$exePath","protocol=TCP","profile=any","enable=yes") | Out-Null
+    Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat LAN","dir=out","action=allow","program=$exePath","protocol=UDP","profile=any","enable=yes") | Out-Null
+    Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat LAN","dir=out","action=allow","program=$exePath","protocol=TCP","profile=any","enable=yes") | Out-Null
     Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat Ports","dir=in","action=allow","protocol=TCP","localport=9876-9899","profile=any","enable=yes") | Out-Null
     Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat Ports","dir=in","action=allow","protocol=UDP","localport=41234","profile=any","enable=yes") | Out-Null
+    Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat Ports","dir=out","action=allow","protocol=TCP","remoteport=9876-9899","profile=any","enable=yes") | Out-Null
+    Invoke-HiddenNetsh @("advfirewall","firewall","add","rule","name=PeerChat Ports","dir=out","action=allow","protocol=UDP","remoteport=41234","profile=any","enable=yes") | Out-Null
     return (Test-PeerChatFirewall $exePath)
 }
 try {
     if (Add-PeerChatFirewall $destExe) {
-        Write-Step "Firewall: allowed inbound TCP/UDP for PeerChat (all profiles)"
+        Write-Step "Firewall: allowed inbound and outbound TCP/UDP for PeerChat (all profiles)"
     } else {
         # One Windows UAC consent prompt — Approve to enable LAN chat. Helper window stays hidden.
         $exeEsc = $destExe.Replace("'", "''")
@@ -279,8 +283,12 @@ HNetsh @('advfirewall','firewall','delete','rule','name=PeerChat LAN')
 HNetsh @('advfirewall','firewall','delete','rule','name=PeerChat Ports')
 HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=in','action=allow',"program=$exeEsc",'protocol=TCP','profile=any','enable=yes')
 HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=in','action=allow',"program=$exeEsc",'protocol=UDP','profile=any','enable=yes')
+HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=out','action=allow',"program=$exeEsc",'protocol=TCP','profile=any','enable=yes')
+HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=out','action=allow',"program=$exeEsc",'protocol=UDP','profile=any','enable=yes')
 HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=in','action=allow','protocol=TCP','localport=9876-9899','profile=any','enable=yes')
 HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=in','action=allow','protocol=UDP','localport=41234','profile=any','enable=yes')
+HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=out','action=allow','protocol=TCP','remoteport=9876-9899','profile=any','enable=yes')
+HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=out','action=allow','protocol=UDP','remoteport=41234','profile=any','enable=yes')
 "@
         Start-Process -FilePath powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList @(
             '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-Command', $fwCmd

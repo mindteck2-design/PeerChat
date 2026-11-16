@@ -320,7 +320,15 @@ fn firewall_rule_covers_exe(exe_str: &str) -> bool {
     };
     let text = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
     let exe_l = exe_str.to_ascii_lowercase();
-    text.contains(&exe_l) && text.contains("enabled:") && text.contains("yes")
+    let has_in = text.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("direction:") && l.ends_with("in")
+    });
+    let has_out = text.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("direction:") && l.ends_with("out")
+    });
+    text.contains(&exe_l) && text.contains("enabled:") && text.contains("yes") && has_in && has_out
 }
 
 #[cfg(windows)]
@@ -353,6 +361,23 @@ fn apply_firewall_rules_silent(exe_str: &str) -> bool {
             .creation_flags(0x08000000)
             .output();
         ok = ok && matches!(out, Ok(ref o) if o.status.success());
+        let out_rule = std::process::Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=PeerChat LAN",
+                "dir=out",
+                "action=allow",
+                &format!("program={exe_str}"),
+                &format!("protocol={proto}"),
+                "profile=any",
+                "enable=yes",
+            ])
+            .creation_flags(0x08000000)
+            .output();
+        ok = ok && matches!(out_rule, Ok(ref o) if o.status.success());
     }
     // Port rules as a safety net when program path changes (updates / sideloads).
     let tcp_ports = std::process::Command::new("netsh")
@@ -387,9 +412,43 @@ fn apply_firewall_rules_silent(exe_str: &str) -> bool {
         ])
         .creation_flags(0x08000000)
         .output();
+    let tcp_out = std::process::Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            "name=PeerChat Ports",
+            "dir=out",
+            "action=allow",
+            "protocol=TCP",
+            "remoteport=9876-9899",
+            "profile=any",
+            "enable=yes",
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    let udp_out = std::process::Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            "name=PeerChat Ports",
+            "dir=out",
+            "action=allow",
+            "protocol=UDP",
+            "remoteport=41234",
+            "profile=any",
+            "enable=yes",
+        ])
+        .creation_flags(0x08000000)
+        .output();
     ok = ok
         && matches!(tcp_ports, Ok(ref o) if o.status.success())
-        && matches!(udp_port, Ok(ref o) if o.status.success());
+        && matches!(udp_port, Ok(ref o) if o.status.success())
+        && matches!(tcp_out, Ok(ref o) if o.status.success())
+        && matches!(udp_out, Ok(ref o) if o.status.success());
     ok && firewall_rule_covers_exe(exe_str)
 }
 
@@ -406,8 +465,12 @@ fn apply_firewall_rules_elevated(exe_str: &str) -> bool {
          HNetsh @('advfirewall','firewall','delete','rule','name=PeerChat Ports'); \
          HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=in','action=allow','program={exe_ps}','protocol=TCP','profile=any','enable=yes'); \
          HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=in','action=allow','program={exe_ps}','protocol=UDP','profile=any','enable=yes'); \
+         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=out','action=allow','program={exe_ps}','protocol=TCP','profile=any','enable=yes'); \
+         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat LAN','dir=out','action=allow','program={exe_ps}','protocol=UDP','profile=any','enable=yes'); \
          HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=in','action=allow','protocol=TCP','localport=9876-9899','profile=any','enable=yes'); \
-         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=in','action=allow','protocol=UDP','localport=41234','profile=any','enable=yes');"
+         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=in','action=allow','protocol=UDP','localport=41234','profile=any','enable=yes'); \
+         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=out','action=allow','protocol=TCP','remoteport=9876-9899','profile=any','enable=yes'); \
+         HNetsh @('advfirewall','firewall','add','rule','name=PeerChat Ports','dir=out','action=allow','protocol=UDP','remoteport=41234','profile=any','enable=yes');"
     );
     let out = std::process::Command::new("powershell")
         .args([
