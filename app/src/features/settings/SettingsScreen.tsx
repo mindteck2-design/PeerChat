@@ -491,7 +491,7 @@ export function SettingsScreen(props: {
                   sm: "auto minmax(0, 1.2fr) minmax(0, 1fr)",
                 },
                 gap: { xs: 2.5, sm: 2.75 },
-                alignItems: { xs: "stretch", sm: "start" },
+                alignItems: { xs: "stretch", sm: "center" },
                 mb: 3,
               }}
             >
@@ -502,7 +502,6 @@ export function SettingsScreen(props: {
                   height: 72,
                   borderRadius: "50%",
                   flexShrink: 0,
-                  mt: { sm: 2.75 },
                   justifySelf: { xs: "start", sm: "center" },
                   "&:hover .avatar-edit-btn, &:focus-within .avatar-edit-btn": {
                     opacity: 1,

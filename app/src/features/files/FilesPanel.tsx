@@ -82,6 +82,11 @@ function presenceOf(f: LibraryFile): "on_disk" | "removed" | "not_downloaded" {
   return "not_downloaded";
 }
 
+/** Sent rows often point at original source folders (.m2, node_modules) — never delete those. */
+function canDeleteLocal(f: LibraryFile, myId: string): boolean {
+  return f.local_path_present && !!myId && f.uploader_id !== myId;
+}
+
 export function FilesPanel(props: {
   peers: Peer[];
   profile: Profile;
@@ -263,6 +268,21 @@ export function FilesPanel(props: {
     [selectedFiles]
   );
 
+  const deletableSelectedIds = useMemo(
+    () => selectedFiles.filter((f) => canDeleteLocal(f, props.profile.id)).map((f) => f.id),
+    [selectedFiles, props.profile.id]
+  );
+
+  const receivedOnDisk = useMemo(
+    () => files.filter((f) => canDeleteLocal(f, props.profile.id)),
+    [files, props.profile.id]
+  );
+
+  const receivedOnDiskBytes = useMemo(
+    () => receivedOnDisk.reduce((sum, f) => sum + Math.max(0, f.size_bytes), 0),
+    [receivedOnDisk]
+  );
+
   const uploaderOptions = useMemo(() => {
     const ids = new Set(files.map((f) => f.uploader_id).filter(Boolean));
     return [...ids].sort((a, b) => peerName(a).localeCompare(peerName(b)));
@@ -294,16 +314,27 @@ export function FilesPanel(props: {
   }
 
   async function deleteIds(ids: string[]) {
-    if (!ids.length) return;
-    setBusy(true);
-    try {
-      const res = await peerApi.deleteLocalFiles(ids);
-      const n = res.deleted + res.cleared_only;
+    const allowed = files
+      .filter((f) => ids.includes(f.id) && canDeleteLocal(f, props.profile.id))
+      .map((f) => f.id);
+    const skipped = ids.length - allowed.length;
+    if (!allowed.length) {
       setStatus(
-        n
-          ? `Removed local copy for ${n} file${n === 1 ? "" : "s"}`
+        skipped
+          ? "Sent files are never deleted here — they may be your original folders (e.g. .m2)."
           : "Nothing to delete on disk"
       );
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await peerApi.deleteLocalFiles(allowed);
+      const n = res.deleted + res.cleared_only;
+      const parts: string[] = [];
+      if (n) parts.push(`Removed ${n} received download${n === 1 ? "" : "s"}`);
+      if (skipped || res.skipped_sent)
+        parts.push("sent originals left untouched");
+      setStatus(parts.join(" · ") || "Nothing to delete on disk");
       setSelected(new Set());
       await refresh();
     } catch (err: any) {
@@ -321,8 +352,10 @@ export function FilesPanel(props: {
       const n = res.deleted + res.cleared_only;
       setStatus(
         n
-          ? `Cleared ${n} local file${n === 1 ? "" : "s"} from PeerChat storage`
-          : "No on-disk files to clear"
+          ? `Cleared ${n} received download${n === 1 ? "" : "s"} (sent originals kept)`
+          : res.skipped_sent
+            ? "No received downloads to clear — sent originals are never removed"
+            : "No on-disk received files to clear"
       );
       setSelected(new Set());
       await refresh();
@@ -408,7 +441,7 @@ export function FilesPanel(props: {
           <Button
             variant="outlined"
             color="warning"
-            disabled={busy || storage.on_disk_count === 0}
+            disabled={busy || receivedOnDisk.length === 0}
             onClick={() => setClearOpen(true)}
             startIcon={<DeleteOutlineIcon />}
             sx={{ textTransform: "none", fontWeight: 600, alignSelf: { xs: "stretch", sm: "center" } }}
@@ -521,16 +554,29 @@ export function FilesPanel(props: {
           >
             Share
           </Button>
-          <Button
-            size="small"
-            color="warning"
-            startIcon={<DeleteOutlineIcon />}
-            disabled={busy}
-            onClick={() => void deleteIds([...selected])}
-            sx={{ textTransform: "none" }}
+          <Tooltip
+            title={
+              deletableSelectedIds.length
+                ? "Delete received downloads only — sent originals are never removed"
+                : "Only received downloads can be deleted. Sent items (your originals) stay safe."
+            }
           >
-            Delete local
-          </Button>
+            <span>
+              <Button
+                size="small"
+                color="warning"
+                startIcon={<DeleteOutlineIcon />}
+                disabled={busy || !deletableSelectedIds.length}
+                onClick={() => void deleteIds(deletableSelectedIds)}
+                sx={{ textTransform: "none" }}
+              >
+                Delete local
+                {deletableSelectedIds.length
+                  ? ` (${deletableSelectedIds.length})`
+                  : ""}
+              </Button>
+            </span>
+          </Tooltip>
           <Button size="small" onClick={() => setSelected(new Set())} sx={{ textTransform: "none" }}>
             Clear selection
           </Button>
@@ -748,7 +794,7 @@ export function FilesPanel(props: {
               Download again
             </MenuItem>
           )}
-          {menu?.file.local_path_present && (
+          {menu && canDeleteLocal(menu.file, props.profile.id) && (
             <MenuItem
               onClick={() => {
                 const f = menu.file;
@@ -762,6 +808,16 @@ export function FilesPanel(props: {
               Delete local
             </MenuItem>
           )}
+          {menu &&
+            menu.file.local_path_present &&
+            menu.file.uploader_id === props.profile.id && (
+              <MenuItem disabled>
+                <ListItemIcon>
+                  <DeleteOutlineIcon fontSize="small" />
+                </ListItemIcon>
+                Sent original — not deletable
+              </MenuItem>
+            )}
           <MenuItem
             onClick={() => {
               const f = menu?.file;
@@ -779,13 +835,16 @@ export function FilesPanel(props: {
       </Menu>
 
       <Dialog open={clearOpen} onClose={() => !busy && setClearOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>Clear PeerChat storage?</DialogTitle>
+        <DialogTitle>Clear received downloads?</DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary">
-            This deletes on-disk copies under your PeerChat download and app folders (
-            {formatBytes(storage.bytes_on_disk)} · {storage.on_disk_count} files). Chat history stays;
-            you can download again later. Files outside those folders are unlinked only, not deleted
-            from disk.
+            This removes only files you <strong>received</strong> that are still on disk (
+            {formatBytes(receivedOnDiskBytes)} · {receivedOnDisk.length} file
+            {receivedOnDisk.length === 1 ? "" : "s"}). Chat history stays so you can download again.
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>
+            Files you <strong>sent</strong> are never deleted here — their paths may point at your
+            real project folders (for example <code>.m2</code> or <code>node_modules</code>).
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -793,7 +852,7 @@ export function FilesPanel(props: {
             Cancel
           </Button>
           <Button color="warning" variant="contained" disabled={busy} onClick={() => void clearStorage()}>
-            Clear storage
+            Clear received
           </Button>
         </DialogActions>
       </Dialog>

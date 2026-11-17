@@ -978,6 +978,20 @@ pub fn list_files(app: AppHandle, state: State<AppState>) -> Result<Value, Strin
     }))
 }
 
+fn my_user_id(conn: &rusqlite::Connection) -> String {
+    db::get_profile(conn)
+        .ok()
+        .flatten()
+        .and_then(|p| p["id"].as_str().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+/// Sent files often point at the user's original source (e.g. `.m2`, `node_modules`).
+/// Never delete those from the Files hub — only received downloads.
+fn is_sent_by_me(file: &Value, me: &str) -> bool {
+    !me.is_empty() && file["uploader_id"].as_str() == Some(me)
+}
+
 #[tauri::command]
 pub fn delete_local_files(
     app: AppHandle,
@@ -986,11 +1000,21 @@ pub fn delete_local_files(
 ) -> Result<Value, String> {
     let roots = files_allowed_roots(&app, &state);
     let conn = state.db.lock();
+    let me = my_user_id(&conn);
     let mut deleted = 0u64;
     let mut cleared_only = 0u64;
     let mut missing = 0u64;
+    let mut skipped_sent = 0u64;
     let mut errors: Vec<Value> = Vec::new();
     for fid in file_ids {
+        let Some(file) = db::get_file(&conn, &fid)? else {
+            missing += 1;
+            continue;
+        };
+        if is_sent_by_me(&file, &me) {
+            skipped_sent += 1;
+            continue;
+        }
         match db::delete_local_file_copy(&conn, &fid, &roots) {
             Ok("deleted") => deleted += 1,
             Ok("cleared_only") => cleared_only += 1,
@@ -1002,6 +1026,7 @@ pub fn delete_local_files(
         "deleted": deleted,
         "cleared_only": cleared_only,
         "missing": missing,
+        "skipped_sent": skipped_sent,
         "errors": errors,
     }))
 }
@@ -1010,10 +1035,12 @@ pub fn delete_local_files(
 pub fn clear_local_files(app: AppHandle, state: State<AppState>) -> Result<Value, String> {
     let roots = files_allowed_roots(&app, &state);
     let conn = state.db.lock();
+    let me = my_user_id(&conn);
     let files = db::list_files(&conn)?;
     let mut deleted = 0u64;
     let mut cleared_only = 0u64;
     let mut missing = 0u64;
+    let mut skipped_sent = 0u64;
     let mut errors: Vec<Value> = Vec::new();
     for f in files {
         let fid = f["id"].as_str().unwrap_or("").to_string();
@@ -1024,6 +1051,10 @@ pub fn clear_local_files(app: AppHandle, state: State<AppState>) -> Result<Value
         if path.is_empty() {
             continue;
         }
+        if is_sent_by_me(&f, &me) {
+            skipped_sent += 1;
+            continue;
+        }
         match db::delete_local_file_copy(&conn, &fid, &roots) {
             Ok("deleted") => deleted += 1,
             Ok("cleared_only") => cleared_only += 1,
@@ -1035,6 +1066,7 @@ pub fn clear_local_files(app: AppHandle, state: State<AppState>) -> Result<Value
         "deleted": deleted,
         "cleared_only": cleared_only,
         "missing": missing,
+        "skipped_sent": skipped_sent,
         "errors": errors,
     }))
 }

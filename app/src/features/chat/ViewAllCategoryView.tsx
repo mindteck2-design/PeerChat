@@ -654,7 +654,7 @@ export function ViewAllCategoryView({
                       )}
                     </Box>
                     <Box flex={1} minWidth={0}>
-                      <Typography fontWeight={700} fontSize={14} noWrap color="#FFFFFF">
+                      <Typography fontWeight={700} fontSize={14} noWrap color="text.primary">
                         {m.name}
                       </Typography>
                       <Typography variant="caption" color="text.secondary">
@@ -705,7 +705,7 @@ export function ViewAllCategoryView({
                   >
                     {renderFileIcon(f.ext)}
                     <Box flex={1} minWidth={0}>
-                      <Typography fontWeight={700} fontSize={14} noWrap color="#FFFFFF">
+                      <Typography fontWeight={700} fontSize={14} noWrap color="text.primary">
                         {f.name}
                       </Typography>
                       <Typography variant="caption" color="text.secondary">
@@ -771,7 +771,7 @@ export function ViewAllCategoryView({
                       </IconButton>
                     </Box>
                     <Box minWidth={0}>
-                      <Typography fontWeight={700} fontSize={13.5} noWrap color="#FFFFFF">
+                      <Typography fontWeight={700} fontSize={13.5} noWrap color="text.primary">
                         {f.name}
                       </Typography>
                       <Typography variant="caption" color="text.secondary" display="block">
@@ -829,7 +829,7 @@ export function ViewAllCategoryView({
                       <LinkRoundedIcon sx={{ fontSize: 22 }} />
                     </Box>
                     <Box flex={1} minWidth={0}>
-                      <Typography fontWeight={700} fontSize={14} noWrap color="#FFFFFF">
+                      <Typography fontWeight={700} fontSize={14} noWrap color="text.primary">
                         {l.title}
                       </Typography>
                       <Typography

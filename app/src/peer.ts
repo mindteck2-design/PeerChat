@@ -403,6 +403,7 @@ export const peerApi = {
       deleted: number;
       cleared_only: number;
       missing: number;
+      skipped_sent: number;
       errors: Array<{ file_id: string; error: string }>;
     }>("delete_local_files", { fileIds }),
   clearLocalFiles: () =>
@@ -410,6 +411,7 @@ export const peerApi = {
       deleted: number;
       cleared_only: number;
       missing: number;
+      skipped_sent: number;
       errors: Array<{ file_id: string; error: string }>;
     }>("clear_local_files"),
   ensureFileThumbnail: (fileId: string) =>
