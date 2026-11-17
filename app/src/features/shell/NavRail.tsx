@@ -139,7 +139,7 @@ export function NavRail(props: {
                   mt: 0.25,
                 }}
               >
-                {profile.display_name.trim()}
+                {profile?.display_name?.trim().split(/\s+/)[0] ?? ""}
               </Typography>
             )}
           </Box>

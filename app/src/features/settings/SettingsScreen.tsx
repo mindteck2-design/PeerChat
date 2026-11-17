@@ -127,8 +127,6 @@ export function SettingsScreen(props: {
   const [downloadDir, setDownloadDir] = useState("");
   const [status, setStatus] = useState("");
   const [netHint, setNetHint] = useState<{ lan_ip: string; corp_friendly: boolean } | null>(null);
-  const [diagLogPath, setDiagLogPath] = useState("");
-  const [diagErrorLogPath, setDiagErrorLogPath] = useState("");
 
   const keyFp = fingerprintPublic(exportPublic(props.identity).x25519_public);
   const accent = theme.palette.primary.main;
@@ -573,7 +571,6 @@ export function SettingsScreen(props: {
                   value={team}
                   placeholder="e.g. HMIS"
                   onChange={(e) => setTeam(sanitizeNameOrTeam(e.target.value))}
-                  helperText="HMIS and Hmis are treated as one team"
                   FormHelperTextProps={{ sx: { mx: 0, mt: 0.75 } }}
                   sx={inputSx}
                 />
@@ -1348,38 +1345,6 @@ export function SettingsScreen(props: {
               Decentralized, zero-server local-first peer-to-peer workspace chat application.
               End-to-end encrypted (X25519/Ed25519/AES-256-GCM) with persistent SQLite storage.
             </Typography>
-            {(diagErrorLogPath || diagLogPath) && (
-              <Box sx={{ mt: 0.5 }}>
-                <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
-                  Diagnostics (for support)
-                </Typography>
-                {diagErrorLogPath && (
-                  <Typography
-                    sx={{
-                      fontSize: "0.75rem",
-                      fontFamily: "monospace",
-                      color: mutedColor,
-                      wordBreak: "break-all",
-                      mb: 0.5,
-                    }}
-                  >
-                    Errors: {diagErrorLogPath}
-                  </Typography>
-                )}
-                {diagLogPath && (
-                  <Typography
-                    sx={{
-                      fontSize: "0.75rem",
-                      fontFamily: "monospace",
-                      color: mutedColor,
-                      wordBreak: "break-all",
-                    }}
-                  >
-                    Full log: {diagLogPath}
-                  </Typography>
-                )}
-              </Box>
-            )}
           </Paper>
         </Box>
       )}
