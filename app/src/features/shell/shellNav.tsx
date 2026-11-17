@@ -51,6 +51,7 @@ export function ShellMain(props: {
   calendar: ReactNode;
   games: ReactNode;
   saved: ReactNode;
+  files: ReactNode;
   settings: ReactNode;
   chat: ReactNode;
 }) {
@@ -62,6 +63,7 @@ export function ShellMain(props: {
       {current === "calendar" ? props.calendar : null}
       {current === "games" ? props.games : null}
       {current === "saved" ? props.saved : null}
+      {current === "files" ? props.files : null}
       {current === "settings" ? props.settings : null}
       {showChat ? (
         <Box

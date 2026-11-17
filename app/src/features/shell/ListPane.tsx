@@ -63,7 +63,14 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
           borderRight: "1px solid",
           borderColor: "divider",
           bgcolor: "background.paper",
-          display: nav === "calendar" || nav === "games" || nav === "saved" || nav === "settings" ? "none" : "flex",
+          display:
+            nav === "calendar" ||
+            nav === "games" ||
+            nav === "saved" ||
+            nav === "files" ||
+            nav === "settings"
+              ? "none"
+              : "flex",
         }}
       >
         <Box sx={{ px: 2, pt: 1.75, pb: 1, display: "flex", alignItems: "center", gap: 1 }}>

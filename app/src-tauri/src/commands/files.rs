@@ -904,26 +904,139 @@ pub fn get_file(state: State<AppState>, file_id: String) -> Result<Option<Value>
     db::get_file(&conn, &file_id)
 }
 
+fn stamp_local_path_presence(conn: &rusqlite::Connection, f: &mut Value) {
+    // Folders store local_path as a directory (sender source / received extract).
+    // is_file()-only checks wrongly cleared those and forced a re-download UI.
+    let fid = f["id"].as_str().unwrap_or("").to_string();
+    let path = f["local_path"].as_str().unwrap_or("").trim().to_string();
+    let p = std::path::Path::new(&path);
+    let present = !path.is_empty() && (p.is_file() || p.is_dir());
+    if !path.is_empty() && !present {
+        let _ = db::set_file_local_path(conn, &fid, "");
+        f["local_path"] = Value::Null;
+        f["local_cleared"] = json!(true);
+    }
+    f["local_path_present"] = json!(present);
+}
+
 #[tauri::command]
 pub fn get_files(state: State<AppState>, file_ids: Vec<String>) -> Result<Vec<Value>, String> {
     let conn = state.db.lock();
     let mut out = Vec::with_capacity(file_ids.len());
     for fid in file_ids {
         if let Some(mut f) = db::get_file(&conn, &fid)? {
-            // Folders store local_path as a directory (sender source / received extract).
-            // is_file()-only checks wrongly cleared those and forced a re-download UI.
-            let path = f["local_path"].as_str().unwrap_or("").trim();
-            let p = std::path::Path::new(path);
-            let present = !path.is_empty() && (p.is_file() || p.is_dir());
-            if !path.is_empty() && !present {
-                let _ = db::set_file_local_path(&conn, &fid, "");
-                f["local_path"] = Value::Null;
-            }
-            f["local_path_present"] = json!(present);
+            stamp_local_path_presence(&conn, &mut f);
             out.push(f);
         }
     }
     Ok(out)
+}
+
+fn files_allowed_roots(app: &AppHandle, state: &AppState) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(dir) = resolve_download_dir(app, state) {
+        roots.push(dir);
+    }
+    if let Ok(data) = app.path().app_data_dir() {
+        roots.push(data.clone());
+        roots.push(data.join("staging"));
+        roots.push(data.join("outgoing"));
+        roots.push(data.join("captures"));
+    }
+    roots
+}
+
+#[tauri::command]
+pub fn list_files(app: AppHandle, state: State<AppState>) -> Result<Value, String> {
+    let _ = app;
+    let conn = state.db.lock();
+    let mut files = db::list_files(&conn)?;
+    let mut on_disk_count = 0u64;
+    let mut bytes_on_disk = 0u64;
+    for f in &mut files {
+        stamp_local_path_presence(&conn, f);
+        if f["local_path_present"].as_bool() == Some(true) {
+            on_disk_count += 1;
+            let path = f["local_path"].as_str().unwrap_or("").trim();
+            if !path.is_empty() {
+                let size = f["size_bytes"].as_i64().unwrap_or(0);
+                bytes_on_disk = bytes_on_disk.saturating_add(db::local_disk_bytes(
+                    std::path::Path::new(path),
+                    size,
+                ));
+            }
+        }
+    }
+    let file_count = files.len() as u64;
+    Ok(json!({
+        "files": files,
+        "storage": {
+            "file_count": file_count,
+            "on_disk_count": on_disk_count,
+            "bytes_on_disk": bytes_on_disk,
+        }
+    }))
+}
+
+#[tauri::command]
+pub fn delete_local_files(
+    app: AppHandle,
+    state: State<AppState>,
+    file_ids: Vec<String>,
+) -> Result<Value, String> {
+    let roots = files_allowed_roots(&app, &state);
+    let conn = state.db.lock();
+    let mut deleted = 0u64;
+    let mut cleared_only = 0u64;
+    let mut missing = 0u64;
+    let mut errors: Vec<Value> = Vec::new();
+    for fid in file_ids {
+        match db::delete_local_file_copy(&conn, &fid, &roots) {
+            Ok("deleted") => deleted += 1,
+            Ok("cleared_only") => cleared_only += 1,
+            Ok(_) => missing += 1,
+            Err(e) => errors.push(json!({ "file_id": fid, "error": e })),
+        }
+    }
+    Ok(json!({
+        "deleted": deleted,
+        "cleared_only": cleared_only,
+        "missing": missing,
+        "errors": errors,
+    }))
+}
+
+#[tauri::command]
+pub fn clear_local_files(app: AppHandle, state: State<AppState>) -> Result<Value, String> {
+    let roots = files_allowed_roots(&app, &state);
+    let conn = state.db.lock();
+    let files = db::list_files(&conn)?;
+    let mut deleted = 0u64;
+    let mut cleared_only = 0u64;
+    let mut missing = 0u64;
+    let mut errors: Vec<Value> = Vec::new();
+    for f in files {
+        let fid = f["id"].as_str().unwrap_or("").to_string();
+        if fid.is_empty() {
+            continue;
+        }
+        let path = f["local_path"].as_str().unwrap_or("").trim();
+        if path.is_empty() {
+            continue;
+        }
+        match db::delete_local_file_copy(&conn, &fid, &roots) {
+            Ok("deleted") => deleted += 1,
+            Ok("cleared_only") => cleared_only += 1,
+            Ok(_) => missing += 1,
+            Err(e) => errors.push(json!({ "file_id": fid, "error": e })),
+        }
+    }
+    Ok(json!({
+        "deleted": deleted,
+        "cleared_only": cleared_only,
+        "missing": missing,
+        "errors": errors,
+    }))
 }
 
 #[tauri::command]

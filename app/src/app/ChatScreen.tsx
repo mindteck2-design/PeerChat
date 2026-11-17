@@ -254,6 +254,8 @@ import { useAnnouncementBoards } from "../features/announcements/useAnnouncement
 import { useGroupAdmin } from "../features/groups/useGroupAdmin";
 import { useFileTransfer } from "../features/files/useFileTransfer";
 import { FilePreviewDialog } from "../features/files/FilePreviewDialog";
+import { FilesPanel } from "../features/files/FilesPanel";
+import { SharePeersDialog } from "../features/files/SharePeersDialog";
 import { publishTransferProgress } from "../features/files/transferProgressStore";
 import {
   canPlayInboundNotificationSound,
@@ -570,8 +572,6 @@ export function ChatScreen({
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const screenshotSessionRef = useRef<string | null>(null);
   const [pendingShareFiles, setPendingShareFiles] = useState<string[]>([]);
-  const [sharePick, setSharePick] = useState<string[]>([]);
-  const [shareQuery, setShareQuery] = useState("");
   const [shareBusy, setShareBusy] = useState(false);
   const [scanWarn, setScanWarn] = useState<{
     detail: string;
@@ -1825,8 +1825,6 @@ export function ChatScreen({
     listen<string[]>("share-files", (event) => {
       const paths = (event.payload || []).filter(Boolean);
       setPendingShareFiles(paths);
-      setSharePick([]);
-      setShareQuery("");
     }).then((fn) => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
@@ -1847,8 +1845,6 @@ export function ChatScreen({
           if (!paths.length) return;
           if (!activeRef.current) {
             setPendingShareFiles(paths);
-            setSharePick([]);
-            setShareQuery("");
             return;
           }
           void stageDiskPaths(paths);
@@ -2266,14 +2262,10 @@ export function ChatScreen({
     }
   }
 
-  async function confirmShareFiles() {
-    const paths = [...pendingShareFiles];
-    const picks = [...sharePick];
+  async function confirmShareFiles(paths: string[], picks: string[]) {
     if (!paths.length || !picks.length || shareBusy) return;
     setShareBusy(true);
     setPendingShareFiles([]);
-    setSharePick([]);
-    setShareQuery("");
     let lastConv: Conversation | null = null;
     let okCount = 0;
     try {
@@ -5045,21 +5037,22 @@ export function ChatScreen({
     }
   }
 
+  /** Local delete for a left/removed group (must not still be a member). */
   async function handleRemoveLeftGroup(conv?: Conversation | null) {
     const target = conv || active;
     if (!target || target.kind !== "group") return;
-    // Only when you're no longer a member (left or removed).
     const left =
       target.i_am_member === false ||
       (target.id === active?.id && membersLoaded && !inGroup);
     if (!left) {
-      setStatus("You're still in this group. Leave the group first, or use Delete messages.");
+      setStatus("You're still in this group. Leave the group first, then Delete chat.");
       return;
     }
+    const title = target.title?.trim() || "this group";
     const ok = await askConfirm({
-      title: "Remove left group?",
-      body: "Remove this group from your chat list? Messages and files for this group will be deleted on this computer only.",
-      confirmLabel: "Remove group",
+      title: "Delete chat?",
+      body: `Delete “${title}” from your chats? Messages and files are removed on this computer only. Other members keep the group.`,
+      confirmLabel: "Delete chat",
       danger: true,
     });
     if (!ok) return;
@@ -5071,7 +5064,7 @@ export function ChatScreen({
         setActive(null);
       }
       await refresh();
-      setStatus("Group removed from your chats");
+      setStatus("Chat deleted");
     } catch (err: any) {
       setStatus(err?.message || String(err));
     }
@@ -5713,6 +5706,29 @@ export function ChatScreen({
             onRemove={async (id) => {
               await peerApi.deleteSavedItem(id);
               setSavedItems(await peerApi.listSavedItems());
+            }}
+          />
+          }
+          files={
+          <FilesPanel
+            peers={peers}
+            profile={profile}
+            convs={convs}
+            fileNames={fileNames}
+            shareBusy={shareBusy}
+            openAttachment={openAttachment}
+            onJumpToChat={(conversationId) => {
+              const conv = convs.find((c) => c.id === conversationId);
+              if (conv) {
+                selectConversation(conv);
+                setNav("chats");
+                setTab(1);
+              } else {
+                setStatus("That chat is no longer available");
+              }
+            }}
+            onSharePaths={async (paths, peerIds) => {
+              await confirmShareFiles(paths, peerIds);
             }}
           />
           }
@@ -6364,22 +6380,40 @@ export function ChatScreen({
             </Typography>
           </MenuItem>
         )}
-        {convMenu?.conv.kind === "group" && convMenu.conv.i_am_member === false && (
-            <MenuItem
-              onClick={() => {
-                const c = convMenu.conv;
-                setConvMenu(null);
-                void handleRemoveLeftGroup(c);
-              }}
-            >
-              <ListItemIcon>
-                <DeleteForeverIcon fontSize="small" color="error" />
-              </ListItemIcon>
-              <Typography color="error.main" fontWeight={600}>
-                Remove left group…
-              </Typography>
-            </MenuItem>
-          )}
+        {convMenu?.conv.kind === "group" && (
+          <Tooltip
+            title={
+              convMenu.conv.i_am_member === false
+                ? ""
+                : "Leave the group first to delete it from your chats"
+            }
+            placement="left"
+          >
+            <span>
+              <MenuItem
+                disabled={convMenu.conv.i_am_member !== false}
+                onClick={() => {
+                  const c = convMenu.conv;
+                  setConvMenu(null);
+                  void handleRemoveLeftGroup(c);
+                }}
+              >
+                <ListItemIcon>
+                  <DeleteForeverIcon
+                    fontSize="small"
+                    color={convMenu.conv.i_am_member === false ? "error" : "disabled"}
+                  />
+                </ListItemIcon>
+                <Typography
+                  color={convMenu.conv.i_am_member === false ? "error.main" : "text.disabled"}
+                  fontWeight={600}
+                >
+                  Delete chat…
+                </Typography>
+              </MenuItem>
+            </span>
+          </Tooltip>
+        )}
       </Menu>
 
       <Menu
@@ -7110,228 +7144,16 @@ export function ChatScreen({
         </DialogActions>
       </Dialog>
 
-      <Dialog
+      <SharePeersDialog
         open={pendingShareFiles.length > 0}
-        onClose={() => {
-          if (shareBusy) return;
-          setPendingShareFiles([]);
-          setSharePick([]);
-          setShareQuery("");
+        paths={pendingShareFiles}
+        peers={others}
+        busy={shareBusy}
+        onClose={() => setPendingShareFiles([])}
+        onSend={async (peerIds) => {
+          await confirmShareFiles([...pendingShareFiles], peerIds);
         }}
-        fullWidth
-        maxWidth="sm"
-        PaperProps={{
-          sx: {
-            bgcolor: "background.paper",
-            backgroundImage: "none",
-            border: "1px solid",
-            borderColor: "divider",
-            display: "flex",
-            flexDirection: "column",
-            maxHeight: "min(620px, calc(100% - 48px))",
-          },
-        }}
-      >
-        <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1.5, pb: 1, pr: 6 }}>
-          <Avatar
-            sx={{
-              width: 44,
-              height: 44,
-              bgcolor: "primary.main",
-              color: "primary.contrastText",
-            }}
-          >
-            <AttachFileIcon />
-          </Avatar>
-          <Box sx={{ minWidth: 0 }}>
-            <Typography component="div" sx={{ fontWeight: 700, fontSize: 18, lineHeight: 1.25 }}>
-              Share in PeerChat
-            </Typography>
-            <Typography variant="caption" color="text.secondary" noWrap component="div">
-              {pendingShareFiles.length === 1
-                ? pendingShareFiles[0].split(/[/\\]/).pop()
-                : `${pendingShareFiles.length} files`}
-              {sharePick.length > 0 ? ` · ${sharePick.length} selected` : ""}
-            </Typography>
-          </Box>
-          <IconButton
-            aria-label="Close"
-            disabled={shareBusy}
-            onClick={() => {
-              setPendingShareFiles([]);
-              setSharePick([]);
-              setShareQuery("");
-            }}
-            sx={{ position: "absolute", right: 10, top: 10 }}
-          >
-            <CloseIcon />
-          </IconButton>
-        </DialogTitle>
-        <DialogContent
-          sx={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 1.25,
-            overflow: "hidden",
-            flex: "1 1 auto",
-            minHeight: 0,
-            pt: "4px !important",
-          }}
-        >
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              gap: 1.5,
-              flexShrink: 0,
-              minWidth: 0,
-            }}
-          >
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexShrink: 0 }}>
-              <PeopleAltIcon sx={{ fontSize: 22, color: "primary.main" }} />
-              <Typography sx={{ fontWeight: 700, fontSize: 15, lineHeight: 1.2 }}>
-                Select people
-              </Typography>
-            </Box>
-            <TextField
-              size="small"
-              placeholder="Search contacts..."
-              value={shareQuery}
-              onChange={(e) => setShareQuery(e.target.value)}
-              disabled={shareBusy}
-              sx={{ flex: "1 1 160px", minWidth: 0, ml: "auto", maxWidth: 240 }}
-              InputProps={{
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <SearchIcon fontSize="small" />
-                  </InputAdornment>
-                ),
-              }}
-            />
-          </Box>
-          <List
-            dense
-            disablePadding
-            sx={{
-              overflowY: "auto",
-              flex: "1 1 auto",
-              minHeight: others.length ? 0 : 72,
-              maxHeight: 360,
-            }}
-          >
-            {others
-              .filter((p) => {
-                const q = shareQuery.trim().toLowerCase();
-                if (!q) return true;
-                return `${p.display_name || ""} ${p.team || ""} ${p.last_ip || ""}`
-                  .toLowerCase()
-                  .includes(q);
-              })
-              .map((p) => {
-                const on = sharePick.includes(p.user_id);
-                const label = p.team?.trim()
-                  ? `${p.display_name} · ${p.team.trim()}`
-                  : p.display_name;
-                return (
-                  <ListItemButton
-                    key={p.user_id}
-                    selected={on}
-                    disabled={shareBusy}
-                    onClick={() =>
-                      setSharePick((ids) =>
-                        ids.includes(p.user_id)
-                          ? ids.filter((x) => x !== p.user_id)
-                          : [...ids, p.user_id]
-                      )
-                    }
-                    sx={{
-                      borderRadius: 1.5,
-                      mb: 0.25,
-                      py: 0.6,
-                      "&.Mui-selected": {
-                        bgcolor: "action.selected",
-                      },
-                    }}
-                  >
-                    <Checkbox
-                      edge="start"
-                      checked={on}
-                      tabIndex={-1}
-                      disableRipple
-                      inputProps={{ "aria-label": `Select ${p.display_name || "person"}` }}
-                      sx={{ pointerEvents: "none", mr: 0.25 }}
-                    />
-                    <ListItemAvatar sx={{ minWidth: 44 }}>
-                      <Avatar
-                        sx={{
-                          width: 36,
-                          height: 36,
-                          bgcolor: avatarColor(p.display_name || "?"),
-                          color: "#fff",
-                          fontSize: 13,
-                          fontWeight: 700,
-                        }}
-                      >
-                        {(p.display_name || "?").slice(0, 1).toUpperCase()}
-                      </Avatar>
-                    </ListItemAvatar>
-                    <ListItemText
-                      primary={label}
-                      secondary={p.last_ip?.trim() || (p.online ? "Online" : "Offline")}
-                      primaryTypographyProps={{ fontWeight: 600, fontSize: 14, noWrap: true }}
-                      secondaryTypographyProps={{
-                        fontSize: 12,
-                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                        noWrap: true,
-                      }}
-                    />
-                  </ListItemButton>
-                );
-              })}
-            {!others.length && (
-              <Typography variant="body2" color="text.secondary" sx={{ px: 0.5, py: 2 }}>
-                No peers on this network yet
-              </Typography>
-            )}
-            {!!others.length &&
-              !others.some((p) => {
-                const q = shareQuery.trim().toLowerCase();
-                if (!q) return true;
-                return `${p.display_name || ""} ${p.team || ""} ${p.last_ip || ""}`
-                  .toLowerCase()
-                  .includes(q);
-              }) && (
-                <Typography variant="body2" color="text.secondary" sx={{ px: 0.5, py: 2 }}>
-                  No people match
-                </Typography>
-              )}
-          </List>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, py: 1.5, flexShrink: 0 }}>
-          <Button
-            disabled={shareBusy}
-            onClick={() => {
-              setPendingShareFiles([]);
-              setSharePick([]);
-              setShareQuery("");
-            }}
-          >
-            Cancel
-          </Button>
-          <Button
-            variant="contained"
-            disabled={!sharePick.length || shareBusy}
-            onClick={() => void confirmShareFiles()}
-            startIcon={shareBusy ? <CircularProgress size={16} color="inherit" /> : undefined}
-          >
-            {shareBusy
-              ? "Sending…"
-              : sharePick.length
-                ? `Send (${sharePick.length})`
-                : "Send"}
-          </Button>
-        </DialogActions>
-      </Dialog>
+      />
     </Box>
   );
 }

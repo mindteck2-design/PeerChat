@@ -6,6 +6,7 @@ import CampaignIcon from "@mui/icons-material/CampaignRounded";
 import CalendarMonthIcon from "@mui/icons-material/CalendarMonthRounded";
 import SportsEsportsIcon from "@mui/icons-material/SportsEsportsRounded";
 import BookmarkBorderIcon from "@mui/icons-material/BookmarkBorderRounded";
+import FolderOpenIcon from "@mui/icons-material/FolderOpenRounded";
 import SettingsIcon from "@mui/icons-material/SettingsRounded";
 import { FEATURE_GAMES } from "../../features";
 import type { Conversation, Profile } from "../../peer";
@@ -17,6 +18,7 @@ export type ShellNav =
   | "calendar"
   | "games"
   | "saved"
+  | "files"
   | "announcements"
   | "settings";
 
@@ -68,6 +70,7 @@ export function NavRail(props: {
             ? [["games", "Games", <SportsEsportsIcon key="s" />] as const]
             : []),
           ["saved", "Saved", <BookmarkBorderIcon key="b" />],
+          ["files", "Files", <FolderOpenIcon key="f" />],
         ] as const
       ).map(([id, label, icon]) => (
         <Tooltip key={id} title={label} placement="right">

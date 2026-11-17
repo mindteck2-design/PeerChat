@@ -366,12 +366,52 @@ export const peerApi = {
         filename_nonce?: string;
         local_path?: string | null;
         local_path_present?: boolean;
+        local_cleared?: boolean;
         wrapped_keys?: any;
         chunk_count?: number;
         file_crypto_v?: number;
         uploader_id?: string;
+        conversation_id?: string;
+        created_at?: string;
       }>
     >("get_files", { fileIds }),
+  listFiles: () =>
+    inv<{
+      files: Array<{
+        id: string;
+        conversation_id?: string;
+        uploader_id?: string;
+        enc_filename?: string;
+        filename_nonce?: string;
+        size_bytes?: number;
+        chunk_count?: number;
+        wrapped_keys?: any;
+        local_path?: string | null;
+        local_path_present?: boolean;
+        local_cleared?: boolean;
+        created_at?: string;
+        file_crypto_v?: number;
+      }>;
+      storage: {
+        file_count: number;
+        on_disk_count: number;
+        bytes_on_disk: number;
+      };
+    }>("list_files"),
+  deleteLocalFiles: (fileIds: string[]) =>
+    inv<{
+      deleted: number;
+      cleared_only: number;
+      missing: number;
+      errors: Array<{ file_id: string; error: string }>;
+    }>("delete_local_files", { fileIds }),
+  clearLocalFiles: () =>
+    inv<{
+      deleted: number;
+      cleared_only: number;
+      missing: number;
+      errors: Array<{ file_id: string; error: string }>;
+    }>("clear_local_files"),
   ensureFileThumbnail: (fileId: string) =>
     inv<{ file_id: string; mime: string; data_b64: string }>("ensure_file_thumbnail", {
       fileId,

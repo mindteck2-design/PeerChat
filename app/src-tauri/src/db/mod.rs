@@ -186,6 +186,10 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         [],
     );
     let _ = conn.execute(
+        "ALTER TABLE files ADD COLUMN local_cleared INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
         "ALTER TABLE peers ADD COLUMN designation TEXT NOT NULL DEFAULT ''",
         [],
     );
