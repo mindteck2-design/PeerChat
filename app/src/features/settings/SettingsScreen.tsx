@@ -55,6 +55,8 @@ import { ENTERPRISE_ROLES, canBroadcastRole } from "../profile/roles";
 import { appErrorLogPath, appLogPath } from "../../shared/appLog";
 import { AVATAR_PRESETS, normalizeAvatarId, type AvatarId } from "../../shared/avatars";
 import { PeerAvatar } from "../../shared/PeerAvatar";
+import { AvatarPickerDialog } from "./AvatarPickerDialog";
+import EditRoundedIcon from "@mui/icons-material/EditRounded";
 
 function sanitizeNameOrTeam(val: string): string {
   return val.replace(/[^a-zA-Z0-9 _-]/g, "");
@@ -89,6 +91,7 @@ export function SettingsScreen(props: {
     normalizeAvatarId(props.profile.avatar_id)
   );
   const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarPickerOpen, setAvatarPickerOpen] = useState(false);
 
   useEffect(() => {
     setAvatarId(normalizeAvatarId(props.profile.avatar_id));
@@ -464,94 +467,88 @@ export function SettingsScreen(props: {
               <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 1 }}>
                 Display picture
               </Typography>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 1.5 }}>
-                <PeerAvatar
-                  name={name || props.profile.display_name}
-                  avatarId={avatarId}
-                  size={64}
-                />
-                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor }}>
-                  Pick a preset for your LAN profile. Others see it after discovery refreshes.
-                </Typography>
-              </Box>
-              <Box
-                sx={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(56px, 1fr))",
-                  gap: 1,
-                }}
-              >
+              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
                 <Box
-                  component="button"
-                  type="button"
-                  disabled={avatarBusy}
-                  onClick={async () => {
-                    setAvatarBusy(true);
-                    try {
-                      const p = await peerApi.setAvatarId("");
-                      setAvatarId("");
-                      props.onNameUpdated(p);
-                      setStatus("Using letter avatar");
-                    } catch (err: any) {
-                      setStatus(err?.message || String(err));
-                    } finally {
-                      setAvatarBusy(false);
-                    }
-                  }}
                   sx={{
-                    border: 2,
-                    borderColor: !avatarId ? accent : "divider",
-                    borderRadius: 2,
-                    p: 0.5,
-                    bgcolor: "transparent",
-                    cursor: "pointer",
-                    display: "grid",
-                    placeItems: "center",
+                    position: "relative",
+                    width: 72,
+                    height: 72,
+                    borderRadius: "50%",
+                    flexShrink: 0,
+                    "&:hover .avatar-edit-btn, &:focus-within .avatar-edit-btn": {
+                      opacity: 1,
+                      transform: "scale(1)",
+                    },
                   }}
-                  title="Use initial"
                 >
-                  <PeerAvatar name={name || props.profile.display_name} size={44} />
-                </Box>
-                {AVATAR_PRESETS.map((preset) => (
-                  <Box
-                    key={preset.id}
-                    component="button"
-                    type="button"
+                  <PeerAvatar
+                    name={name || props.profile.display_name}
+                    avatarId={avatarId}
+                    size={72}
+                  />
+                  <IconButton
+                    className="avatar-edit-btn"
+                    aria-label="Edit avatar"
                     disabled={avatarBusy}
-                    onClick={async () => {
-                      setAvatarBusy(true);
-                      try {
-                        const p = await peerApi.setAvatarId(preset.id);
-                        setAvatarId(preset.id);
-                        props.onNameUpdated(p);
-                        setStatus(`Avatar set to ${preset.label}`);
-                      } catch (err: any) {
-                        setStatus(err?.message || String(err));
-                      } finally {
-                        setAvatarBusy(false);
-                      }
-                    }}
+                    onClick={() => setAvatarPickerOpen(true)}
+                    size="small"
                     sx={{
+                      position: "absolute",
+                      right: -2,
+                      bottom: -2,
+                      width: 28,
+                      height: 28,
+                      bgcolor: "primary.main",
+                      color: "primary.contrastText",
                       border: 2,
-                      borderColor: avatarId === preset.id ? accent : "divider",
-                      borderRadius: 2,
-                      p: 0.5,
-                      bgcolor: "transparent",
-                      cursor: "pointer",
-                      display: "grid",
-                      placeItems: "center",
+                      borderColor: "background.paper",
+                      opacity: { xs: 1, sm: 0 },
+                      transform: { xs: "scale(1)", sm: "scale(0.92)" },
+                      transition: "opacity 0.15s ease, transform 0.15s ease, background-color 0.15s ease",
+                      "&:hover": { bgcolor: "primary.dark" },
+                      "&.Mui-disabled": {
+                        bgcolor: "action.disabledBackground",
+                        color: "action.disabled",
+                      },
                     }}
-                    title={preset.label}
                   >
-                    <PeerAvatar
-                      name={preset.label}
-                      avatarId={preset.id}
-                      size={44}
-                    />
-                  </Box>
-                ))}
+                    <EditRoundedIcon sx={{ fontSize: 14 }} />
+                  </IconButton>
+                </Box>
+                <Box>
+                  <Typography sx={{ fontSize: "0.875rem", color: titleColor, fontWeight: 600 }}>
+                    {AVATAR_PRESETS.find((p) => p.id === avatarId)?.label || "Letter initial"}
+                  </Typography>
+                  <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 0.25 }}>
+                    Hover the photo and click edit to choose a preset. Peers see it after discovery refreshes.
+                  </Typography>
+                </Box>
               </Box>
             </Box>
+
+            <AvatarPickerDialog
+              open={avatarPickerOpen}
+              name={name || props.profile.display_name}
+              avatarId={avatarId}
+              busy={avatarBusy}
+              onClose={() => setAvatarPickerOpen(false)}
+              onApply={async (next) => {
+                setAvatarBusy(true);
+                try {
+                  const p = await peerApi.setAvatarId(next);
+                  setAvatarId(next);
+                  props.onNameUpdated(p);
+                  setAvatarPickerOpen(false);
+                  const label =
+                    AVATAR_PRESETS.find((preset) => preset.id === next)?.label || "letter avatar";
+                  setStatus(next ? `Avatar set to ${label}` : "Using letter avatar");
+                } catch (err: any) {
+                  setStatus(err?.message || String(err));
+                } finally {
+                  setAvatarBusy(false);
+                }
+              }}
+            />
 
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2, mb: 2 }}>
               <Box>
@@ -1081,11 +1078,13 @@ export function SettingsScreen(props: {
                       const ok = await peerApi.enableWindowsFirewall();
                       const next = await peerApi.windowsFirewallStatus();
                       setFwStatus(next);
-                      setStatus(
-                        ok
-                          ? "LAN firewall rules enabled"
-                          : "Could not add rules — approve UAC or allow PeerChat in Windows Security"
-                      );
+                      if (ok || next.ok) {
+                        setStatus("LAN firewall rules enabled");
+                      } else {
+                        setStatus(
+                          "Could not add rules — approve UAC, or allow PeerChat in Windows Security → Firewall"
+                        );
+                      }
                     } catch (err: any) {
                       setStatus(err?.message || String(err));
                     } finally {
