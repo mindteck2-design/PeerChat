@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT/app"
 export PATH="$HOME/.cargo/bin:$PATH"
+# Single edition with games (matches CI).
+export VITE_ENABLE_GAMES=true
 npm install
 npm run tauri:build -- --bundles deb
 mkdir -p "$ROOT/dist/linux"

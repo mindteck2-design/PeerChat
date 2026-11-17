@@ -9,7 +9,7 @@ Peers must be on the same **corporate LAN/VPN** (not guest Wi‑Fi). Keep the ap
 ## Release (v1.0.0+)
 
 1. Confirm version is synced in `app/package.json`, `app/src-tauri/Cargo.toml`, `app/src-tauri/tauri.conf.json`, and `app/src/version.ts`.
-2. Push to `v1` or `main` (or tag `v*`) so [build-installers](.github/workflows/build-installers.yml) produces Windows NSIS + Linux `.deb` artifacts.
+2. Push to `v1` or `main` (or tag `v*`) so [build-installers](.github/workflows/build-installers.yml) produces one Windows NSIS + one Linux `.deb` artifact (games included).
 3. Download CI artifacts (or build locally via `packaging/client/build_windows.bat` / `build_linux.sh`).
 4. Distribute the setup folder / installer from a **trusted channel** only (see [SECURITY.md](SECURITY.md)). Windows builds are unsigned — SmartScreen may warn until a code-signing cert is configured.
 5. End users: run `Install-PeerChat.bat` (or install the `.deb`). Re-run from a newer pack to update; chat history is kept.

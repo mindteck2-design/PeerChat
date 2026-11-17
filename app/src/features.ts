@@ -1,10 +1,8 @@
 // ─── PeerChat build-time feature flags ───────────────────────────────────────
 //
-// By default, games are disabled for public / internet builds.
-// For intranet / enterprise builds with games enabled, set:
-//   VITE_ENABLE_GAMES=true
-// or run:
-//   npm run build:intranet
+// Release builds (CI + .env.production) ship with games enabled.
+// To omit games from a local bundle, set:
+//   VITE_ENABLE_GAMES=false
 //
 // When false:
 //   • Removes the UI completely (no sidebar tab, no settings section)
@@ -14,6 +12,6 @@
 
 /**
  * Include the offline games section (Snake, 2048, Tetris, Tic-Tac-Toe, RPS, Dots & Boxes).
- * Controlled via environment variable VITE_ENABLE_GAMES="true".
+ * Controlled via environment variable VITE_ENABLE_GAMES (true in production/CI).
  */
 export const FEATURE_GAMES: boolean = import.meta.env?.VITE_ENABLE_GAMES === "true";

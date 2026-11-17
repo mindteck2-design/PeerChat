@@ -16,6 +16,9 @@ echo Building PeerChat !APPVER! ...
 call npm install
 if errorlevel 1 exit /b 1
 
+rem Single edition with games (matches CI).
+set VITE_ENABLE_GAMES=true
+
 rem App binary. Full NSIS wizard needs GitHub (binary-releases); skip when blocked.
 call npm run tauri:build -- --no-bundle
 if errorlevel 1 exit /b 1

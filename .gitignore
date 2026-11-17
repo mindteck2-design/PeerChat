@@ -24,3 +24,4 @@ Thumbs.db
 **/*secret*
 **/credentials*
 !.env.intranet
+!.env.production
