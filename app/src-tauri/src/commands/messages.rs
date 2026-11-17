@@ -68,7 +68,7 @@ pub fn get_message_receipts(
     message_id: String,
 ) -> Result<Value, String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("");
     let msg = db::get_message(&conn, &message_id)?.ok_or("message missing")?;
     if msg["sender_id"].as_str() != Some(me) {
@@ -110,7 +110,7 @@ pub fn delete_message_for_everyone(
     message_id: String,
 ) -> Result<Value, String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     let msg = db::get_message(&conn, &message_id)?.ok_or("message missing")?;
     if msg["sender_id"].as_str() != Some(me.as_str()) {
@@ -221,7 +221,7 @@ pub fn send_message(
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| e.to_string())?;
         let result = (|| -> Result<Value, String> {
-            let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+            let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
             let me = profile["id"].as_str().unwrap_or("");
             if is_edit {
                 let mid = msg["id"].as_str().unwrap_or("");

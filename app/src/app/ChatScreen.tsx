@@ -211,6 +211,7 @@ import {
   mimeForName,
   truncate,
 } from "../shared/format";
+import { PeerAvatar } from "../shared/PeerAvatar";
 import { messageAttachmentIds } from "../shared/messageMeta";
 import {
   MESSAGE_PAGE_SIZE,
@@ -5673,7 +5674,7 @@ export function ChatScreen({
             ) : (
               <>
                 {active && (
-                  <Avatar
+                  <Box
                     onClick={() => {
                       if (msgSelecting) return;
                       if (isAnnounceBoard) {
@@ -5686,26 +5687,33 @@ export function ChatScreen({
                         setChatInfoOpen(true);
                       }
                     }}
-                    sx={{
-                      width: 42,
-                      height: 42,
-                      bgcolor: avatarColor(activeTitle),
-                      color: "#FFFFFF",
-                      fontSize: active.kind === "group" ? 22 : 18,
-                      fontWeight: 700,
-                      cursor: msgSelecting ? "default" : "pointer",
-                    }}
+                    sx={{ cursor: msgSelecting ? "default" : "pointer" }}
                   >
                     {active.kind === "group" ? (
-                      isAnnounceBoard ? (
-                        <CampaignIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
-                      ) : (
-                        <GroupsIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
-                      )
+                      <Avatar
+                        sx={{
+                          width: 42,
+                          height: 42,
+                          bgcolor: avatarColor(activeTitle),
+                          color: "#FFFFFF",
+                          fontSize: 22,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {isAnnounceBoard ? (
+                          <CampaignIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
+                        ) : (
+                          <GroupsIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
+                        )}
+                      </Avatar>
                     ) : (
-                      activeTitle.slice(0, 1).toUpperCase()
+                      <PeerAvatar
+                        name={activeTitle}
+                        avatarId={activeDmPeer?.avatar_id}
+                        size={42}
+                      />
                     )}
-                  </Avatar>
+                  </Box>
                 )}
                 <Box
                   flex={1}

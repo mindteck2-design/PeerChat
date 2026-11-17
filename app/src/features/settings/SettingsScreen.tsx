@@ -53,6 +53,8 @@ import {
 } from "../../shared/sound";
 import { ENTERPRISE_ROLES, canBroadcastRole } from "../profile/roles";
 import { appErrorLogPath, appLogPath } from "../../shared/appLog";
+import { AVATAR_PRESETS, normalizeAvatarId, type AvatarId } from "../../shared/avatars";
+import { PeerAvatar } from "../../shared/PeerAvatar";
 
 function sanitizeNameOrTeam(val: string): string {
   return val.replace(/[^a-zA-Z0-9 _-]/g, "");
@@ -83,6 +85,14 @@ export function SettingsScreen(props: {
   const [presence, setPresence] = useState("Available");
   const [statusMsg, setStatusMsg] = useState("");
   const [savingProfile, setSavingProfile] = useState(false);
+  const [avatarId, setAvatarId] = useState<AvatarId | "">(
+    normalizeAvatarId(props.profile.avatar_id)
+  );
+  const [avatarBusy, setAvatarBusy] = useState(false);
+
+  useEffect(() => {
+    setAvatarId(normalizeAvatarId(props.profile.avatar_id));
+  }, [props.profile.avatar_id]);
 
   // General tab state
   const [autostartOn, setAutostartOn] = useState(true);
@@ -448,6 +458,99 @@ export function SettingsScreen(props: {
               <Typography sx={{ fontSize: "1.05rem", fontWeight: 700, color: titleColor }}>
                 Personal & Team Details
               </Typography>
+            </Box>
+
+            <Box sx={{ mb: 2.5 }}>
+              <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 1 }}>
+                Display picture
+              </Typography>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 1.5 }}>
+                <PeerAvatar
+                  name={name || props.profile.display_name}
+                  avatarId={avatarId}
+                  size={64}
+                />
+                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor }}>
+                  Pick a preset for your LAN profile. Others see it after discovery refreshes.
+                </Typography>
+              </Box>
+              <Box
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(56px, 1fr))",
+                  gap: 1,
+                }}
+              >
+                <Box
+                  component="button"
+                  type="button"
+                  disabled={avatarBusy}
+                  onClick={async () => {
+                    setAvatarBusy(true);
+                    try {
+                      const p = await peerApi.setAvatarId("");
+                      setAvatarId("");
+                      props.onNameUpdated(p);
+                      setStatus("Using letter avatar");
+                    } catch (err: any) {
+                      setStatus(err?.message || String(err));
+                    } finally {
+                      setAvatarBusy(false);
+                    }
+                  }}
+                  sx={{
+                    border: 2,
+                    borderColor: !avatarId ? accent : "divider",
+                    borderRadius: 2,
+                    p: 0.5,
+                    bgcolor: "transparent",
+                    cursor: "pointer",
+                    display: "grid",
+                    placeItems: "center",
+                  }}
+                  title="Use initial"
+                >
+                  <PeerAvatar name={name || props.profile.display_name} size={44} />
+                </Box>
+                {AVATAR_PRESETS.map((preset) => (
+                  <Box
+                    key={preset.id}
+                    component="button"
+                    type="button"
+                    disabled={avatarBusy}
+                    onClick={async () => {
+                      setAvatarBusy(true);
+                      try {
+                        const p = await peerApi.setAvatarId(preset.id);
+                        setAvatarId(preset.id);
+                        props.onNameUpdated(p);
+                        setStatus(`Avatar set to ${preset.label}`);
+                      } catch (err: any) {
+                        setStatus(err?.message || String(err));
+                      } finally {
+                        setAvatarBusy(false);
+                      }
+                    }}
+                    sx={{
+                      border: 2,
+                      borderColor: avatarId === preset.id ? accent : "divider",
+                      borderRadius: 2,
+                      p: 0.5,
+                      bgcolor: "transparent",
+                      cursor: "pointer",
+                      display: "grid",
+                      placeItems: "center",
+                    }}
+                    title={preset.label}
+                  >
+                    <PeerAvatar
+                      name={preset.label}
+                      avatarId={preset.id}
+                      size={44}
+                    />
+                  </Box>
+                ))}
+              </Box>
             </Box>
 
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2, mb: 2 }}>

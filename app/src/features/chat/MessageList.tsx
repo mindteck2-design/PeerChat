@@ -29,6 +29,7 @@ import { QUICK_REACTIONS, emojiOnlyCount, emojiOnlyFontSize } from "../../emoji"
 import { FEATURE_GAMES } from "../../features";
 import { messageAttachmentIds } from "../../shared/messageMeta";
 import { avatarColor, formatClock, truncate } from "../../shared/format";
+import { PeerAvatar } from "../../shared/PeerAvatar";
 import { peerApi } from "../../peer";
 import type { ChatScreenVm } from "./chatVm";
 
@@ -534,19 +535,12 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
 
           {/* Avatars only in groups — DMs are always the same peer. */}
           {!mine && isGroup && !msgSelecting && (
-            <Avatar
-              sx={{
-                width: 28,
-                height: 28,
-                fontSize: 12,
-                fontWeight: 700,
-                bgcolor: avatarColor(label),
-                flexShrink: 0,
-                mb: 0.25,
-              }}
-            >
-              {label[0]?.toUpperCase() || "?"}
-            </Avatar>
+            <PeerAvatar
+              name={label}
+              avatarId={peers.find((p) => p.user_id === m.sender_id)?.avatar_id}
+              size={28}
+              sx={{ flexShrink: 0, mb: 0.25 }}
+            />
           )}
 
           {/* Bubble wrapper with attached reactions */}
@@ -785,7 +779,9 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                   sx={{ maxWidth: 200, fontSize: 11 }}
                 >
                   {quoted.kind === "deleted"
-                    ? "Deleted message"
+                    ? quoted.sender_id === profile.id
+                      ? "You deleted this message"
+                      : "This message was deleted"
                     : messageAttachmentIds(quoted).length
                       ? [
                           plain[quoted.id]?.trim()
@@ -812,7 +808,7 @@ function MessageListImpl({ vm }: { vm: ChatScreenVm }) {
                   color="text.secondary"
                   sx={{ fontSize: 13, lineHeight: 1.35 }}
                 >
-                  This message was deleted
+                  {mine ? "You deleted this message" : "This message was deleted"}
                 </Typography>
               </Stack>
             ) : m.kind === "calendar_share" ? (

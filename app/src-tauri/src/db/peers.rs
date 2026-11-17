@@ -289,6 +289,34 @@ pub fn upsert_peer_with_team(
     online: bool,
     team: Option<&str>,
 ) -> Result<(), String> {
+    upsert_peer_with_team_avatar(
+        conn,
+        user_id,
+        display_name,
+        x25519_public,
+        ed25519_public,
+        ip,
+        port,
+        tls_fingerprint,
+        online,
+        team,
+        None,
+    )
+}
+
+pub fn upsert_peer_with_team_avatar(
+    conn: &Connection,
+    user_id: &str,
+    display_name: &str,
+    x25519_public: &str,
+    ed25519_public: &str,
+    ip: Option<&str>,
+    port: Option<i64>,
+    tls_fingerprint: Option<&str>,
+    online: bool,
+    team: Option<&str>,
+    avatar: Option<&str>,
+) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
     // Never persist loopback / garbage — that poisons reverse delivery.
     let ip = ip.filter(|s| crate::discovery::is_usable_lan_ip(s));
@@ -318,6 +346,13 @@ pub fn upsert_peer_with_team(
         ],
     )
     .map_err(|e| e.to_string())?;
+    // Avatar is optional on older beacons; only overwrite when a non-empty id arrives.
+    if let Some(aid) = avatar.filter(|s| !s.trim().is_empty()) {
+        let _ = conn.execute(
+            "UPDATE peers SET avatar_id=?2 WHERE user_id=?1",
+            params![user_id, aid.trim()],
+        );
+    }
     stage_peer_identity(
         conn,
         user_id,
@@ -335,8 +370,9 @@ pub fn upsert_peer_with_team(
     Ok(())
 }
 
-/// Ensure `keep_user_id` is the only peer with `last_ip = ip`. Transfers pin/block
-/// from displaced rows, then deletes them.
+/// Ensure `keep_user_id` is the only peer advertising `last_ip = ip`.
+/// Displaced rows are tombstoned (IP cleared, offline) so old DM titles still resolve;
+/// they are not hard-deleted (that caused orphan "Direct" chats after reinstall).
 pub fn claim_unique_peer_ip(
     conn: &Connection,
     keep_user_id: &str,
@@ -380,7 +416,10 @@ pub fn claim_unique_peer_ip(
             let _ = set_peer_blocked(conn, keep_user_id, true);
             keep_blocked = true;
         }
-        let _ = conn.execute("DELETE FROM peers WHERE user_id=?1", params![dup_id]);
+        let _ = conn.execute(
+            "UPDATE peers SET last_ip=NULL, last_port=NULL, online=0 WHERE user_id=?1",
+            params![dup_id],
+        );
     }
     Ok(())
 }
@@ -420,7 +459,7 @@ pub fn dedupe_peers_by_ip(conn: &Connection) -> Result<(), String> {
 pub(crate) fn list_peers_raw(conn: &Connection) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, last_seen_at, online, COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(team,''), COALESCE(blocked,0) FROM peers ORDER BY display_name",
+            "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, last_seen_at, online, COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(team,''), COALESCE(blocked,0), COALESCE(avatar_id,'') FROM peers ORDER BY display_name",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -443,6 +482,7 @@ pub(crate) fn list_peers_raw(conn: &Connection) -> Result<Vec<Value>, String> {
                 "pending_tls_fingerprint": pending_fp,
                 "team": r.get::<_, String>(12)?,
                 "blocked": r.get::<_, i64>(13)? == 1,
+                "avatar_id": r.get::<_, String>(14)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -518,7 +558,7 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<Value>, String> {
 
 pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, String> {
     conn.query_row(
-        "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, online, COALESCE(blocked,0), COALESCE(identity_changed,0), pending_tls_fingerprint FROM peers WHERE user_id=?1",
+        "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, online, COALESCE(blocked,0), COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(avatar_id,'') FROM peers WHERE user_id=?1",
         params![user_id],
         |r| {
             Ok(serde_json::json!({
@@ -534,6 +574,7 @@ pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, Strin
                 "blocked": r.get::<_, i64>(9)? == 1,
                 "identity_changed": r.get::<_, i64>(10)? == 1,
                 "pending_tls_fingerprint": r.get::<_, Option<String>>(11)?,
+                "avatar_id": r.get::<_, String>(12)?,
             }))
         },
     )
@@ -581,6 +622,15 @@ pub fn update_peer_display_name_everywhere(
         "UPDATE conversation_members SET display_name=?2 WHERE user_id=?1",
         params![user_id, display_name],
     );
+    Ok(())
+}
+
+pub fn set_peer_avatar_id(conn: &Connection, user_id: &str, avatar_id: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE peers SET avatar_id=?2 WHERE user_id=?1",
+        params![user_id, avatar_id.trim()],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -780,6 +830,98 @@ mod tests {
         assert_eq!(row["identity_changed"], false);
         assert_eq!(row["x25519_public"], "x-new");
         assert_eq!(row["tls_fingerprint"], "fp-new");
+    }
+
+    #[test]
+    fn claim_unique_peer_ip_tombstones_instead_of_deleting() {
+        let conn = mem();
+        upsert_peer(
+            &conn,
+            "old",
+            "Old Ada",
+            "x-old",
+            "e-old",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-old"),
+            true,
+        )
+        .unwrap();
+        upsert_peer(
+            &conn,
+            "new",
+            "Ada",
+            "x-new",
+            "e-new",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-new"),
+            true,
+        )
+        .unwrap();
+        claim_unique_peer_ip(&conn, "new", "10.0.0.8").unwrap();
+        let old = get_peer(&conn, "old").unwrap().unwrap();
+        assert!(old["last_ip"].is_null() || old["last_ip"] == serde_json::Value::Null);
+        assert_eq!(old["online"], false);
+        assert_eq!(old["display_name"], "Old Ada");
+        let neu = get_peer(&conn, "new").unwrap().unwrap();
+        assert_eq!(neu["last_ip"], "10.0.0.8");
+    }
+
+    /// Wipe+reinstall on the same PC keeps `user_id` (= stable device_id) but mints new
+    /// keys/cert. Discovery must stage New keys (`identity_changed`) on the same peer row
+    /// rather than creating a second contact / DM.
+    #[test]
+    fn same_device_id_reinstall_goes_through_identity_changed() {
+        let conn = mem();
+        let device_id = "aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee";
+        upsert_peer(
+            &conn,
+            device_id,
+            "Ada",
+            "x-old",
+            "e-old",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-old"),
+            true,
+        )
+        .unwrap();
+        pin_peer(&conn, device_id, "fp-old").unwrap();
+
+        // Reinstall beacon: same user_id, new TLS + crypto keys.
+        upsert_peer(
+            &conn,
+            device_id,
+            "Ada",
+            "x-reinstall",
+            "e-reinstall",
+            Some("10.0.0.8"),
+            Some(9876),
+            Some("fp-reinstall"),
+            true,
+        )
+        .unwrap();
+
+        let row = get_peer(&conn, device_id).unwrap().unwrap();
+        assert_eq!(row["user_id"], device_id);
+        assert_eq!(row["x25519_public"], "x-old");
+        assert_eq!(row["tls_fingerprint"], "fp-old");
+        assert_eq!(row["identity_changed"], true);
+        assert_eq!(row["pending_tls_fingerprint"], "fp-reinstall");
+
+        accept_pending_identity(&conn, device_id).unwrap();
+        let accepted = get_peer(&conn, device_id).unwrap().unwrap();
+        assert_eq!(accepted["x25519_public"], "x-reinstall");
+        assert_eq!(accepted["tls_fingerprint"], "fp-reinstall");
+        assert_eq!(accepted["identity_changed"], false);
+        // Still a single peer row for this device_id.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM peers WHERE user_id=?1", params![device_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }
 

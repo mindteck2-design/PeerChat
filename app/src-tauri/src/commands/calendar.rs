@@ -2,7 +2,7 @@
 use crate::db;
 use crate::runtime::outbox::kick_flush;
 use crate::state::AppState;
-use crate::util::{from_peer_json, now};
+use crate::util::{from_peer_json, now, with_local_avatar};
 use serde_json::{json, Value};
 use tauri::State;
 use tauri_plugin_notification::NotificationExt;
@@ -137,7 +137,7 @@ pub async fn upsert_calendar_item(
 ) -> Result<Value, String> {
     let (me, from_peer, row) = {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("").to_string();
         if me.is_empty() {
             return Err("no profile".into());
@@ -241,7 +241,7 @@ pub async fn upsert_calendar_item(
 pub async fn delete_calendar_item(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let (me, from_peer, recipients, tombstone) = {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("").to_string();
         let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
         let existing = db::get_calendar_item(&conn, &id)?.ok_or("calendar item not found")?;
@@ -292,7 +292,7 @@ pub async fn toggle_calendar_checklist_option(
     let stamp = now();
     let (me, from_peer, recipients, saved) = {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("").to_string();
         let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
         let saved = db::apply_checklist_toggle(&conn, &id, &option_id, &me, checked, &stamp)?;
@@ -344,7 +344,7 @@ async fn calendar_respond(
     let stamp = now();
     let (me, from_peer, recipients, saved) = {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("").to_string();
         let from_peer = from_peer_json(&profile, &state.fingerprint.lock());
         let saved = db::apply_calendar_response(&conn, &id, &me, response, &stamp)?;

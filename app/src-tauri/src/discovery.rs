@@ -41,6 +41,9 @@ pub struct PeerBeacon {
     pub ed25519_public: String,
     #[serde(default)]
     pub team: String,
+    /// Preset avatar id (empty = letter avatar). Unknown to older peers → ignored.
+    #[serde(default)]
+    pub avatar_id: String,
     pub ts: f64,
 }
 
@@ -339,6 +342,7 @@ pub async fn run_beacon(
     mut beacon: PeerBeacon,
     live_display_name: Arc<parking_lot::Mutex<String>>,
     live_team: Arc<parking_lot::Mutex<String>>,
+    live_avatar_id: Arc<parking_lot::Mutex<String>>,
     db: Arc<parking_lot::Mutex<rusqlite::Connection>>,
 ) {
     let sock = match UdpSocket::bind(format!("0.0.0.0:{discovery_port}")).await {
@@ -363,6 +367,7 @@ pub async fn run_beacon(
                 beacon.port = listen_port;
                 beacon.display_name = live_display_name.lock().clone();
                 beacon.team = live_team.lock().clone();
+                beacon.avatar_id = live_avatar_id.lock().clone();
                 beacon.ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs_f64())
@@ -476,7 +481,7 @@ async fn handle_packet(
             let was_offline = existing.get("online").and_then(|v| v.as_bool()) == Some(false);
             let old_ip = existing.get("last_ip").and_then(|v| v.as_str());
             let ip_changed = old_ip != Some(peer.ip.as_str());
-            let _ = crate::db::upsert_peer_with_team(
+            let _ = crate::db::upsert_peer_with_team_avatar(
                 &conn,
                 &peer.user_id,
                 &peer.display_name,
@@ -487,6 +492,7 @@ async fn handle_packet(
                 Some(&peer.fingerprint),
                 true,
                 Some(peer.team.as_str()),
+                Some(peer.avatar_id.as_str()),
             );
             // Only clear backoff when the peer's LAN address actually changed.
             // Clearing on every offline→online flap (common with stale-peer prune)
@@ -499,7 +505,7 @@ async fn handle_packet(
                 kick_flush = true;
             }
         } else {
-            let _ = crate::db::upsert_peer_with_team(
+            let _ = crate::db::upsert_peer_with_team_avatar(
                 &conn,
                 &peer.user_id,
                 &peer.display_name,
@@ -510,6 +516,7 @@ async fn handle_packet(
                 Some(&peer.fingerprint),
                 true,
                 Some(peer.team.as_str()),
+                Some(peer.avatar_id.as_str()),
             );
         }
     }

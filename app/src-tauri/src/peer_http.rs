@@ -1,7 +1,7 @@
 use crate::db;
 use crate::runtime::group_events::enqueue_group_event;
 use crate::tls_cert::{self, LocalCert};
-use crate::util::{enforce_inbound_message_signature, from_peer_json};
+use crate::util::{enforce_inbound_message_signature, from_peer_json, with_local_avatar};
 use base64::Engine;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension};
@@ -355,7 +355,10 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
     match (method, path) {
         ("GET", "/v1/hello") => {
             let conn = db.lock();
-            let profile = db::get_profile(&conn).ok().flatten();
+            let profile = db::get_profile(&conn)
+                .ok()
+                .flatten()
+                .map(|p| with_local_avatar(&conn, p));
             http_ok(
                 http_json(
                     200,
@@ -617,6 +620,11 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     fp.as_deref(),
                     true,
                 );
+                if peer.get("avatar_id").is_some() {
+                    let aid = peer.get("avatar_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let normalized = crate::util::normalize_avatar_id(aid);
+                    let _ = db::set_peer_avatar_id(&conn, &uid, &normalized);
+                }
                 let _ = db::clear_peer_outbox_backoff(&conn, &uid);
                 if payload
                     .get("profile_update")
@@ -839,7 +847,10 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                         let roster = Value::Array(db::list_members(&conn, cid).unwrap_or_default());
                         let wrap =
                             db::get_wrapped_group_key(&conn, cid, deliver_sender_id).ok().flatten();
-                        let profile_opt = db::get_profile(&conn).ok().flatten();
+                        let profile_opt = db::get_profile(&conn)
+                            .ok()
+                            .flatten()
+                            .map(|p| with_local_avatar(&conn, p));
                         if let Some(profile) = profile_opt {
                             let state = app.state::<crate::state::AppState>();
                             let fingerprint = state.fingerprint.lock().clone();

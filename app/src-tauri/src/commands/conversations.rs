@@ -89,7 +89,7 @@ pub fn open_dm(state: State<AppState>, peer_id: String) -> Result<Value, String>
 #[tauri::command]
 pub fn mark_conversation_read(state: State<AppState>, conversation_id: String) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     let unread = db::unread_incoming(&conn, &conversation_id, &me)?;
     let mut by_sender: std::collections::HashMap<String, Vec<String>> =
@@ -123,7 +123,7 @@ pub fn delete_conversation_local(
     conversation_id: String,
 ) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("");
     let kind: Option<String> = conn
         .query_row(
@@ -150,7 +150,7 @@ pub fn delete_conversation_local(
 #[tauri::command]
 pub fn ensure_announcement_boards(state: State<AppState>) -> Result<Vec<Value>, String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     if me.is_empty() {
         return Err("no profile".into());
@@ -183,7 +183,7 @@ pub fn sync_team_announcement_members(
     wrapped_group_keys: Value,
 ) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     let team = profile["team"].as_str().unwrap_or("").to_string();
     let Some(slug) = board_slug(&team) else {

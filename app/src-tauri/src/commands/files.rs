@@ -28,7 +28,7 @@ use crate::runtime::bootstrap::{start_runtime_inner, show_main_window};
 #[tauri::command]
 pub fn abort_outgoing_file(state: State<AppState>, file_id: String) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("");
     let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
     if file["uploader_id"].as_str() != Some(me) {
@@ -53,7 +53,7 @@ pub fn create_outgoing_file(
 ) -> Result<FileCreateResult, String> {
     let profile = {
         let conn = state.db.lock();
-        db::get_profile(&conn)?.ok_or("no profile")?
+        with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?)
     };
     if size_bytes <= 0 || size_bytes > MAX_FILE_BYTES {
         return Err(format!(
@@ -123,7 +123,7 @@ pub fn write_file_chunk(
     }
     {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("");
         let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
         if file["uploader_id"].as_str() != Some(me) {
@@ -180,7 +180,7 @@ pub async fn stage_outgoing_from_path(
 
     {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("");
         let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
         if file["uploader_id"].as_str() != Some(me) {
@@ -340,7 +340,7 @@ pub async fn stage_outgoing_folder(
 
     let expected_chunks = {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("");
         let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
         if file["uploader_id"].as_str() != Some(me) {
@@ -427,7 +427,7 @@ pub fn send_file_notice(
 ) -> Result<Value, String> {
     let profile = {
         let conn = state.db.lock();
-        db::get_profile(&conn)?.ok_or("no profile")?
+        with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?)
     };
     let file = {
         let conn = state.db.lock();
@@ -1208,7 +1208,7 @@ pub fn persist_outgoing_from_path(
     }
     let filename = {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("");
         let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
         if file["uploader_id"].as_str() != Some(me) {
@@ -1280,7 +1280,7 @@ pub fn cache_outgoing_plain(
     }
     {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("");
         let file = db::get_file(&conn, &file_id)?.ok_or("file missing")?;
         if file["uploader_id"].as_str() != Some(me) {

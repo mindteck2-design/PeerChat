@@ -96,6 +96,7 @@ pub fn run() {
                 started: Mutex::new(false),
                 live_display_name: Arc::new(Mutex::new(String::new())),
                 live_team: Arc::new(Mutex::new(String::new())),
+                live_avatar_id: Arc::new(Mutex::new(String::new())),
                 keep_awake: Mutex::new(None),
             });
             // Bootstrap log so a blank UI still leaves a trail on disk.
@@ -253,6 +254,7 @@ pub fn run() {
             clear_tray_flash,
             get_profile,
             setup_profile,
+            set_avatar_id,
             update_display_name,
             set_conversation_pinned,
             set_conversation_muted,

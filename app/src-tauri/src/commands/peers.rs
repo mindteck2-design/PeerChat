@@ -157,7 +157,7 @@ pub async fn send_typing(
 ) -> Result<(), String> {
     let (from_peer, me) = {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let me = profile["id"].as_str().unwrap_or("").to_string();
         let fp = state.fingerprint.lock().clone();
         (from_peer_json(&profile, &fp), me)

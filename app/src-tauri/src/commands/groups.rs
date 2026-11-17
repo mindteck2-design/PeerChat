@@ -31,7 +31,7 @@ pub fn create_group(
     wrapped_group_keys: Value,
 ) -> Result<Value, String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     if me.is_empty() {
         return Err("no profile".into());
@@ -125,7 +125,7 @@ pub fn request_group_sync(
     conversation_id: String,
 ) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     if me.is_empty() {
         return Err("no profile".into());
@@ -250,7 +250,7 @@ pub fn repair_group_member_key(
         return Err("wrapped_group_key required".into());
     }
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     if me.is_empty() {
         return Err("no profile".into());
@@ -312,7 +312,7 @@ pub fn add_group_members(
     wrapped_group_keys: Value,
 ) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     let is_admin = db::is_group_admin(&conn, &conversation_id, &me)?;
     let can_add = is_admin
@@ -382,7 +382,7 @@ pub fn remove_group_member(
     wrapped_group_keys: Option<Value>,
 ) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     if user_id == me {
         return Err("use leave to exit the group".into());
@@ -439,7 +439,7 @@ pub fn leave_group(
     wrapped_group_keys: Option<Value>,
 ) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     let title = db::conversation_title(&conn, &conversation_id)?
         .unwrap_or_else(|| "Group".into());
@@ -500,7 +500,7 @@ pub fn rename_group(
         return Err("title required".into());
     }
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     if !db::is_group_admin(&conn, &conversation_id, &me)? {
         return Err("Only group admins can rename".into());
@@ -532,7 +532,7 @@ pub fn rename_group(
 #[tauri::command]
 pub fn delete_group(state: State<AppState>, conversation_id: String) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     if !db::is_group_admin(&conn, &conversation_id, &me)? {
         return Err("Only group admins can delete the group".into());
@@ -572,7 +572,7 @@ pub fn set_group_members_can_add(
     allowed: bool,
 ) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     if !db::is_group_admin(&conn, &conversation_id, &me)? {
         return Err("Only group admins can change this setting".into());
@@ -611,7 +611,7 @@ pub fn set_group_member_role(
     role: String,
 ) -> Result<(), String> {
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let me = profile["id"].as_str().unwrap_or("").to_string();
     if !db::is_group_admin(&conn, &conversation_id, &me)? {
         return Err("Only group admins can change roles".into());

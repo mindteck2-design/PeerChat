@@ -10,6 +10,7 @@ pub(crate) const SETTING_KEYS: &[&str] = &[
     "profile_emp_id",
     "profile_status",
     "profile_status_msg",
+    "avatar_id",
 ];
 
 /// Dynamic keys stored in app_settings (prefix match). Used for per-group crypto history.

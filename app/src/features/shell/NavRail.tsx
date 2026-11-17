@@ -1,4 +1,5 @@
-import { Avatar, Box, IconButton, Tooltip, Typography } from "@mui/material";
+import { Box, IconButton, Tooltip, Typography } from "@mui/material";
+import { PeerAvatar } from "../../shared/PeerAvatar";
 import ChatIcon from "@mui/icons-material/ForumRounded";
 import PeopleAltIcon from "@mui/icons-material/PeopleAltRounded";
 import CampaignIcon from "@mui/icons-material/CampaignRounded";
@@ -117,18 +118,12 @@ export function NavRail(props: {
               "&:hover": { bgcolor: "action.hover" },
             }}
           >
-            <Avatar
-              sx={{
-                width: 34,
-                height: 34,
-                fontSize: 15,
-                fontWeight: 700,
-                bgcolor: "primary.main",
-                color: "#FFFFFF",
-              }}
-            >
-              {profile.display_name.slice(0, 1).toUpperCase()}
-            </Avatar>
+            <PeerAvatar
+              name={profile.display_name}
+              avatarId={profile.avatar_id}
+              size={34}
+              sx={{ bgcolor: profile.avatar_id ? undefined : "primary.main" }}
+            />
             {profile.team?.trim() && (
               <Typography
                 variant="caption"

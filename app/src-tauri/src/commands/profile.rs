@@ -26,7 +26,38 @@ use crate::runtime::bootstrap::{start_runtime_inner, show_main_window};
 #[tauri::command]
 pub fn get_profile(state: State<AppState>) -> Result<Option<Value>, String> {
     let conn = state.db.lock();
-    db::get_profile(&conn)
+    Ok(db::get_profile(&conn)?.map(|p| with_local_avatar(&conn, p)))
+}
+
+#[tauri::command]
+pub fn set_avatar_id(state: State<AppState>, avatar_id: String) -> Result<Value, String> {
+    let id = util::normalize_avatar_id(&avatar_id);
+    let (profile, fingerprint) = {
+        let conn = state.db.lock();
+        db::set_setting(&conn, "avatar_id", &id)?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
+        let fp = state.fingerprint.lock().clone();
+        let me = profile["id"].as_str().unwrap_or("").to_string();
+        let from_peer = from_peer_json(&profile, &fp);
+        let peers = db::list_peers(&conn).unwrap_or_default();
+        for p in peers {
+            let rid = p["user_id"].as_str().unwrap_or("");
+            if rid.is_empty() || rid == me {
+                continue;
+            }
+            let oid = format!("profile-{}:{}", uuid::Uuid::new_v4(), rid);
+            let payload = json!({
+                "from_peer": from_peer,
+                "profile_update": true,
+            });
+            let _ = db::enqueue_outbox(&conn, &oid, rid, "", &payload.to_string());
+        }
+        (profile, fp)
+    };
+    let _ = fingerprint;
+    *state.live_avatar_id.lock() = id;
+    kick_flush(&state);
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -65,7 +96,10 @@ pub fn setup_profile(
         port,
     )?;
     let conn = state.db.lock();
-    db::get_profile(&conn)?.ok_or_else(|| "profile missing".into())
+    Ok(with_local_avatar(
+        &conn,
+        db::get_profile(&conn)?.ok_or("profile missing")?,
+    ))
 }
 
 #[tauri::command]
@@ -80,7 +114,7 @@ pub fn update_display_name(
     }
     let (profile, fingerprint) = {
         let conn = state.db.lock();
-        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
         let id = profile["id"].as_str().unwrap_or("");
         let team_name = team
             .as_deref()
@@ -100,7 +134,7 @@ pub fn update_display_name(
             profile["listen_port"].as_i64().unwrap_or(9876),
             &team_name,
         )?;
-        let updated = db::get_profile(&conn)?.ok_or_else(|| "profile missing".to_string())?;
+        let updated = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or_else(|| "profile missing".to_string())?);
         let fp = state.fingerprint.lock().clone();
         // Fan-out name to known peers so lists update without waiting for chat traffic.
         let me = updated["id"].as_str().unwrap_or("").to_string();
@@ -147,7 +181,7 @@ pub fn sync_profile_keys(
         return Err("public keys required".into());
     }
     let conn = state.db.lock();
-    let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+    let profile = with_local_avatar(&conn, db::get_profile(&conn)?.ok_or("no profile")?);
     let id = profile["id"].as_str().unwrap_or("");
     let cur_x = profile["x25519_public"].as_str().unwrap_or("");
     let cur_e = profile["ed25519_public"].as_str().unwrap_or("");
@@ -163,7 +197,10 @@ pub fn sync_profile_keys(
         profile["listen_port"].as_i64().unwrap_or(9876),
         profile["team"].as_str().unwrap_or(""),
     )?;
-    db::get_profile(&conn)?.ok_or_else(|| "profile missing".into())
+    Ok(with_local_avatar(
+        &conn,
+        db::get_profile(&conn)?.ok_or("profile missing")?,
+    ))
 }
 
 /// Soft network posture for Settings — never blocks messaging.

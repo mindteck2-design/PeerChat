@@ -19,6 +19,7 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDownRounded"
 import { peerApi } from "../../peer";
 import { useShellNav, useShellTab } from "./shellNav";
 import { avatarColor, formatPreviewTime, lastSeenLabel, conversationPreviewLine } from "../../shared/format";
+import { PeerAvatar } from "../../shared/PeerAvatar";
 import type { ChatScreenVm } from "../chat/chatVm";
 
 function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
@@ -182,19 +183,12 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                 })
                 .map((p) => (
                   <ListItemButton key={p.user_id} onClick={() => openDm(p)} sx={{ py: 0.85 }}>
-                    <Avatar
-                      sx={{
-                        width: 36,
-                        height: 36,
-                        mr: 1.1,
-                        bgcolor: avatarColor(p.display_name),
-                        color: "#FFFFFF",
-                        fontSize: 16,
-                        fontWeight: 700,
-                      }}
-                    >
-                      {p.display_name.slice(0, 1).toUpperCase()}
-                    </Avatar>
+                    <PeerAvatar
+                      name={p.display_name}
+                      avatarId={p.avatar_id}
+                      size={36}
+                      sx={{ mr: 1.1 }}
+                    />
                     <ListItemText
                       primary={
                         <Box component="span" sx={{ display: "flex", alignItems: "center", gap: 0.75, minWidth: 0 }}>
@@ -343,22 +337,26 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
                     }}
                   >
                     <Box sx={{ position: "relative", flexShrink: 0 }}>
-                      <Avatar
-                        sx={{
-                          width: 42,
-                          height: 42,
-                          bgcolor: avatarColor(title),
-                          color: "#FFFFFF",
-                          fontSize: c.kind === "group" ? 22 : 18,
-                          fontWeight: 700,
-                        }}
-                      >
-                        {c.kind === "group" ? (
+                      {c.kind === "group" ? (
+                        <Avatar
+                          sx={{
+                            width: 42,
+                            height: 42,
+                            bgcolor: avatarColor(title),
+                            color: "#FFFFFF",
+                            fontSize: 22,
+                            fontWeight: 700,
+                          }}
+                        >
                           <GroupsIcon sx={{ fontSize: 24, color: "#FFFFFF" }} />
-                        ) : (
-                          title.slice(0, 1).toUpperCase()
-                        )}
-                      </Avatar>
+                        </Avatar>
+                      ) : (
+                        <PeerAvatar
+                          name={title}
+                          avatarId={peers.find((p) => p.user_id === c.peer_id)?.avatar_id}
+                          size={42}
+                        />
+                      )}
                       {c.kind === "dm" && (
                         <Box
                           sx={{

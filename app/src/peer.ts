@@ -9,6 +9,8 @@ export type Profile = {
   created_at?: string;
   /** Team / project label, e.g. HMIS, Shakti */
   team?: string;
+  /** Preset avatar id; empty = letter avatar */
+  avatar_id?: string;
 };
 
 export type Peer = {
@@ -28,6 +30,8 @@ export type Peer = {
   pending_tls_fingerprint?: string | null;
   /** Project / team label from discovery beacon */
   team?: string | null;
+  /** Preset avatar id from discovery / profile sync */
+  avatar_id?: string | null;
 };
 
 export type Conversation = {
@@ -125,6 +129,7 @@ export const peerApi = {
       displayName,
       team: team ?? null,
     }),
+  setAvatarId: (avatarId: string) => inv<Profile>("set_avatar_id", { avatarId }),
   myFingerprint: () => inv<string>("my_fingerprint"),
   syncProfileKeys: (x25519Public: string, ed25519Public: string) =>
     inv<Profile>("sync_profile_keys", {
