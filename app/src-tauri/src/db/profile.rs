@@ -63,3 +63,34 @@ pub fn display_name_for(conn: &Connection, user_id: &str) -> String {
     .unwrap_or_else(|_| "Member".into())
 }
 
+/// Setup must never mint a second profile or rewrite `id` when one already exists.
+/// Returns the existing row when present; callers skip insert/runtime restart.
+pub fn keep_existing_profile(conn: &Connection) -> Result<Option<Value>, String> {
+    get_profile(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::migrate;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn existing_profile_id_is_never_rewritten() {
+        let conn = mem();
+        upsert_profile(&conn, "legacy-uuid", "Ada", "x", "e", 9876, "eng").unwrap();
+        // Mirror setup_profile: if a profile exists, keep it (stable_device_id unused).
+        let kept = keep_existing_profile(&conn).unwrap().unwrap();
+        assert_eq!(kept["id"], "legacy-uuid");
+        upsert_profile(&conn, "legacy-uuid", "Ada Renamed", "x2", "e2", 9877, "eng").unwrap();
+        let after = get_profile(&conn).unwrap().unwrap();
+        assert_eq!(after["id"], "legacy-uuid");
+        assert_eq!(after["display_name"], "Ada Renamed");
+    }
+}
+

@@ -16,7 +16,6 @@ import {
 } from "@mui/material";
 import { exportPublic, type Identity } from "../../crypto";
 import { peerApi, type Profile } from "../../peer";
-import { newUserId } from "../../shared/ids";
 import { ENTERPRISE_ROLES } from "../profile/roles";
 
 function sanitizeNameOrTeam(val: string): string {
@@ -49,9 +48,10 @@ export function SetupScreen(props: {
     const finalDesignation = (isCustomRole ? customRoleText : designation).trim();
     setBusy(true);
     try {
+      // Backend assigns a stable per-machine id (survives reinstall). Do not mint a random UUID.
       const p = await peerApi.setupProfile({
         displayName,
-        userId: newUserId(),
+        userId: "",
         x25519Public: pubs.x25519_public,
         ed25519Public: pubs.ed25519_public,
         team: teamTrimmed,

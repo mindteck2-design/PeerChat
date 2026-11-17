@@ -2,6 +2,7 @@ mod bundle;
 pub mod folder_stream;
 mod commands;
 mod db;
+mod device_id;
 mod discovery;
 mod peer_http;
 mod runtime;

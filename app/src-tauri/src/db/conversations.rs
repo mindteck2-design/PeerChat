@@ -409,6 +409,26 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Value>, String> {
         if kind == "dm" && peer_id.is_none() {
             continue;
         }
+        // Hide orphan DMs whose peer was removed / never rediscovered — these show as
+        // "Direct" in the UI after a reinstall claimed the LAN IP under a new user_id.
+        // Message history stays in the DB; only the Chats list omits the nameless shell.
+        if kind == "dm" {
+            if let Some(ref pid) = peer_id {
+                let peer_exists: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM peers WHERE user_id=?1",
+                        params![pid],
+                        |_| Ok(true),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !peer_exists {
+                    continue;
+                }
+            }
+        }
         // Announcement boards have their own nav page.
         if is_announcement_board_id(&id) {
             continue;
@@ -1092,6 +1112,43 @@ mod tests {
         assert_eq!(path.as_deref(), Some("/tmp/f1.part"));
         clear_receive_progress(&conn, "f1").unwrap();
         assert!(get_receive_progress(&conn, "f1").unwrap().is_none());
+    }
+
+    #[test]
+    fn list_conversations_hides_orphan_dms_without_peer_row() {
+        let conn = mem();
+        upsert_profile(&conn, "me", "Me", "x", "e", 9876, "").unwrap();
+        let live = ensure_dm(&conn, "me", "alive").unwrap();
+        upsert_peer(
+            &conn,
+            "alive",
+            "Alive",
+            "xa",
+            "ea",
+            Some("10.0.0.1"),
+            Some(9876),
+            Some("fp"),
+            true,
+        )
+        .unwrap();
+        let orphan = ensure_dm(&conn, "me", "gone").unwrap();
+        // No peers row for "gone" — nameless Direct shell.
+        let listed = list_conversations(&conn).unwrap();
+        let ids: Vec<&str> = listed
+            .iter()
+            .filter_map(|c| c["id"].as_str())
+            .collect();
+        assert!(ids.contains(&live.as_str()));
+        assert!(!ids.contains(&orphan.as_str()));
+        // History row still present.
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversations WHERE id=?1",
+                params![orphan.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }
 

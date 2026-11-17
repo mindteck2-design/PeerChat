@@ -570,6 +570,9 @@ export function ChatScreen({
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const screenshotSessionRef = useRef<string | null>(null);
   const [pendingShareFiles, setPendingShareFiles] = useState<string[]>([]);
+  const [sharePick, setSharePick] = useState<string[]>([]);
+  const [shareQuery, setShareQuery] = useState("");
+  const [shareBusy, setShareBusy] = useState(false);
   const [scanWarn, setScanWarn] = useState<{
     detail: string;
     title?: string;
@@ -1820,7 +1823,10 @@ export function ChatScreen({
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listen<string[]>("share-files", (event) => {
-      setPendingShareFiles(event.payload || []);
+      const paths = (event.payload || []).filter(Boolean);
+      setPendingShareFiles(paths);
+      setSharePick([]);
+      setShareQuery("");
     }).then((fn) => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
@@ -1841,7 +1847,8 @@ export function ChatScreen({
           if (!paths.length) return;
           if (!activeRef.current) {
             setPendingShareFiles(paths);
-            setStatus("Select a conversation, then drop again — or files are queued.");
+            setSharePick([]);
+            setShareQuery("");
             return;
           }
           void stageDiskPaths(paths);
@@ -1898,15 +1905,6 @@ export function ChatScreen({
       unlisten?.();
     };
   }, []);
-
-  // When pendingShareFiles arrives, stage them on the active conversation.
-  useEffect(() => {
-    if (!pendingShareFiles.length || !active) return;
-    const files = pendingShareFiles;
-    setPendingShareFiles([]);
-    void stageDiskPaths(files);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingShareFiles, active?.id]);
 
   function selectConversation(c: Conversation) {
     // Re-clicking the already-open chat must not wipe messages / re-decrypt / jump scroll.
@@ -2193,10 +2191,128 @@ export function ChatScreen({
     }
   }
 
+  /** Upload disk paths into a specific conversation (used by OS share picker). */
+  async function sendDiskPathsToConversation(conv: Conversation, paths: string[]) {
+    const items: Array<
+      | { kind: "file"; path: string; name: string; size: number }
+      | {
+          kind: "dir";
+          path: string;
+          name: string;
+          total_files: number;
+          total_bytes: number;
+        }
+    > = [];
+    for (const path of paths) {
+      try {
+        const meta = await peerApi.localPathMeta(path);
+        if (meta.is_dir) {
+          const scan = await peerApi.scanFolderMeta(meta.path);
+          items.push({
+            kind: "dir",
+            path: meta.path,
+            name: meta.name,
+            total_files: scan.total_files,
+            total_bytes: scan.total_bytes,
+          });
+        } else {
+          items.push({
+            kind: "file",
+            path: meta.path,
+            name: meta.name,
+            size: meta.size,
+          });
+        }
+      } catch (err: any) {
+        setStatus(err?.message || `Can't read ${path}`);
+      }
+    }
+    if (!items.length) return;
+
+    const fileIds: string[] = [];
+    const sendables = items.filter((it) => it.kind === "file");
+    let batchPos = 0;
+    for (const item of items) {
+      if (item.kind === "dir") {
+        const fid = await sendFolderDirectly(item.path, item.name, {
+          skipNotice: true,
+          knownMeta: { total_files: item.total_files, total_bytes: item.total_bytes },
+          conversationId: conv.id,
+        });
+        if (fid) {
+          fileIds.push(fid);
+          setFileNames((s) => ({ ...s, [fid]: `${item.name}/` }));
+        }
+        continue;
+      }
+      batchPos += 1;
+      const fid = await sendFile(
+        { path: item.path, name: item.name, size: item.size },
+        {
+          skipNotice: true,
+          batchIndex: batchPos,
+          batchTotal: sendables.length,
+          conversationId: conv.id,
+        }
+      );
+      if (fid) {
+        fileIds.push(fid);
+        setFileNames((s) => ({ ...s, [fid]: item.name }));
+        setFileSizes((s) => ({ ...s, [fid]: item.size }));
+      }
+    }
+    if (fileIds.length) {
+      await sendAttachmentBundle(fileIds, "", undefined, conv);
+    }
+  }
+
+  async function confirmShareFiles() {
+    const paths = [...pendingShareFiles];
+    const picks = [...sharePick];
+    if (!paths.length || !picks.length || shareBusy) return;
+    setShareBusy(true);
+    setPendingShareFiles([]);
+    setSharePick([]);
+    setShareQuery("");
+    let lastConv: Conversation | null = null;
+    let okCount = 0;
+    try {
+      for (const userId of picks) {
+        try {
+          const conv = await peerApi.openDm(userId);
+          lastConv = conv;
+          await sendDiskPathsToConversation(conv, paths);
+          okCount += 1;
+        } catch (err: any) {
+          const name =
+            others.find((p) => p.user_id === userId)?.display_name || userId;
+          setStatus(err?.message || `Could not share to ${name}`);
+        }
+      }
+      await refresh();
+      if (picks.length === 1 && lastConv && okCount === 1) {
+        selectConversation(lastConv);
+        setStatus(
+          paths.length === 1
+            ? `Shared "${paths[0].split(/[/\\]/).pop()}"`
+            : `Shared ${paths.length} files`
+        );
+      } else if (okCount > 0) {
+        setStatus(`Shared to ${okCount} ${okCount === 1 ? "person" : "people"}`);
+      }
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
   async function sendFolderDirectly(
     folderPath: string,
     folderName: string,
-    opts?: { skipNotice?: boolean; knownMeta?: { total_files: number; total_bytes: number } }
+    opts?: {
+      skipNotice?: boolean;
+      knownMeta?: { total_files: number; total_bytes: number };
+      conversationId?: string;
+    }
   ): Promise<string | undefined> {
     const cleanName = folderName.replace(/[\\/]/g, "").trim() || "folder";
     const archiveFileName = `${cleanName}.pcdir`;
@@ -2238,7 +2354,7 @@ export function ChatScreen({
       if (!ok) return undefined;
     }
 
-    const conversationId = activeRef.current?.id;
+    const conversationId = opts?.conversationId ?? activeRef.current?.id;
     if (!conversationId) return undefined;
 
     const estimatedTarBytes = folderMeta.total_bytes + folderMeta.total_files * 512 + 2048;
@@ -2928,12 +3044,18 @@ export function ChatScreen({
   async function sendAttachmentBundle(
     fileIds: string[],
     caption: string,
-    replyToId?: string
+    replyToId?: string,
+    target?: Conversation | null
   ) {
-    if (!active || !fileIds.length) return;
-    const memberIds = await resolveMemberIds(active);
+    const conv = target ?? active;
+    if (!conv || !fileIds.length) return;
+    const memberIds = await resolveMemberIds(conv);
     const recipients = memberIds.filter((id) => id !== profile.id);
     if (caption.trim()) {
+      if (conv.id !== active?.id) {
+        // Caption path uses sendEncrypted(active); share flow is files-only.
+        throw new Error("Captioned attachments require the target chat to be open");
+      }
       await sendEncrypted("text", caption.trim(), replyToId, {
         file_id: fileIds[0],
         attachments: fileIds,
@@ -2952,8 +3074,10 @@ export function ChatScreen({
       attachments: fileIds,
       reply_to: replyToId ?? null,
     };
-    await peerApi.sendMessage(active.id, message, recipients);
-    await refreshNewestMessages(active.id);
+    await peerApi.sendMessage(conv.id, message, recipients);
+    if (activeRef.current?.id === conv.id) {
+      await refreshNewestMessages(conv.id);
+    }
   }
 
   /**
@@ -3799,12 +3923,17 @@ export function ChatScreen({
   /** Upload encrypted file chunks. When `skipNotice`, no separate file_notice is posted (caller attaches file_id). */
   async function sendFile(
     file: File | { path: string; name: string; size: number },
-    opts?: { skipNotice?: boolean; batchIndex?: number; batchTotal?: number }
+    opts?: {
+      skipNotice?: boolean;
+      batchIndex?: number;
+      batchTotal?: number;
+      conversationId?: string;
+    }
   ): Promise<string | undefined> {
-    if (!active) return undefined;
+    const conversationId = opts?.conversationId ?? active?.id;
+    if (!conversationId) return undefined;
     const name = file instanceof File ? file.name : file.name;
     const size = file instanceof File ? file.size : file.size;
-    const conversationId = active.id;
     if (!size) {
       setStatus(`File is empty: ${name}`);
       return undefined;
@@ -6981,18 +7110,228 @@ export function ChatScreen({
         </DialogActions>
       </Dialog>
 
-      {/* Pending share files notice — shown when launched via right-click Share */}
-      {pendingShareFiles.length > 0 && !active && (
-        <Alert
-          severity="info"
-          sx={{ position: "absolute", bottom: 80, left: 16, right: 16, zIndex: 10 }}
-          onClose={() => setPendingShareFiles([])}
+      <Dialog
+        open={pendingShareFiles.length > 0}
+        onClose={() => {
+          if (shareBusy) return;
+          setPendingShareFiles([]);
+          setSharePick([]);
+          setShareQuery("");
+        }}
+        fullWidth
+        maxWidth="sm"
+        PaperProps={{
+          sx: {
+            bgcolor: "background.paper",
+            backgroundImage: "none",
+            border: "1px solid",
+            borderColor: "divider",
+            display: "flex",
+            flexDirection: "column",
+            maxHeight: "min(620px, calc(100% - 48px))",
+          },
+        }}
+      >
+        <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1.5, pb: 1, pr: 6 }}>
+          <Avatar
+            sx={{
+              width: 44,
+              height: 44,
+              bgcolor: "primary.main",
+              color: "primary.contrastText",
+            }}
+          >
+            <AttachFileIcon />
+          </Avatar>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography component="div" sx={{ fontWeight: 700, fontSize: 18, lineHeight: 1.25 }}>
+              Share in PeerChat
+            </Typography>
+            <Typography variant="caption" color="text.secondary" noWrap component="div">
+              {pendingShareFiles.length === 1
+                ? pendingShareFiles[0].split(/[/\\]/).pop()
+                : `${pendingShareFiles.length} files`}
+              {sharePick.length > 0 ? ` · ${sharePick.length} selected` : ""}
+            </Typography>
+          </Box>
+          <IconButton
+            aria-label="Close"
+            disabled={shareBusy}
+            onClick={() => {
+              setPendingShareFiles([]);
+              setSharePick([]);
+              setShareQuery("");
+            }}
+            sx={{ position: "absolute", right: 10, top: 10 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 1.25,
+            overflow: "hidden",
+            flex: "1 1 auto",
+            minHeight: 0,
+            pt: "4px !important",
+          }}
         >
-          {pendingShareFiles.length === 1
-            ? `Ready to share "${pendingShareFiles[0].split(/[/\\]/).pop()}" — select a conversation first.`
-            : `${pendingShareFiles.length} files ready to share — select a conversation first.`}
-        </Alert>
-      )}
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 1.5,
+              flexShrink: 0,
+              minWidth: 0,
+            }}
+          >
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexShrink: 0 }}>
+              <PeopleAltIcon sx={{ fontSize: 22, color: "primary.main" }} />
+              <Typography sx={{ fontWeight: 700, fontSize: 15, lineHeight: 1.2 }}>
+                Select people
+              </Typography>
+            </Box>
+            <TextField
+              size="small"
+              placeholder="Search contacts..."
+              value={shareQuery}
+              onChange={(e) => setShareQuery(e.target.value)}
+              disabled={shareBusy}
+              sx={{ flex: "1 1 160px", minWidth: 0, ml: "auto", maxWidth: 240 }}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" />
+                  </InputAdornment>
+                ),
+              }}
+            />
+          </Box>
+          <List
+            dense
+            disablePadding
+            sx={{
+              overflowY: "auto",
+              flex: "1 1 auto",
+              minHeight: others.length ? 0 : 72,
+              maxHeight: 360,
+            }}
+          >
+            {others
+              .filter((p) => {
+                const q = shareQuery.trim().toLowerCase();
+                if (!q) return true;
+                return `${p.display_name || ""} ${p.team || ""} ${p.last_ip || ""}`
+                  .toLowerCase()
+                  .includes(q);
+              })
+              .map((p) => {
+                const on = sharePick.includes(p.user_id);
+                const label = p.team?.trim()
+                  ? `${p.display_name} · ${p.team.trim()}`
+                  : p.display_name;
+                return (
+                  <ListItemButton
+                    key={p.user_id}
+                    selected={on}
+                    disabled={shareBusy}
+                    onClick={() =>
+                      setSharePick((ids) =>
+                        ids.includes(p.user_id)
+                          ? ids.filter((x) => x !== p.user_id)
+                          : [...ids, p.user_id]
+                      )
+                    }
+                    sx={{
+                      borderRadius: 1.5,
+                      mb: 0.25,
+                      py: 0.6,
+                      "&.Mui-selected": {
+                        bgcolor: "action.selected",
+                      },
+                    }}
+                  >
+                    <Checkbox
+                      edge="start"
+                      checked={on}
+                      tabIndex={-1}
+                      disableRipple
+                      inputProps={{ "aria-label": `Select ${p.display_name || "person"}` }}
+                      sx={{ pointerEvents: "none", mr: 0.25 }}
+                    />
+                    <ListItemAvatar sx={{ minWidth: 44 }}>
+                      <Avatar
+                        sx={{
+                          width: 36,
+                          height: 36,
+                          bgcolor: avatarColor(p.display_name || "?"),
+                          color: "#fff",
+                          fontSize: 13,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {(p.display_name || "?").slice(0, 1).toUpperCase()}
+                      </Avatar>
+                    </ListItemAvatar>
+                    <ListItemText
+                      primary={label}
+                      secondary={p.last_ip?.trim() || (p.online ? "Online" : "Offline")}
+                      primaryTypographyProps={{ fontWeight: 600, fontSize: 14, noWrap: true }}
+                      secondaryTypographyProps={{
+                        fontSize: 12,
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        noWrap: true,
+                      }}
+                    />
+                  </ListItemButton>
+                );
+              })}
+            {!others.length && (
+              <Typography variant="body2" color="text.secondary" sx={{ px: 0.5, py: 2 }}>
+                No peers on this network yet
+              </Typography>
+            )}
+            {!!others.length &&
+              !others.some((p) => {
+                const q = shareQuery.trim().toLowerCase();
+                if (!q) return true;
+                return `${p.display_name || ""} ${p.team || ""} ${p.last_ip || ""}`
+                  .toLowerCase()
+                  .includes(q);
+              }) && (
+                <Typography variant="body2" color="text.secondary" sx={{ px: 0.5, py: 2 }}>
+                  No people match
+                </Typography>
+              )}
+          </List>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, py: 1.5, flexShrink: 0 }}>
+          <Button
+            disabled={shareBusy}
+            onClick={() => {
+              setPendingShareFiles([]);
+              setSharePick([]);
+              setShareQuery("");
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={!sharePick.length || shareBusy}
+            onClick={() => void confirmShareFiles()}
+            startIcon={shareBusy ? <CircularProgress size={16} color="inherit" /> : undefined}
+          >
+            {shareBusy
+              ? "Sending…"
+              : sharePick.length
+                ? `Send (${sharePick.length})`
+                : "Send"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

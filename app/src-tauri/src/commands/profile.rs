@@ -71,6 +71,17 @@ pub fn setup_profile(
     listen_port: Option<i64>,
     team: Option<String>,
 ) -> Result<Value, String> {
+    // Never replace an existing profile id on upgrade / accidental re-setup.
+    {
+        let conn = state.db.lock();
+        if let Some(existing) = db::keep_existing_profile(&conn)? {
+            return Ok(existing);
+        }
+    }
+    // New installs: stable per-machine id so wipe+reinstall keeps the same person.
+    // Ignore client-provided random UUIDs; keep arg for API compat only.
+    let _ = user_id;
+    let user_id = crate::device_id::stable_device_id();
     let preferred = listen_port.unwrap_or(9876) as u16;
     let port = peer_http::allocate_listen_port(preferred)?;
     let team_name = team.unwrap_or_default().trim().to_string();
