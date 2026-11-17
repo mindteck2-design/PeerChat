@@ -52,7 +52,6 @@ import {
   type NotificationSoundId,
 } from "../../shared/sound";
 import { ENTERPRISE_ROLES, canBroadcastRole } from "../profile/roles";
-import { appErrorLogPath, appLogPath } from "../../shared/appLog";
 import { AVATAR_PRESETS, normalizeAvatarId, type AvatarId } from "../../shared/avatars";
 import { PeerAvatar } from "../../shared/PeerAvatar";
 import { AvatarPickerDialog } from "./AvatarPickerDialog";
@@ -133,8 +132,6 @@ export function SettingsScreen(props: {
 
   useEffect(() => {
     peerApi.myFingerprint().then(setFp).catch(() => setFp("(unavailable)"));
-    void appLogPath().then((p) => setDiagLogPath(p || "")).catch(() => {});
-    void appErrorLogPath().then((p) => setDiagErrorLogPath(p || "")).catch(() => {});
     peerApi
       .networkHint()
       .then(setNetHint)
