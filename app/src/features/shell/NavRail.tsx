@@ -102,7 +102,7 @@ export function NavRail(props: {
       <Box flex={1} />
       {profile && (
         <Tooltip
-          title={`${profile.display_name}${profile.team?.trim() ? ` (${profile.team.trim()})` : ""}`}
+          title={`${profile.display_name}${profile.team?.trim() ? ` · ${profile.team.trim()}` : ""}`}
           placement="right"
         >
           <Box
@@ -124,7 +124,7 @@ export function NavRail(props: {
               size={34}
               sx={{ bgcolor: profile.avatar_id ? undefined : "primary.main" }}
             />
-            {profile.team?.trim() && (
+            {profile.display_name?.trim() && (
               <Typography
                 variant="caption"
                 sx={{
@@ -139,7 +139,7 @@ export function NavRail(props: {
                   mt: 0.25,
                 }}
               >
-                {profile.team.trim()}
+                {profile.display_name.trim()}
               </Typography>
             )}
           </Box>

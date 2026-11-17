@@ -44,6 +44,9 @@ pub struct PeerBeacon {
     /// Preset avatar id (empty = letter avatar). Unknown to older peers → ignored.
     #[serde(default)]
     pub avatar_id: String,
+    /// Job title / role. Unknown to older peers → ignored.
+    #[serde(default)]
+    pub designation: String,
     pub ts: f64,
 }
 
@@ -343,6 +346,7 @@ pub async fn run_beacon(
     live_display_name: Arc<parking_lot::Mutex<String>>,
     live_team: Arc<parking_lot::Mutex<String>>,
     live_avatar_id: Arc<parking_lot::Mutex<String>>,
+    live_designation: Arc<parking_lot::Mutex<String>>,
     db: Arc<parking_lot::Mutex<rusqlite::Connection>>,
 ) {
     let sock = match UdpSocket::bind(format!("0.0.0.0:{discovery_port}")).await {
@@ -368,6 +372,7 @@ pub async fn run_beacon(
                 beacon.display_name = live_display_name.lock().clone();
                 beacon.team = live_team.lock().clone();
                 beacon.avatar_id = live_avatar_id.lock().clone();
+                beacon.designation = live_designation.lock().clone();
                 beacon.ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs_f64())
@@ -493,6 +498,7 @@ async fn handle_packet(
                 true,
                 Some(peer.team.as_str()),
                 Some(peer.avatar_id.as_str()),
+                Some(peer.designation.as_str()),
             );
             // Only clear backoff when the peer's LAN address actually changed.
             // Clearing on every offline→online flap (common with stale-peer prune)
@@ -517,6 +523,7 @@ async fn handle_packet(
                 true,
                 Some(peer.team.as_str()),
                 Some(peer.avatar_id.as_str()),
+                Some(peer.designation.as_str()),
             );
         }
     }

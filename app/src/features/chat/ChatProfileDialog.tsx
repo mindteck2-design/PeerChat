@@ -4,6 +4,7 @@ import {
   Avatar,
   Box,
   Button,
+  Chip,
   Dialog,
   DialogContent,
   IconButton,
@@ -72,6 +73,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
   const [savedAbout, setSavedAbout] = useState("Hey, I'm using PeerChat 😊");
   const [isEditingAbout, setIsEditingAbout] = useState(false);
   const [aboutDraft, setAboutDraft] = useState("");
+  const [selfDesignation, setSelfDesignation] = useState("");
 
   useEffect(() => {
     if (!isOpen) return;
@@ -92,13 +94,31 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
     }
   }, [isOpen, peerId, isSelf, peerApi]);
 
+  useEffect(() => {
+    if (!isOpen || !isSelf) {
+      setSelfDesignation("");
+      return;
+    }
+    peerApi
+      .getAppSetting("profile_designation")
+      .then((v) => setSelfDesignation((v || "").trim()))
+      .catch(() => setSelfDesignation(""));
+  }, [isOpen, isSelf, peerApi]);
+
   if (!isOpen) return null;
 
   const displayName = activeDmPeer?.display_name || active?.peer_name || "Peer";
   const isOnline = !!activeDmPeer?.online;
   const ipAddress = activeDmPeer?.last_ip || "192.168.1.24";
-  const rawTeam = activeDmPeer?.team?.trim();
-  const teamLabel = rawTeam ? (rawTeam.toLowerCase().endsWith("team") ? rawTeam : `${rawTeam} Team`) : "General Team";
+  const rawTeam = (isSelf ? profile?.team : activeDmPeer?.team)?.trim() || "";
+  const teamChip = rawTeam
+    ? rawTeam.toLowerCase().endsWith("team")
+      ? rawTeam
+      : `${rawTeam} Team`
+    : "";
+  const designationLabel =
+    (isSelf ? selfDesignation : (activeDmPeer?.designation || "").trim()) ||
+    (isOnline ? "Online" : "Offline");
   const isMuted = !!active?.muted;
   const isPinned = !!active?.pinned_at;
 
@@ -266,11 +286,31 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                   </Box>
 
                   <Box minWidth={0} flex={1}>
-                    <Typography fontWeight={700} fontSize={18.5} color="text.primary" noWrap>
-                      {displayName}
-                    </Typography>
+                    <Stack direction="row" spacing={1} alignItems="center" minWidth={0}>
+                      <Typography fontWeight={700} fontSize={18.5} color="text.primary" noWrap>
+                        {displayName}
+                      </Typography>
+                      {teamChip ? (
+                        <Chip
+                          label={teamChip}
+                          size="small"
+                          sx={{
+                            height: 22,
+                            fontWeight: 600,
+                            fontSize: 11,
+                            flexShrink: 0,
+                            maxWidth: 140,
+                            "& .MuiChip-label": {
+                              px: 1,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            },
+                          }}
+                        />
+                      ) : null}
+                    </Stack>
 
-                    {/* Team Subtitle with status dot */}
+                    {/* Designation with online status dot */}
                     <Stack direction="row" spacing={0.75} alignItems="center" mt={0.35}>
                       <Box
                         sx={{
@@ -290,7 +330,7 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                         }}
                         noWrap
                       >
-                        {teamLabel}
+                        {designationLabel}
                       </Typography>
                     </Stack>
 

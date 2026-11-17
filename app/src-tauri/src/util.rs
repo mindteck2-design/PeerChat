@@ -388,16 +388,22 @@ pub(crate) fn from_peer_json(profile: &Value, fingerprint: &str) -> Value {
         "last_ip": discovery::lan_ip(),
         "avatar_id": profile.get("avatar_id").and_then(|v| v.as_str()).unwrap_or(""),
         "team": profile.get("team").and_then(|v| v.as_str()).unwrap_or(""),
+        "designation": profile.get("designation").and_then(|v| v.as_str()).unwrap_or(""),
     })
 }
 
-/// Attach local avatar_id setting onto a profile JSON before building from_peer.
+/// Attach local avatar_id + designation onto a profile JSON before building from_peer.
 pub(crate) fn with_local_avatar(conn: &rusqlite::Connection, mut profile: Value) -> Value {
     let avatar = crate::db::get_setting(conn, "avatar_id")
         .ok()
         .flatten()
         .unwrap_or_default();
     profile["avatar_id"] = json!(normalize_avatar_id(&avatar));
+    let designation = crate::db::get_setting(conn, "profile_designation")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    profile["designation"] = json!(designation.trim());
     profile
 }
 

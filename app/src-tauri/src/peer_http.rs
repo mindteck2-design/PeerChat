@@ -625,6 +625,10 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     let normalized = crate::util::normalize_avatar_id(aid);
                     let _ = db::set_peer_avatar_id(&conn, &uid, &normalized);
                 }
+                if peer.get("designation").is_some() {
+                    let title = peer.get("designation").and_then(|v| v.as_str()).unwrap_or("");
+                    let _ = db::set_peer_designation(&conn, &uid, title);
+                }
                 let _ = db::clear_peer_outbox_backoff(&conn, &uid);
                 if payload
                     .get("profile_update")

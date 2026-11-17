@@ -197,15 +197,15 @@ export function SettingsScreen(props: {
       .getAppSetting("profile_status_msg")
       .then((v) => {
         if (v && v.trim()) {
-          setStatusMsg(v.trim().slice(0, 150));
+          setStatusMsg(v.trim().slice(0, 120));
         } else {
           const cached = localStorage.getItem("peerchat_about_" + props.profile.id);
-          if (cached) setStatusMsg(cached.slice(0, 150));
+          if (cached) setStatusMsg(cached.slice(0, 120));
         }
       })
       .catch(() => {
         const cached = localStorage.getItem("peerchat_about_" + props.profile.id);
-        if (cached) setStatusMsg(cached.slice(0, 150));
+        if (cached) setStatusMsg(cached.slice(0, 120));
       });
   }, []);
 
@@ -260,7 +260,7 @@ export function SettingsScreen(props: {
     const teamTrimmed = team.trim();
     if (!trimmed) return;
     const finalDesignation = (isCustomRole ? customRoleText : designation).trim();
-    const finalAbout = statusMsg.trim().slice(0, 150);
+    const finalAbout = statusMsg.trim().slice(0, 120);
     setSavingProfile(true);
     try {
       const p = await peerApi.updateDisplayName(trimmed, teamTrimmed);
@@ -330,7 +330,7 @@ export function SettingsScreen(props: {
   }
 
   const cardSx = {
-    p: 2.5,
+    p: { xs: 2.5, sm: 3 },
     borderRadius: 1.5,
     bgcolor: "background.paper",
     border: 1,
@@ -463,69 +463,6 @@ export function SettingsScreen(props: {
               </Typography>
             </Box>
 
-            <Box sx={{ mb: 2.5 }}>
-              <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 1 }}>
-                Display picture
-              </Typography>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                <Box
-                  sx={{
-                    position: "relative",
-                    width: 72,
-                    height: 72,
-                    borderRadius: "50%",
-                    flexShrink: 0,
-                    "&:hover .avatar-edit-btn, &:focus-within .avatar-edit-btn": {
-                      opacity: 1,
-                      transform: "scale(1)",
-                    },
-                  }}
-                >
-                  <PeerAvatar
-                    name={name || props.profile.display_name}
-                    avatarId={avatarId}
-                    size={72}
-                  />
-                  <IconButton
-                    className="avatar-edit-btn"
-                    aria-label="Edit avatar"
-                    disabled={avatarBusy}
-                    onClick={() => setAvatarPickerOpen(true)}
-                    size="small"
-                    sx={{
-                      position: "absolute",
-                      right: -2,
-                      bottom: -2,
-                      width: 28,
-                      height: 28,
-                      bgcolor: "primary.main",
-                      color: "primary.contrastText",
-                      border: 2,
-                      borderColor: "background.paper",
-                      opacity: { xs: 1, sm: 0 },
-                      transform: { xs: "scale(1)", sm: "scale(0.92)" },
-                      transition: "opacity 0.15s ease, transform 0.15s ease, background-color 0.15s ease",
-                      "&:hover": { bgcolor: "primary.dark" },
-                      "&.Mui-disabled": {
-                        bgcolor: "action.disabledBackground",
-                        color: "action.disabled",
-                      },
-                    }}
-                  >
-                    <EditRoundedIcon sx={{ fontSize: 14 }} />
-                  </IconButton>
-                </Box>
-                <Box>
-                  <Typography sx={{ fontSize: "0.875rem", color: titleColor, fontWeight: 600 }}>
-                    {AVATAR_PRESETS.find((p) => p.id === avatarId)?.label || "Letter initial"}
-                  </Typography>
-                  <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, mt: 0.25 }}>
-                    Hover the photo and click edit to choose a preset. Peers see it after discovery refreshes.
-                  </Typography>
-                </Box>
-              </Box>
-            </Box>
-
             <AvatarPickerDialog
               open={avatarPickerOpen}
               name={name || props.profile.display_name}
@@ -550,9 +487,71 @@ export function SettingsScreen(props: {
               }}
             />
 
-            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2, mb: 2 }}>
-              <Box>
-                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
+            {/* Row 1: Avatar · Display name · Team */}
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: {
+                  xs: "1fr",
+                  sm: "auto minmax(0, 1.2fr) minmax(0, 1fr)",
+                },
+                gap: { xs: 2.5, sm: 2.75 },
+                alignItems: { xs: "stretch", sm: "start" },
+                mb: 3,
+              }}
+            >
+              <Box
+                sx={{
+                  position: "relative",
+                  width: 72,
+                  height: 72,
+                  borderRadius: "50%",
+                  flexShrink: 0,
+                  mt: { sm: 2.75 },
+                  justifySelf: { xs: "start", sm: "center" },
+                  "&:hover .avatar-edit-btn, &:focus-within .avatar-edit-btn": {
+                    opacity: 1,
+                    transform: "scale(1)",
+                  },
+                }}
+              >
+                <PeerAvatar
+                  name={name || props.profile.display_name}
+                  avatarId={avatarId}
+                  size={72}
+                />
+                <IconButton
+                  className="avatar-edit-btn"
+                  aria-label="Edit avatar"
+                  disabled={avatarBusy}
+                  onClick={() => setAvatarPickerOpen(true)}
+                  size="small"
+                  sx={{
+                    position: "absolute",
+                    right: -2,
+                    bottom: -2,
+                    width: 28,
+                    height: 28,
+                    bgcolor: "primary.main",
+                    color: "primary.contrastText",
+                    border: 2,
+                    borderColor: "background.paper",
+                    opacity: { xs: 1, sm: 0 },
+                    transform: { xs: "scale(1)", sm: "scale(0.92)" },
+                    transition: "opacity 0.15s ease, transform 0.15s ease, background-color 0.15s ease",
+                    "&:hover": { bgcolor: "primary.dark" },
+                    "&.Mui-disabled": {
+                      bgcolor: "action.disabledBackground",
+                      color: "action.disabled",
+                    },
+                  }}
+                >
+                  <EditRoundedIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Box>
+
+              <Box minWidth={0}>
+                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.85 }}>
                   Display Name *
                 </Typography>
                 <TextField
@@ -560,13 +559,12 @@ export function SettingsScreen(props: {
                   fullWidth
                   value={name}
                   onChange={(e) => setName(sanitizeNameOrTeam(e.target.value))}
-                  helperText="Letters, numbers, spaces, - and _"
                   sx={inputSx}
                 />
               </Box>
 
-              <Box>
-                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
+              <Box minWidth={0}>
+                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.85 }}>
                   Team / Department
                 </Typography>
                 <TextField
@@ -576,15 +574,26 @@ export function SettingsScreen(props: {
                   placeholder="e.g. HMIS"
                   onChange={(e) => setTeam(sanitizeNameOrTeam(e.target.value))}
                   helperText="HMIS and Hmis are treated as one team"
+                  FormHelperTextProps={{ sx: { mx: 0, mt: 0.75 } }}
                   sx={inputSx}
                 />
               </Box>
+            </Box>
 
-              <Box>
-                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
+            {/* Row 2: Designation · Employee ID · Status */}
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: { xs: "1fr", sm: "repeat(3, minmax(0, 1fr))" },
+                gap: { xs: 2.5, sm: 2.75 },
+                alignItems: "start",
+                mb: 3,
+              }}
+            >
+              <Box minWidth={0}>
+                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.85 }}>
                   Designation / Role
                 </Typography>
-
                 <FormControl size="small" fullWidth>
                   <Select
                     value={isCustomRole ? "__custom__" : (designation || "")}
@@ -615,7 +624,6 @@ export function SettingsScreen(props: {
                     </MenuItem>
                   </Select>
                 </FormControl>
-
                 {isCustomRole && (
                   <TextField
                     size="small"
@@ -623,14 +631,13 @@ export function SettingsScreen(props: {
                     value={customRoleText}
                     placeholder="Type custom designation…"
                     onChange={(e) => setCustomRoleText(e.target.value)}
-                    helperText="Enter your specific role title if not listed above."
-                    sx={{ ...inputSx, mt: 1 }}
+                    sx={{ ...inputSx, mt: 1.25 }}
                   />
                 )}
               </Box>
 
-              <Box>
-                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
+              <Box minWidth={0}>
+                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.85 }}>
                   Employee ID
                 </Typography>
                 <TextField
@@ -642,11 +649,9 @@ export function SettingsScreen(props: {
                   sx={inputSx}
                 />
               </Box>
-            </Box>
 
-            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "180px 1fr" }, gap: 2, mb: 2.5 }}>
-              <Box>
-                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.75 }}>
+              <Box minWidth={0}>
+                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500, mb: 0.85 }}>
                   Status
                 </Typography>
                 <FormControl size="small" fullWidth>
@@ -654,6 +659,30 @@ export function SettingsScreen(props: {
                     value={presence}
                     onChange={(e) => setPresence(e.target.value)}
                     sx={{ ...inputSx, borderRadius: 1.25 }}
+                    renderValue={(selected) => {
+                      const map: Record<string, { color: string; label: string }> = {
+                        Available: { color: "#22C55E", label: "Available" },
+                        "In a meeting": { color: "#EAB308", label: "In a meeting" },
+                        "Do Not Disturb": { color: "#EF4444", label: "Do Not Disturb" },
+                        "On a break": { color: "#F59E0B", label: "On a break" },
+                        Away: { color: "#94A3B8", label: "Away" },
+                      };
+                      const item = map[selected] || { color: "#94A3B8", label: selected };
+                      return (
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                          <Box
+                            sx={{
+                              width: 8,
+                              height: 8,
+                              borderRadius: "50%",
+                              bgcolor: item.color,
+                              flexShrink: 0,
+                            }}
+                          />
+                          {item.label}
+                        </Box>
+                      );
+                    }}
                   >
                     <MenuItem value="Available">🟢 Available</MenuItem>
                     <MenuItem value="In a meeting">🟡 In a meeting</MenuItem>
@@ -663,26 +692,45 @@ export function SettingsScreen(props: {
                   </Select>
                 </FormControl>
               </Box>
+            </Box>
 
-              <Box>
-                <Box display="flex" justifyContent="space-between" alignItems="center" mb={0.75}>
-                  <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500 }}>
-                    About
-                  </Typography>
-                  <Typography sx={{ fontSize: "0.75rem", color: statusMsg.length >= 150 ? "error.main" : mutedColor }}>
-                    {statusMsg.length}/150
-                  </Typography>
-                </Box>
-                <TextField
-                  size="small"
-                  fullWidth
-                  placeholder="Hey, I'm using PeerChat 😊"
-                  value={statusMsg}
-                  onChange={(e) => setStatusMsg(e.target.value.slice(0, 150))}
-                  inputProps={{ maxLength: 150 }}
-                  sx={inputSx}
-                />
+            {/* Row 3: About (full width) */}
+            <Box sx={{ mb: 3 }}>
+              <Box display="flex" justifyContent="space-between" alignItems="center" mb={0.85}>
+                <Typography sx={{ fontSize: "0.8125rem", color: mutedColor, fontWeight: 500 }}>
+                  About
+                </Typography>
+                <Typography
+                  sx={{
+                    fontSize: "0.75rem",
+                    color: statusMsg.length >= 120 ? "error.main" : mutedColor,
+                  }}
+                >
+                  {statusMsg.length} / 120
+                </Typography>
               </Box>
+              <TextField
+                fullWidth
+                multiline
+                minRows={2}
+                maxRows={4}
+                placeholder="Tell us something about yourself or your role…"
+                value={statusMsg}
+                onChange={(e) => setStatusMsg(e.target.value.slice(0, 120))}
+                inputProps={{ maxLength: 120 }}
+                sx={{
+                  ...inputSx,
+                  "& .MuiOutlinedInput-root": {
+                    ...inputSx["& .MuiOutlinedInput-root"],
+                    alignItems: "flex-start",
+                  },
+                  "& .MuiInputBase-input": {
+                    fontSize: "0.875rem",
+                    lineHeight: 1.5,
+                    py: 1.25,
+                  },
+                }}
+              />
             </Box>
 
             <Button

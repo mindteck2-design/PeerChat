@@ -145,8 +145,15 @@ pub fn set_app_setting(state: State<AppState>, key: String, value: String) -> Re
             );
         }
     }
-    let conn = state.db.lock();
-    db::set_setting(&conn, &key, value.trim())
+    let trimmed = value.trim().to_string();
+    {
+        let conn = state.db.lock();
+        db::set_setting(&conn, &key, &trimmed)?;
+    }
+    if key == "profile_designation" {
+        *state.live_designation.lock() = trimmed;
+    }
+    Ok(())
 }
 
 #[tauri::command]

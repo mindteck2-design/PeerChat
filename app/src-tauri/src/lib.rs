@@ -98,6 +98,7 @@ pub fn run() {
                 live_display_name: Arc::new(Mutex::new(String::new())),
                 live_team: Arc::new(Mutex::new(String::new())),
                 live_avatar_id: Arc::new(Mutex::new(String::new())),
+                live_designation: Arc::new(Mutex::new(String::new())),
                 keep_awake: Mutex::new(None),
             });
             // Bootstrap log so a blank UI still leaves a trail on disk.

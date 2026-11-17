@@ -26,6 +26,7 @@ export function AvatarPickerDialog(props: {
   onApply: (avatarId: AvatarId | "") => void | Promise<void>;
 }) {
   const theme = useTheme();
+  const dark = theme.palette.mode === "dark";
   const [draft, setDraft] = useState<AvatarId | "">(props.avatarId);
 
   useEffect(() => {
@@ -33,7 +34,14 @@ export function AvatarPickerDialog(props: {
   }, [props.open, props.avatarId]);
 
   const selectedBorder = theme.palette.primary.main;
-  const tileBg = alpha(theme.palette.action.hover, theme.palette.mode === "dark" ? 0.55 : 1);
+  // Do not alpha(action.hover, 1) — that turns rgba(0,0,0,0.04) into solid black in light mode.
+  const tileBg = dark ? alpha(theme.palette.common.white, 0.06) : alpha(theme.palette.common.black, 0.04);
+  const tileBgHover = dark
+    ? alpha(theme.palette.primary.main, 0.14)
+    : alpha(theme.palette.primary.main, 0.08);
+  const tileBgSelected = dark
+    ? alpha(theme.palette.primary.main, 0.22)
+    : alpha(theme.palette.primary.main, 0.12);
 
   function OptionTile(opts: {
     selected: boolean;
@@ -57,20 +65,15 @@ export function AvatarPickerDialog(props: {
           p: 1,
           m: 0,
           border: 2,
-          borderColor: opts.selected ? selectedBorder : "transparent",
+          borderColor: opts.selected ? selectedBorder : dark ? "rgba(160, 184, 232, 0.16)" : "divider",
           borderRadius: 2,
-          bgcolor: opts.selected
-            ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.16 : 0.08)
-            : tileBg,
+          bgcolor: opts.selected ? tileBgSelected : tileBg,
           cursor: props.busy ? "default" : "pointer",
           color: "text.primary",
           transition: "border-color 0.15s ease, background-color 0.15s ease",
           "&:hover": {
-            bgcolor: alpha(
-              theme.palette.primary.main,
-              theme.palette.mode === "dark" ? 0.12 : 0.06
-            ),
-            borderColor: opts.selected ? selectedBorder : "divider",
+            bgcolor: opts.selected ? tileBgSelected : tileBgHover,
+            borderColor: opts.selected ? selectedBorder : "primary.main",
           },
         }}
       >
@@ -119,12 +122,16 @@ export function AvatarPickerDialog(props: {
       maxWidth="sm"
       PaperProps={{
         sx: {
-          bgcolor: "background.paper",
+          bgcolor: dark ? "chat.input" : "background.paper",
           backgroundImage: "none",
+          color: "text.primary",
           border: 1,
-          borderColor: "divider",
+          borderColor: dark ? "rgba(160, 184, 232, 0.22)" : "divider",
           borderRadius: 2.5,
           overflow: "hidden",
+          boxShadow: dark
+            ? "0 18px 48px rgba(0,0,0,0.55)"
+            : "0 18px 48px rgba(20, 32, 28, 0.16)",
         },
       }}
     >
@@ -135,6 +142,8 @@ export function AvatarPickerDialog(props: {
           gap: 1.25,
           pr: 6,
           pb: 0.5,
+          bgcolor: "transparent",
+          color: "text.primary",
         }}
       >
         <Box
@@ -142,7 +151,7 @@ export function AvatarPickerDialog(props: {
             width: 40,
             height: 40,
             borderRadius: "50%",
-            bgcolor: alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.2 : 0.12),
+            bgcolor: alpha(theme.palette.primary.main, dark ? 0.22 : 0.12),
             color: "primary.main",
             display: "grid",
             placeItems: "center",
@@ -176,7 +185,7 @@ export function AvatarPickerDialog(props: {
         </IconButton>
       </DialogTitle>
 
-      <DialogContent sx={{ pt: 2.5 }}>
+      <DialogContent sx={{ pt: 2.5, bgcolor: "transparent" }}>
         <Box
           sx={{
             display: "grid",
@@ -207,7 +216,7 @@ export function AvatarPickerDialog(props: {
         </Box>
       </DialogContent>
 
-      <DialogActions sx={{ px: 3, py: 2, gap: 1 }}>
+      <DialogActions sx={{ px: 3, py: 2, gap: 1, bgcolor: "transparent" }}>
         <Button
           onClick={props.onClose}
           disabled={props.busy}
@@ -232,8 +241,8 @@ export function AvatarPickerDialog(props: {
             color: "primary.contrastText",
             "&:hover": { bgcolor: "primary.dark" },
             "&.Mui-disabled": {
-              bgcolor: "action.disabledBackground",
-              color: "action.disabled",
+              bgcolor: dark ? alpha(theme.palette.common.white, 0.08) : "action.disabledBackground",
+              color: dark ? alpha(theme.palette.common.white, 0.35) : "action.disabled",
             },
           }}
         >

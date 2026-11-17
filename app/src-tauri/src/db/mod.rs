@@ -185,6 +185,10 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE peers ADD COLUMN avatar_id TEXT NOT NULL DEFAULT ''",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE peers ADD COLUMN designation TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     let _ = conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS peer_identity_history (

@@ -11,6 +11,8 @@ export type Profile = {
   team?: string;
   /** Preset avatar id; empty = letter avatar */
   avatar_id?: string;
+  /** Job title / role from Settings (broadcast on LAN) */
+  designation?: string;
 };
 
 export type Peer = {
@@ -32,6 +34,8 @@ export type Peer = {
   team?: string | null;
   /** Preset avatar id from discovery / profile sync */
   avatar_id?: string | null;
+  /** Job title / role from discovery / profile sync */
+  designation?: string | null;
 };
 
 export type Conversation = {

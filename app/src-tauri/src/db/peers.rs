@@ -301,6 +301,7 @@ pub fn upsert_peer_with_team(
         online,
         team,
         None,
+        None,
     )
 }
 
@@ -316,6 +317,7 @@ pub fn upsert_peer_with_team_avatar(
     online: bool,
     team: Option<&str>,
     avatar: Option<&str>,
+    designation: Option<&str>,
 ) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
     // Never persist loopback / garbage — that poisons reverse delivery.
@@ -351,6 +353,12 @@ pub fn upsert_peer_with_team_avatar(
         let _ = conn.execute(
             "UPDATE peers SET avatar_id=?2 WHERE user_id=?1",
             params![user_id, aid.trim()],
+        );
+    }
+    if let Some(title) = designation.filter(|s| !s.trim().is_empty()) {
+        let _ = conn.execute(
+            "UPDATE peers SET designation=?2 WHERE user_id=?1",
+            params![user_id, title.trim()],
         );
     }
     stage_peer_identity(
@@ -459,7 +467,7 @@ pub fn dedupe_peers_by_ip(conn: &Connection) -> Result<(), String> {
 pub(crate) fn list_peers_raw(conn: &Connection) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, last_seen_at, online, COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(team,''), COALESCE(blocked,0), COALESCE(avatar_id,'') FROM peers ORDER BY display_name",
+            "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, last_seen_at, online, COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(team,''), COALESCE(blocked,0), COALESCE(avatar_id,''), COALESCE(designation,'') FROM peers ORDER BY display_name",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -483,6 +491,7 @@ pub(crate) fn list_peers_raw(conn: &Connection) -> Result<Vec<Value>, String> {
                 "team": r.get::<_, String>(12)?,
                 "blocked": r.get::<_, i64>(13)? == 1,
                 "avatar_id": r.get::<_, String>(14)?,
+                "designation": r.get::<_, String>(15)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -558,7 +567,7 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<Value>, String> {
 
 pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, String> {
     conn.query_row(
-        "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, online, COALESCE(blocked,0), COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(avatar_id,'') FROM peers WHERE user_id=?1",
+        "SELECT user_id, display_name, x25519_public, ed25519_public, last_ip, last_port, tls_fingerprint, pinned, online, COALESCE(blocked,0), COALESCE(identity_changed,0), pending_tls_fingerprint, COALESCE(avatar_id,''), COALESCE(designation,''), COALESCE(team,'') FROM peers WHERE user_id=?1",
         params![user_id],
         |r| {
             Ok(serde_json::json!({
@@ -575,6 +584,8 @@ pub fn get_peer(conn: &Connection, user_id: &str) -> Result<Option<Value>, Strin
                 "identity_changed": r.get::<_, i64>(10)? == 1,
                 "pending_tls_fingerprint": r.get::<_, Option<String>>(11)?,
                 "avatar_id": r.get::<_, String>(12)?,
+                "designation": r.get::<_, String>(13)?,
+                "team": r.get::<_, String>(14)?,
             }))
         },
     )
@@ -629,6 +640,15 @@ pub fn set_peer_avatar_id(conn: &Connection, user_id: &str, avatar_id: &str) -> 
     conn.execute(
         "UPDATE peers SET avatar_id=?2 WHERE user_id=?1",
         params![user_id, avatar_id.trim()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn set_peer_designation(conn: &Connection, user_id: &str, designation: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE peers SET designation=?2 WHERE user_id=?1",
+        params![user_id, designation.trim()],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
