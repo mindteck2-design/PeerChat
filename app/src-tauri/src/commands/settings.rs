@@ -152,6 +152,8 @@ pub fn set_app_setting(state: State<AppState>, key: String, value: String) -> Re
     }
     if key == "profile_designation" {
         *state.live_designation.lock() = trimmed;
+    } else if key == "profile_status_msg" {
+        *state.live_about.lock() = trimmed.chars().take(120).collect();
     }
     Ok(())
 }

@@ -130,6 +130,18 @@ pub(crate) fn start_runtime_inner(
             .to_string()
     };
     *state.live_designation.lock() = designation.clone();
+    let about = {
+        let conn = state.db.lock();
+        db::get_setting(&conn, "profile_status_msg")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(120)
+            .collect::<String>()
+    };
+    *state.live_about.lock() = about.clone();
     peer_http::spawn_listener(
         cert.clone(),
         port,
@@ -156,6 +168,7 @@ pub(crate) fn start_runtime_inner(
     let live_team = state.live_team.clone();
     let live_avatar = state.live_avatar_id.clone();
     let live_designation = state.live_designation.clone();
+    let live_about = state.live_about.clone();
     let disc_db = state.db.clone();
     let beacon = PeerBeacon {
         magic: "PEERCHAT".into(),
@@ -171,6 +184,7 @@ pub(crate) fn start_runtime_inner(
         team: team_label,
         avatar_id,
         designation,
+        about,
         ts: 0.0,
     };
     tauri::async_runtime::spawn(async move {
@@ -184,6 +198,7 @@ pub(crate) fn start_runtime_inner(
             live_team,
             live_avatar,
             live_designation,
+            live_about,
             disc_db,
         )
         .await;

@@ -629,6 +629,12 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     let title = peer.get("designation").and_then(|v| v.as_str()).unwrap_or("");
                     let _ = db::set_peer_designation(&conn, &uid, title);
                 }
+                if peer.get("about").is_some() {
+                    let about = peer.get("about").and_then(|v| v.as_str()).unwrap_or("");
+                    if !about.trim().is_empty() {
+                        let _ = db::set_peer_about(&conn, &uid, about);
+                    }
+                }
                 let _ = db::clear_peer_outbox_backoff(&conn, &uid);
                 if payload
                     .get("profile_update")

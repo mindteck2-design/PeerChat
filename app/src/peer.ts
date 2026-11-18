@@ -36,6 +36,8 @@ export type Peer = {
   avatar_id?: string | null;
   /** Job title / role from discovery / profile sync */
   designation?: string | null;
+  /** About / status blurb from discovery / profile sync */
+  about?: string | null;
 };
 
 export type Conversation = {

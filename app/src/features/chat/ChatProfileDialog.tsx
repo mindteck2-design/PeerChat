@@ -1,7 +1,6 @@
 // @ts-nocheck
 import { useState, useMemo, useEffect } from "react";
 import {
-  Avatar,
   Box,
   Button,
   Chip,
@@ -31,7 +30,7 @@ import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import { extractChatMediaFilesLinks } from "./ChatMediaUtils";
 import { SharedItemsPreviewCard } from "./SharedItemsPreviewCard";
 import { ViewAllCategoryView, type SharedItemsCategory } from "./ViewAllCategoryView";
-import { avatarColor } from "../../shared/format";
+import { PeerAvatar } from "../../shared/PeerAvatar";
 import { openExternalLink } from "../../panels";
 import type { ChatScreenVm } from "./chatVm";
 
@@ -77,10 +76,12 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
 
   useEffect(() => {
     if (!isOpen) return;
-    const local = localStorage.getItem(`peerchat_about_${peerId}`);
-    if (local) {
-      setSavedAbout(local);
-    } else if (isSelf) {
+    if (isSelf) {
+      const local = localStorage.getItem(`peerchat_about_${peerId}`);
+      if (local) {
+        setSavedAbout(local);
+        return;
+      }
       peerApi
         .getAppSetting("profile_status_msg")
         .then((v) => {
@@ -89,10 +90,11 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
           localStorage.setItem(`peerchat_about_${peerId}`, val);
         })
         .catch(() => setSavedAbout("Hey, I'm using PeerChat 😊"));
-    } else {
-      setSavedAbout("Hey, I'm using PeerChat 😊");
+      return;
     }
-  }, [isOpen, peerId, isSelf, peerApi]);
+    const remote = (activeDmPeer?.about || "").trim();
+    setSavedAbout(remote || "Hey, I'm using PeerChat 😊");
+  }, [isOpen, peerId, isSelf, peerApi, activeDmPeer?.about]);
 
   useEffect(() => {
     if (!isOpen || !isSelf) {
@@ -129,10 +131,10 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
   };
 
   const handleSaveAbout = async () => {
-    const trimmed = aboutDraft.trim().slice(0, 150) || "Hey, I'm using PeerChat 😊";
+    const trimmed = aboutDraft.trim().slice(0, 120) || "Hey, I'm using PeerChat 😊";
     setSavedAbout(trimmed);
-    localStorage.setItem(`peerchat_about_${peerId}`, trimmed);
     if (isSelf) {
+      localStorage.setItem(`peerchat_about_${peerId}`, trimmed);
       await peerApi.setAppSetting("profile_status_msg", trimmed).catch(() => {});
     }
     setIsEditingAbout(false);
@@ -257,18 +259,12 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                 {/* Left: Avatar with Online badge + Name + Team + IP */}
                 <Stack direction="row" spacing={2} alignItems="center" minWidth={0} flex={1}>
                   <Box sx={{ position: "relative", flexShrink: 0 }}>
-                    <Avatar
-                      sx={{
-                        width: 62,
-                        height: 62,
-                        bgcolor: avatarColor(displayName),
-                        color: "#FFFFFF",
-                        fontSize: 26,
-                        fontWeight: 800,
-                      }}
-                    >
-                      {displayName.slice(0, 1).toUpperCase()}
-                    </Avatar>
+                    <PeerAvatar
+                      name={displayName}
+                      avatarId={isSelf ? profile?.avatar_id : activeDmPeer?.avatar_id}
+                      size={62}
+                      fontSize={26}
+                    />
                     <Box
                       sx={{
                         position: "absolute",
@@ -498,10 +494,10 @@ export function ChatProfileDialog({ vm }: { vm: ChatScreenVm }) {
                       minRows={2}
                       maxRows={4}
                       value={aboutDraft}
-                      inputProps={{ maxLength: 150 }}
-                      onChange={(e) => setAboutDraft(e.target.value.slice(0, 150))}
+                      inputProps={{ maxLength: 120 }}
+                      onChange={(e) => setAboutDraft(e.target.value.slice(0, 120))}
                       placeholder="Hey, I'm using PeerChat 😊"
-                      helperText={`${aboutDraft.length}/150 characters`}
+                      helperText={`${aboutDraft.length}/120 characters`}
                       sx={{
                         "& .MuiOutlinedInput-root": {
                           fontSize: 13.5,

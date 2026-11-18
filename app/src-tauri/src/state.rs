@@ -20,6 +20,8 @@ pub struct AppState {
     pub live_avatar_id: Arc<Mutex<String>>,
     /// Live discovery beacon job title / designation.
     pub live_designation: Arc<Mutex<String>>,
+    /// Live discovery beacon About / status message.
+    pub live_about: Arc<Mutex<String>>,
     /// Held while the peer runtime is up so idle sleep does not kill LAN reachability.
     pub keep_awake: Mutex<Option<KeepAwakeGuard>>,
 }
