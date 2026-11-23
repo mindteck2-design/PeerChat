@@ -11,6 +11,7 @@ function nameFor(id: string, peers: Peer[], myId: string, myName: string) {
 export function AckBar({
   acks,
   participantIds,
+  ownerId,
   myId,
   myName,
   peers,
