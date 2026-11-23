@@ -42,9 +42,11 @@ import { newRpsState, rpsResolveRound, type RpsState, type RpsMsg, type RpsChoic
 import { newDabState, dabMove, type DabState, type DabMsg, type EdgeId } from "./dab";
 import { new2048State, move2048, undo2048, type Direction } from "./g2048";
 import { SnakeGame } from "../panels";
-import type { Peer } from "../peer";
+import { peerHasLanIp, type Peer } from "../peer";
 import {
   clearGameHistory,
+  clearMatchSessions,
+  clearPendingMatch,
   gameLabel,
   getDabSession,
   getRpsSession,
@@ -55,9 +57,12 @@ import {
   setDabSession,
   setRpsSession,
   setTttSession,
+  subscribeGameSessions,
   type GameHistoryEntry,
   type MpPhase as SessionMpPhase,
 } from "./gameSession";
+
+export { clearPendingMatch, clearMatchSessions };
 
 // ─── Types the host (App.tsx) must provide ───────────────────────────────────
 
@@ -153,6 +158,8 @@ export function GamesHub({
     if (!pendingInvite) return;
     setActive(pendingInvite.game);
   }, [pendingInvite]);
+
+  useEffect(() => subscribeGameSessions(() => setSessionTick((n) => n + 1)), []);
 
   // Hub dispatcher: App already calls applyInboundToSession — only fan out to
   // the mounted game UI and refresh badges. Avoid double-applying moves.
@@ -371,6 +378,8 @@ export function applyInboundToSession(
       setTttSession({ ...s, mpPhase: "playing", mpError: "" });
     } else if (p.type === "decline" && s.mpPhase === "inviting") {
       setTttSession(null);
+    } else if (p.type === "cancel") {
+      if (s.mpPhase === "inviting" || s.mpPhase === "invited") setTttSession(null);
     } else if (p.type === "move" && (s.mpPhase === "playing" || s.mpPhase === "done")) {
       // Prefer authoritative boardAfter so returning to a match stays in sync
       // even if a prior move was missed while the Games UI was unmounted.
@@ -417,9 +426,13 @@ export function applyInboundToSession(
         opponentId: fromId,
         opponentName: s.opponentName,
         outcome: "win",
-        detail: "Opponent resigned",
+        detail: "Opponent left",
       });
-      setTttSession({ ...s, mpPhase: "done", mpError: `${peerName} resigned.` });
+      setTttSession({
+        ...s,
+        mpPhase: "done",
+        mpError: `${peerName} left the game.`,
+      });
     } else if (p.type === "rematch") {
       setTttSession({
         ...s,
@@ -467,6 +480,8 @@ export function applyInboundToSession(
       });
     } else if (p.type === "decline" && s.mpPhase === "inviting") {
       setRpsSession(null);
+    } else if (p.type === "cancel") {
+      if (s.mpPhase === "inviting" || s.mpPhase === "invited") setRpsSession(null);
     } else if (p.type === "commit" && s.mpPhase === "playing") {
       setRpsSession({ ...s, theyCommitted: true });
     } else if (p.type === "reveal" && s.mpPhase === "playing") {
@@ -515,9 +530,13 @@ export function applyInboundToSession(
         opponentId: fromId,
         opponentName: s.opponentName,
         outcome: "win",
-        detail: "Opponent resigned",
+        detail: "Opponent left",
       });
-      setRpsSession({ ...s, mpPhase: "done", mpError: `${peerName} resigned.` });
+      setRpsSession({
+        ...s,
+        mpPhase: "done",
+        mpError: `${peerName} left the game.`,
+      });
     }
     return;
   }
@@ -548,6 +567,8 @@ export function applyInboundToSession(
       setDabSession({ ...s, mpPhase: "playing", mpError: "" });
     } else if (p.type === "decline" && s.mpPhase === "inviting") {
       setDabSession(null);
+    } else if (p.type === "cancel") {
+      if (s.mpPhase === "inviting" || s.mpPhase === "invited") setDabSession(null);
     } else if (p.type === "move" && (s.mpPhase === "playing" || s.mpPhase === "done")) {
       // Apply by edge; if turn guard would reject (missed prior moves), try anyway
       // after forcing turn to the expected player so the board catches up.
@@ -602,9 +623,13 @@ export function applyInboundToSession(
         opponentId: fromId,
         opponentName: s.opponentName,
         outcome: "win",
-        detail: "Opponent resigned",
+        detail: "Opponent left",
       });
-      setDabSession({ ...s, mpPhase: "done", mpError: `${peerName} resigned.` });
+      setDabSession({
+        ...s,
+        mpPhase: "done",
+        mpError: `${peerName} left the game.`,
+      });
     }
   }
 }
@@ -620,6 +645,41 @@ function BackBar({ onBack, title }: { onBack: () => void; title: string }) {
       <Typography variant="h6" fontWeight={700}>{title}</Typography>
     </Stack>
   );
+}
+
+/** Notify peer + clear local LAN state when leaving invite/match. */
+async function leaveLanMatch(opts: {
+  mode: "local" | "lan";
+  mpPhase: SessionMpPhase;
+  matchId: string;
+  opponentId?: string | null;
+  game: "ttt" | "rps" | "dab";
+  sendGameMsg: GameSendFn;
+}): Promise<void> {
+  if (opts.mode !== "lan" || !opts.matchId) {
+    clearMatchSessions(opts.matchId);
+    return;
+  }
+  const peerId = opts.opponentId || "";
+  try {
+    if (peerId && (opts.mpPhase === "inviting" || opts.mpPhase === "invited")) {
+      await opts.sendGameMsg(peerId, {
+        game: opts.game,
+        payload: {
+          type: opts.mpPhase === "inviting" ? "cancel" : "decline",
+          matchId: opts.matchId,
+        } as TttMsg,
+      });
+    } else if (peerId && opts.mpPhase === "playing") {
+      await opts.sendGameMsg(peerId, {
+        game: opts.game,
+        payload: { type: "resign", matchId: opts.matchId } as TttMsg,
+      });
+    }
+  } catch {
+    /* peer offline — still clear local waiting state */
+  }
+  clearMatchSessions(opts.matchId);
 }
 
 // ─── Peer picker dialog for LAN multiplayer ───────────────────────────────────
@@ -989,6 +1049,24 @@ function TicTacToe({
       if (msg.game !== "ttt") return;
       const p = msg.payload as TttMsg;
       const fromPeer = peers.find((x) => x.user_id === fromId);
+      const isSelf = fromId === myId;
+
+      if (p.type === "cancel") {
+        if (p.matchId && matchId && p.matchId !== matchId) return;
+        if (mpPhase === "inviting" || mpPhase === "invited" || inboundInvite) {
+          setInboundInvite(null);
+          setMpPhase("idle");
+          setOpponent(null);
+          setTttSession(null);
+          if (!isSelf) {
+            setMpError(
+              `${fromPeer?.display_name || "Peer"} canceled the invite.`
+            );
+          }
+        }
+        return;
+      }
+
       if (!fromPeer) return;
 
       if (p.type === "invite") {
@@ -1061,14 +1139,14 @@ function TicTacToe({
       }
       if (p.type === "resign") {
         setMpPhase("done");
-        setMpError(`${fromPeer.display_name} resigned.`);
+        setMpError(`${fromPeer.display_name} left the game.`);
         pushGameHistory({
           game: "ttt",
           matchId: p.matchId || matchId,
           opponentId: fromId,
           opponentName: fromPeer.display_name,
           outcome: "win",
-          detail: "Opponent resigned",
+          detail: "Opponent left",
         });
         onHistory?.();
         void sendGameMsg(fromId, {
@@ -1078,7 +1156,7 @@ function TicTacToe({
       }
     };
     return () => { dispatchRef.current = null; };
-  }, [mpPhase, peers, matchId, myRole, myId, dispatchRef, sendGameMsg, onHistory]);
+  }, [mpPhase, peers, matchId, myRole, myId, inboundInvite, dispatchRef, sendGameMsg, onHistory]);
 
   function recordTttHistory(outcome: "win" | "lose" | "draw", detail?: string) {
     if (!opponent || !matchId) return;
@@ -1138,6 +1216,44 @@ function TicTacToe({
     setTttSession(null);
   }
 
+  function resetTttLanLocal() {
+    setMpPhase("idle");
+    setOpponent(null);
+    setInboundInvite(null);
+    setMatchId("");
+    setMode("local");
+    setState(newTttState());
+    setSeq(0);
+    setMpError("");
+    setTttSession(null);
+  }
+
+  async function handleTttBack() {
+    await leaveLanMatch({
+      mode,
+      mpPhase,
+      matchId,
+      opponentId: opponent?.user_id || inboundInvite?.from.user_id,
+      game: "ttt",
+      sendGameMsg,
+    });
+    resetTttLanLocal();
+    onBack();
+  }
+
+  async function cancelOutgoingInvite() {
+    if (mpPhase !== "inviting" || !opponent || !matchId) return;
+    await leaveLanMatch({
+      mode: "lan",
+      mpPhase: "inviting",
+      matchId,
+      opponentId: opponent.user_id,
+      game: "ttt",
+      sendGameMsg,
+    });
+    resetTttLanLocal();
+  }
+
   async function publishTttResult(next: TttState) {
     if (mode !== "lan" || !opponent || !matchId) return;
     if (next.winner === null) return;
@@ -1191,7 +1307,7 @@ function TicTacToe({
 
   return (
     <Box sx={{ p: 3 }}>
-      <BackBar onBack={onBack} title="Tic-Tac-Toe" />
+      <BackBar onBack={() => void handleTttBack()} title="Tic-Tac-Toe" />
 
       {/* Inbound invite dialog */}
       <Dialog open={!!inboundInvite}>
@@ -1207,19 +1323,24 @@ function TicTacToe({
 
       <PeerPickerDialog
         open={pickerOpen}
-        peers={peers.filter((p) => p.user_id !== myId)}
+        peers={peers.filter((p) => p.user_id !== myId && peerHasLanIp(p))}
         title="Invite to Tic-Tac-Toe"
         onPick={handleInvite}
         onClose={() => setPickerOpen(false)}
       />
 
-      <Stack direction="row" spacing={1} sx={{ mb: 2 }}>
+      <Stack direction="row" spacing={1} sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
         <Button variant={mode === "local" ? "contained" : "outlined"} size="small" onClick={startLocalGame}>
           Local 2P
         </Button>
         <Button variant="outlined" size="small" onClick={() => setPickerOpen(true)}>
           LAN invite…
         </Button>
+        {mpPhase === "inviting" && (
+          <Button size="small" color="warning" onClick={() => void cancelOutgoingInvite()}>
+            Cancel invite
+          </Button>
+        )}
         {mode === "lan" && opponent && (
           <Chip size="small" label={`vs ${opponent.display_name} (you=${myRole})`} color="primary" />
         )}
@@ -1431,6 +1552,24 @@ function RockPaperScissors({
       if (msg.game !== "rps") return;
       const p = msg.payload as RpsMsg;
       const fromPeer = peers.find((x) => x.user_id === fromId);
+      const isSelf = fromId === myId;
+
+      if (p.type === "cancel") {
+        if (p.matchId && matchId && p.matchId !== matchId) return;
+        if (mpPhase === "inviting" || mpPhase === "invited" || inboundInvite) {
+          setInboundInvite(null);
+          setMpPhase("idle");
+          setOpponent(null);
+          setRpsSession(null);
+          if (!isSelf) {
+            setMpError(
+              `${fromPeer?.display_name || "Peer"} canceled the invite.`
+            );
+          }
+        }
+        return;
+      }
+
       if (!fromPeer) return;
 
       if (p.type === "invite") {
@@ -1483,20 +1622,20 @@ function RockPaperScissors({
       }
       if (p.type === "resign") {
         setMpPhase("done");
-        setMpError(`${fromPeer.display_name} resigned.`);
+        setMpError(`${fromPeer.display_name} left the game.`);
         pushGameHistory({
           game: "rps",
           matchId: p.matchId || matchId,
           opponentId: fromId,
           opponentName: fromPeer.display_name,
           outcome: "win",
-          detail: "Opponent resigned",
+          detail: "Opponent left",
         });
         onHistory?.();
       }
     };
     return () => { dispatchRef.current = null; };
-  }, [mpPhase, peers, matchId, roundNum, format, dispatchRef, onHistory]);
+  }, [mpPhase, peers, matchId, roundNum, format, myId, inboundInvite, dispatchRef, onHistory]);
 
   // When both LAN choices are known, resolve the round
   useEffect(() => {
@@ -1577,6 +1716,46 @@ function RockPaperScissors({
     setRpsSession(null);
   }
 
+  function resetRpsLanLocal() {
+    setMpPhase("idle");
+    setOpponent(null);
+    setInboundInvite(null);
+    setMatchId("");
+    setMode("local");
+    setState(newRpsState(format));
+    setMyChoice(null);
+    setTheyCommitted(false);
+    setTheirReveal(null);
+    setMpError("");
+    setRpsSession(null);
+  }
+
+  async function handleRpsBack() {
+    await leaveLanMatch({
+      mode,
+      mpPhase,
+      matchId,
+      opponentId: opponent?.user_id || inboundInvite?.from.user_id,
+      game: "rps",
+      sendGameMsg,
+    });
+    resetRpsLanLocal();
+    onBack();
+  }
+
+  async function cancelOutgoingRpsInvite() {
+    if (mpPhase !== "inviting" || !opponent || !matchId) return;
+    await leaveLanMatch({
+      mode: "lan",
+      mpPhase: "inviting",
+      matchId,
+      opponentId: opponent.user_id,
+      game: "rps",
+      sendGameMsg,
+    });
+    resetRpsLanLocal();
+  }
+
   async function rematch() {
     setState(newRpsState(format));
     setMyChoice(null);
@@ -1628,7 +1807,7 @@ function RockPaperScissors({
 
   return (
     <Box sx={{ p: 3 }}>
-      <BackBar onBack={onBack} title="Rock Paper Scissors" />
+      <BackBar onBack={() => void handleRpsBack()} title="Rock Paper Scissors" />
 
       <Dialog open={!!inboundInvite}>
         <DialogTitle>Game invite</DialogTitle>
@@ -1645,13 +1824,13 @@ function RockPaperScissors({
 
       <PeerPickerDialog
         open={pickerOpen}
-        peers={peers.filter((p) => p.user_id !== myId)}
+        peers={peers.filter((p) => p.user_id !== myId && peerHasLanIp(p))}
         title="Invite to Rock Paper Scissors"
         onPick={handleInvite}
         onClose={() => setPickerOpen(false)}
       />
 
-      <Stack direction="row" spacing={1} sx={{ mb: 2 }} flexWrap="wrap">
+      <Stack direction="row" spacing={1} sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
         <Button variant={mode === "local" ? "contained" : "outlined"} size="small" onClick={startLocalGame}>
           Local 2P
         </Button>
@@ -1669,12 +1848,23 @@ function RockPaperScissors({
           <MenuItem value={3}>Best of 3</MenuItem>
           <MenuItem value={5}>Best of 5</MenuItem>
         </Select>
+        {mpPhase === "inviting" && (
+          <Button size="small" color="warning" onClick={() => void cancelOutgoingRpsInvite()}>
+            Cancel invite
+          </Button>
+        )}
         {mode === "lan" && opponent && (
           <Chip size="small" label={`vs ${opponent.display_name}`} color="primary" />
         )}
       </Stack>
 
       {mpError && <Alert severity="warning" sx={{ mb: 1 }} onClose={() => setMpError("")}>{mpError}</Alert>}
+
+      {mode === "lan" && mpPhase === "inviting" && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Waiting for {opponent?.display_name || "peer"} to join…
+        </Alert>
+      )}
 
       {/* Score bar */}
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
@@ -1975,6 +2165,24 @@ function DotsAndBoxes({
       if (msg.game !== "dab") return;
       const p = msg.payload as DabMsg;
       const fromPeer = peers.find((x) => x.user_id === fromId);
+      const isSelf = fromId === myId;
+
+      if (p.type === "cancel") {
+        if (p.matchId && matchId && p.matchId !== matchId) return;
+        if (mpPhase === "inviting" || mpPhase === "invited" || inboundInvite) {
+          setInboundInvite(null);
+          setMpPhase("idle");
+          setOpponent(null);
+          setDabSession(null);
+          if (!isSelf) {
+            setMpError(
+              `${fromPeer?.display_name || "Peer"} canceled the invite.`
+            );
+          }
+        }
+        return;
+      }
+
       if (!fromPeer) return;
 
       if (p.type === "invite") {
@@ -2050,14 +2258,14 @@ function DotsAndBoxes({
       }
       if (p.type === "resign") {
         setMpPhase("done");
-        setMpError(`${fromPeer.display_name} resigned.`);
+        setMpError(`${fromPeer.display_name} left the game.`);
         pushGameHistory({
           game: "dab",
           matchId: p.matchId || matchId,
           opponentId: fromId,
           opponentName: fromPeer.display_name,
           outcome: "win",
-          detail: "Opponent resigned",
+          detail: "Opponent left",
         });
         onHistory?.();
         void sendGameMsg(fromId, {
@@ -2067,7 +2275,7 @@ function DotsAndBoxes({
       }
     };
     return () => { dispatchRef.current = null; };
-  }, [mpPhase, peers, matchId, myPlayer, myId, dispatchRef, sendGameMsg, onHistory]);
+  }, [mpPhase, peers, matchId, myPlayer, myId, inboundInvite, dispatchRef, sendGameMsg, onHistory]);
 
   function handleInvite(peer: Peer) {
     setPickerOpen(false);
@@ -2103,6 +2311,44 @@ function DotsAndBoxes({
     setMpPhase("idle");
     setOpponent(null);
     setDabSession(null);
+  }
+
+  function resetDabLanLocal() {
+    setMpPhase("idle");
+    setOpponent(null);
+    setInboundInvite(null);
+    setMatchId("");
+    setMode("local");
+    setState(newDabState(preset.rows, preset.cols));
+    setSeq(0);
+    setMpError("");
+    setDabSession(null);
+  }
+
+  async function handleDabBack() {
+    await leaveLanMatch({
+      mode,
+      mpPhase,
+      matchId,
+      opponentId: opponent?.user_id || inboundInvite?.from.user_id,
+      game: "dab",
+      sendGameMsg,
+    });
+    resetDabLanLocal();
+    onBack();
+  }
+
+  async function cancelOutgoingDabInvite() {
+    if (mpPhase !== "inviting" || !opponent || !matchId) return;
+    await leaveLanMatch({
+      mode: "lan",
+      mpPhase: "inviting",
+      matchId,
+      opponentId: opponent.user_id,
+      game: "dab",
+      sendGameMsg,
+    });
+    resetDabLanLocal();
   }
 
   async function handleEdgeClick(edge: EdgeId) {
@@ -2263,7 +2509,7 @@ function DotsAndBoxes({
 
   return (
     <Box sx={{ p: 3 }}>
-      <BackBar onBack={onBack} title="Dots & Boxes" />
+      <BackBar onBack={() => void handleDabBack()} title="Dots & Boxes" />
 
       <Dialog open={!!inboundInvite}>
         <DialogTitle>Game invite</DialogTitle>
@@ -2280,13 +2526,13 @@ function DotsAndBoxes({
 
       <PeerPickerDialog
         open={pickerOpen}
-        peers={peers.filter((p) => p.user_id !== myId)}
+        peers={peers.filter((p) => p.user_id !== myId && peerHasLanIp(p))}
         title="Invite to Dots & Boxes"
         onPick={handleInvite}
         onClose={() => setPickerOpen(false)}
       />
 
-      <Stack direction="row" spacing={1} sx={{ mb: 2 }} flexWrap="wrap">
+      <Stack direction="row" spacing={1} sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
         <Button variant={mode === "local" ? "contained" : "outlined"} size="small" onClick={startLocalGame}>
           Local 2P
         </Button>
@@ -2309,12 +2555,23 @@ function DotsAndBoxes({
             <MenuItem key={i} value={i}>{p.label}</MenuItem>
           ))}
         </Select>
+        {mpPhase === "inviting" && (
+          <Button size="small" color="warning" onClick={() => void cancelOutgoingDabInvite()}>
+            Cancel invite
+          </Button>
+        )}
         {mode === "lan" && opponent && (
           <Chip size="small" label={`vs ${opponent.display_name} (you=${playerLabel(myPlayer)})`} color="primary" />
         )}
       </Stack>
 
       {mpError && <Alert severity="warning" sx={{ mb: 1 }} onClose={() => setMpError("")}>{mpError}</Alert>}
+
+      {mode === "lan" && mpPhase === "inviting" && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Waiting for {opponent?.display_name || "peer"} to join…
+        </Alert>
+      )}
 
       <Stack direction="row" spacing={3} sx={{ mb: 2 }}>
         <Typography fontWeight={700} sx={{ color: playerColor.A }}>
@@ -2323,7 +2580,7 @@ function DotsAndBoxes({
         <Typography fontWeight={700} sx={{ color: playerColor.B }}>
           {playerLabel("B")}: {state.scoreB}
         </Typography>
-        {!state.done && (
+        {!state.done && mpPhase !== "inviting" && (
           <Typography variant="caption" color="text.secondary" alignSelf="center">
             {canMove ? `${playerLabel(state.turn)}'s turn` : `Waiting for ${opponent?.display_name}…`}
           </Typography>

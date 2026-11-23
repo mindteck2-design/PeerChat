@@ -7,6 +7,7 @@ export type GameCardStatus =
   | "waiting"
   | "accepted"
   | "declined"
+  | "canceled"
   | "win"
   | "lose"
   | "draw"
@@ -65,6 +66,7 @@ export function resolveGameCardStatus(opts: {
   }
   for (const r of related) {
     const t = r.msg.payload.type;
+    if (t === "cancel") return "canceled";
     if (t === "decline") return "declined";
     if (t === "resign") {
       return r.senderId === opts.myId ? "resigned_you" : "resigned_them";
@@ -104,6 +106,10 @@ export function GameInviteCard(props: {
       statusLine = "Rejected";
       statusColor = "error.main";
       break;
+    case "canceled":
+      statusLine = "Invite canceled";
+      statusColor = "warning.main";
+      break;
     case "win":
       statusLine = "You won!";
       statusColor = "success.main";
@@ -116,11 +122,11 @@ export function GameInviteCard(props: {
       statusLine = "Draw";
       break;
     case "resigned_them":
-      statusLine = "Opponent resigned — you win";
+      statusLine = "Opponent left the game — you win";
       statusColor = "success.main";
       break;
     case "resigned_you":
-      statusLine = "You resigned";
+      statusLine = "You left the game";
       statusColor = "warning.main";
       break;
     default:

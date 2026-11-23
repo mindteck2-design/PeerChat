@@ -25,6 +25,44 @@ export function isOwner(createdBy: string | undefined, myId: string) {
   return !!createdBy && createdBy === myId;
 }
 
+/** True when an ack stamp counts as accepted (not rejected / empty). */
+export function isAcceptedAck(stamp: string | undefined | null) {
+  if (!stamp) return false;
+  return stamp !== "rejected" && !stamp.startsWith("rejected|");
+}
+
+/**
+ * People who should acknowledge a shared meeting/reminder.
+ * The creator/owner is listed separately and does not need to ack their own item.
+ */
+export function ackAudienceIds(
+  createdBy: string | undefined | null,
+  participantIds: string[] | undefined | null
+): string[] {
+  const owner = (createdBy || "").trim();
+  return Array.from(
+    new Set((participantIds || []).map((id) => id.trim()).filter((id) => id && id !== owner))
+  );
+}
+
+/** Everyone to show in the people list: creator first, then sharees. */
+export function calendarPeopleIds(
+  createdBy: string | undefined | null,
+  participantIds: string[] | undefined | null
+): string[] {
+  const owner = (createdBy || "").trim();
+  const sharees = ackAudienceIds(createdBy, participantIds);
+  return owner ? [owner, ...sharees] : sharees;
+}
+
+export function countAcceptedAcks(
+  acks: Record<string, string> | undefined | null,
+  expectedIds: string[]
+): number {
+  if (!acks) return 0;
+  return expectedIds.filter((id) => isAcceptedAck(acks[id])).length;
+}
+
 /** Past days: only notes may be created. Today and future: all kinds. */
 export function canCreateKind(kind: CalendarKind, day: string, today = todayKey()) {
   if (!isPastDay(day, today)) return true;

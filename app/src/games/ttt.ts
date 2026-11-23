@@ -66,6 +66,8 @@ export type TttMsg =
   | { type: "invite"; matchId: string; fromName: string }
   | { type: "accept"; matchId: string }
   | { type: "decline"; matchId: string }
+  /** Inviter withdrew the invite (deleted card / left Games while waiting). */
+  | { type: "cancel"; matchId: string }
   | { type: "move"; matchId: string; index: number; boardAfter: Board }
   | { type: "rematch"; matchId: string }
   | { type: "resign"; matchId: string }

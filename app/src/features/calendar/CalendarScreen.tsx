@@ -21,10 +21,12 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircleRounded";
 import PersonOutlineIcon from "@mui/icons-material/PersonOutlineRounded";
 import OpenInNewIcon from "@mui/icons-material/OpenInNewRounded";
 import { listen } from "@tauri-apps/api/event";
-import { peerApi, type CalendarItem, type Peer, type CalendarKind } from "../../peer";
+import { peerApi, peerHasLanIp, type CalendarItem, type Peer, type CalendarKind } from "../../peer";
 import { CalendarItemEditor } from "./CalendarItemEditor";
 import { CalendarItemViewDialog } from "./CalendarItemViewDialog";
 import {
+  ackAudienceIds,
+  countAcceptedAcks,
   dayKey,
   daysInMonth,
   formatTime12,
@@ -141,7 +143,7 @@ export function CalendarScreen({
   const focusTries = useRef(0);
 
   const others = useMemo(
-    () => peers.filter((p) => p.user_id !== myId && !p.blocked),
+    () => peers.filter((p) => p.user_id !== myId && !p.blocked && peerHasLanIp(p)),
     [peers, myId]
   );
 
@@ -716,11 +718,10 @@ export function CalendarScreen({
                   const doneOpts = checklistOpts.filter((o) => o.checked_by.length > 0).length;
                   const isTodo = it.kind === "todo";
 
-                  // Acknowledgement metadata for meetings/reminders
-                  const ackCount = Object.keys(it.acks || {}).length;
-                  const totalExpected = Array.from(
-                    new Set([it.created_by, ...(it.participant_ids || [])].filter(Boolean))
-                  ).length;
+                  // Acknowledgement metadata — creator does not need to ack
+                  const audienceIds = ackAudienceIds(it.created_by, it.participant_ids);
+                  const ackCount = countAcceptedAcks(it.acks, audienceIds);
+                  const totalExpected = audienceIds.length;
 
                   // Creator / Shared text
                   const creatorName =
@@ -930,14 +931,11 @@ export function CalendarScreen({
                               <Stack direction="row" spacing={0.5} alignItems="center">
                                 <PersonOutlineIcon sx={{ fontSize: 15, color: "text.secondary" }} />
                                 <Typography variant="caption" color="text.secondary">
-                                  {
-                                    Array.from(
-                                      new Set(
-                                        [it.created_by, ...(it.participant_ids || [])].filter(Boolean)
-                                      )
-                                    ).length
-                                  }{" "}
-                                  participants
+                                  {totalExpected === 0
+                                    ? "Just you"
+                                    : totalExpected === 1
+                                      ? "1 invited"
+                                      : `${totalExpected} invited`}
                                 </Typography>
                               </Stack>
                             )}

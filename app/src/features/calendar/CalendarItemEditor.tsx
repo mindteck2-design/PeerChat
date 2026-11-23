@@ -27,6 +27,7 @@ import type { Peer, CalendarKind } from "../../peer";
 import { AckBar } from "./AckBar";
 import { CALENDAR_KINDS, type CalendarDraft } from "./calendarTypes";
 import {
+  ackAudienceIds,
   canCreateKind,
   canEditItem,
   canMutateLiveState,
@@ -168,12 +169,9 @@ export function CalendarItemEditor({
     isNew ? canCreateKind(k.value, draft.day, today) : true
   );
 
-  const expectedAckIds = Array.from(
-    new Set(
-      [draft.created_by, myId, ...draft.participant_ids].filter(
-        (id): id is string => !!id
-      )
-    )
+  const expectedAckIds = ackAudienceIds(
+    draft.created_by ?? myId,
+    draft.participant_ids
   );
 
   const titleText = isNew ? "New calendar item" : inEdit ? "Edit calendar item" : owner ? "View item" : "Shared with you";
@@ -524,6 +522,7 @@ export function CalendarItemEditor({
           <AckBar
             acks={draft.acks}
             participantIds={expectedAckIds}
+            ownerId={draft.created_by ?? myId}
             myId={myId}
             myName={myName}
             peers={peers}

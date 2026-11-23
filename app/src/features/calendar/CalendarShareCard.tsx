@@ -17,7 +17,7 @@ import ArrowForwardIcon from "@mui/icons-material/ArrowForwardRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import { listen } from "@tauri-apps/api/event";
 import { peerApi, type CalendarItem, type CalendarKind } from "../../peer";
-import { formatTime12 } from "./calendarRules";
+import { ackAudienceIds, countAcceptedAcks, formatTime12 } from "./calendarRules";
 import { KIND_THEMES, parseChecklist } from "./calendarTypes";
 
 export type CalendarSharePayload = {
@@ -166,16 +166,12 @@ export function CalendarShareCard(props: {
     return () => un?.();
   }, [fetchLive]);
 
-  // Acknowledgement tracking (exclude rejects from "acknowledged" count)
+  // Acknowledgement tracking — creator does not need to ack
   const acks = liveItem?.acks || {};
   const myResponse = responseOf(acks, myId);
-  const ackCount = Object.keys(acks).filter((uid) => {
-    const v = acks[uid] || "";
-    return v && !v.startsWith("rejected|") && v !== "rejected";
-  }).length;
-  const totalExpected = Array.from(
-    new Set([liveItem?.created_by, ...(liveItem?.participant_ids || [])].filter(Boolean))
-  ).length;
+  const audienceIds = ackAudienceIds(liveItem?.created_by, liveItem?.participant_ids);
+  const ackCount = countAcceptedAcks(acks, audienceIds);
+  const totalExpected = audienceIds.length;
 
   // Checklist calculations
   const checklist = parseChecklist(liveItem?.checklist);

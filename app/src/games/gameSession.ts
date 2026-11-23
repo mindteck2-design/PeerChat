@@ -54,6 +54,7 @@ type Store = {
 };
 
 const STORE_KEY = "peerchat.gameSessions.v1";
+const SESSION_EVENT = "peerchat-game-sessions";
 
 function loadStore(): Store {
   try {
@@ -66,15 +67,31 @@ function loadStore(): Store {
   }
 }
 
+function notifySessionListeners() {
+  try {
+    window.dispatchEvent(new Event(SESSION_EVENT));
+  } catch {
+    /* ignore */
+  }
+}
+
 function persistStore(store: Store) {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(store));
   } catch {
     /* ignore quota */
   }
+  notifySessionListeners();
 }
 
 const store: Store = loadStore();
+
+/** Games hub / screens re-read badges when invite/leave clears a session from chat. */
+export function subscribeGameSessions(cb: () => void): () => void {
+  const handler = () => cb();
+  window.addEventListener(SESSION_EVENT, handler);
+  return () => window.removeEventListener(SESSION_EVENT, handler);
+}
 
 export function getTttSession(): TttSession | undefined {
   return store.ttt;
@@ -101,6 +118,50 @@ export function setDabSession(s: DabSession | null) {
   if (s && s.mpPhase !== "idle") store.dab = s;
   else delete store.dab;
   persistStore(store);
+}
+
+/**
+ * Drop inviting/invited rows for a match (invite deleted or canceled).
+ * Leaves in-progress / finished matches alone.
+ */
+export function clearPendingMatch(matchId: string): boolean {
+  if (!matchId) return false;
+  let cleared = false;
+  const pending = (phase: MpPhase) => phase === "inviting" || phase === "invited";
+  if (store.ttt && store.ttt.matchId === matchId && pending(store.ttt.mpPhase)) {
+    delete store.ttt;
+    cleared = true;
+  }
+  if (store.rps && store.rps.matchId === matchId && pending(store.rps.mpPhase)) {
+    delete store.rps;
+    cleared = true;
+  }
+  if (store.dab && store.dab.matchId === matchId && pending(store.dab.mpPhase)) {
+    delete store.dab;
+    cleared = true;
+  }
+  if (cleared) persistStore(store);
+  return cleared;
+}
+
+/** Drop any session for this matchId (leave mid-game / force reset). */
+export function clearMatchSessions(matchId: string): boolean {
+  if (!matchId) return false;
+  let cleared = false;
+  if (store.ttt?.matchId === matchId) {
+    delete store.ttt;
+    cleared = true;
+  }
+  if (store.rps?.matchId === matchId) {
+    delete store.rps;
+    cleared = true;
+  }
+  if (store.dab?.matchId === matchId) {
+    delete store.dab;
+    cleared = true;
+  }
+  if (cleared) persistStore(store);
+  return cleared;
 }
 
 export function sessionBadge(

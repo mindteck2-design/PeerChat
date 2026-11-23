@@ -35,7 +35,7 @@ import StorageIcon from "@mui/icons-material/StorageRounded";
 import ChatIcon from "@mui/icons-material/ForumRounded";
 import VisibilityIcon from "@mui/icons-material/VisibilityRounded";
 import { isImageFileName, isVideoFileName } from "../../MediaAlbum";
-import { peerApi, type Conversation, type Peer, type Profile } from "../../peer";
+import { peerApi, peerHasLanIp, type Conversation, type Peer, type Profile } from "../../peer";
 import {
   canPreviewFileName,
   formatBytes,
@@ -860,7 +860,9 @@ export function FilesPanel(props: {
       <SharePeersDialog
         open={sharePaths.length > 0}
         paths={sharePaths}
-        peers={props.peers.filter((p) => p.user_id !== props.profile.id)}
+        peers={props.peers.filter(
+          (p) => p.user_id !== props.profile.id && peerHasLanIp(p)
+        )}
         busy={props.shareBusy || busy}
         onClose={() => setSharePaths([])}
         onSend={async (peerIds) => {

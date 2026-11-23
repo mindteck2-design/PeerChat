@@ -121,6 +121,8 @@ export type DabMsg =
   | { type: "invite"; matchId: string; fromName: string; rows: number; cols: number }
   | { type: "accept"; matchId: string }
   | { type: "decline"; matchId: string }
+  /** Inviter withdrew the invite (deleted card / left Games while waiting). */
+  | { type: "cancel"; matchId: string }
   | { type: "move"; matchId: string; seq: number; edge: EdgeId }
   | { type: "rematch"; matchId: string; rows: number; cols: number }
   | { type: "resign"; matchId: string }

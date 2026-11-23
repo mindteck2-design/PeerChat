@@ -40,6 +40,15 @@ export type Peer = {
   about?: string | null;
 };
 
+/**
+ * Reachable on LAN for Discovery / people pickers.
+ * Reinstall / upgrade ghosts are tombstoned with last_ip cleared so old DM
+ * rows still resolve via get_peer — but they must not appear as contacts.
+ */
+export function peerHasLanIp(p: Pick<Peer, "last_ip">): boolean {
+  return !!p.last_ip?.trim();
+}
+
 export type Conversation = {
   id: string;
   kind: "dm" | "group";

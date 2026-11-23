@@ -389,8 +389,10 @@ pub fn upsert_peer_with_team_avatar(
 }
 
 /// Ensure `keep_user_id` is the only peer advertising `last_ip = ip`.
-/// Displaced rows are tombstoned (IP cleared, offline) so old DM titles still resolve;
-/// they are not hard-deleted (that caused orphan "Direct" chats after reinstall).
+/// Displaced rows are tombstoned (IP cleared, offline) so old DM titles still resolve
+/// via `get_peer`; they are not hard-deleted (that caused orphan "Direct" chats after
+/// reinstall). Discovery / people pickers must hide `last_ip`-less rows so upgrade /
+/// reinstall ghosts (same person, new user_id) never appear as duplicate contacts.
 pub fn claim_unique_peer_ip(
     conn: &Connection,
     keep_user_id: &str,
@@ -908,6 +910,21 @@ mod tests {
         assert_eq!(old["display_name"], "Old Ada");
         let neu = get_peer(&conn, "new").unwrap().unwrap();
         assert_eq!(neu["last_ip"], "10.0.0.8");
+        // Tombstone stays in DB for DM title resolution, but has no LAN IP —
+        // Discovery UI filters these out via peerHasLanIp / last_ip checks.
+        let listed_ips: Vec<String> = list_peers_raw(&conn)
+            .unwrap()
+            .into_iter()
+            .filter_map(|p| {
+                let ip = p["last_ip"].as_str().unwrap_or("").to_string();
+                if crate::discovery::is_usable_lan_ip(&ip) {
+                    Some(p["user_id"].as_str().unwrap_or("").to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(listed_ips, vec!["new".to_string()]);
     }
 
     /// Wipe+reinstall on the same PC keeps `user_id` (= stable device_id) but mints new

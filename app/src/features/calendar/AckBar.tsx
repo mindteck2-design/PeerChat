@@ -19,8 +19,13 @@ export function AckBar({
   readOnly,
 }: {
   acks: AcksMap;
-  /** Everyone who should acknowledge (owner + participants). */
+  /**
+   * Sharees who should acknowledge. Prefer excluding the creator; callers may still
+   * pass a mixed list — ownerId is used to filter them out.
+   */
   participantIds: string[];
+  /** Creator — never prompted to acknowledge their own item. */
+  ownerId?: string;
   myId: string;
   myName: string;
   peers: Peer[];
@@ -28,12 +33,19 @@ export function AckBar({
   disabled?: boolean;
   readOnly?: boolean;
 }) {
-  const expected = Array.from(new Set(participantIds.filter(Boolean)));
+  const expected = Array.from(
+    new Set(
+      participantIds
+        .map((id) => id.trim())
+        .filter((id) => id && (!ownerId || id !== ownerId))
+    )
+  );
   const isAccepted = (v: string | undefined) =>
     !!v && !v.startsWith("rejected|") && v !== "rejected";
-  const ackIds = Object.keys(acks).filter((id) => isAccepted(acks[id]));
-  const count = expected.filter((id) => isAccepted(acks[id])).length;
-  const total = expected.length || ackIds.length;
+  const ackIds = expected.filter((id) => isAccepted(acks[id]));
+  const count = ackIds.length;
+  const total = expected.length;
+  const iAmAudience = expected.some((id) => id === myId);
   const iAcked = isAccepted(acks[myId]);
   const iRejected =
     !!acks[myId] && (acks[myId]!.startsWith("rejected|") || acks[myId] === "rejected");
@@ -44,12 +56,14 @@ export function AckBar({
         <Typography variant="subtitle2" fontWeight={700} flex={1}>
           Acknowledgements
         </Typography>
-        <Chip
-          size="small"
-          label={`${count}/${Math.max(total, 1)} acknowledged`}
-          color={count > 0 && count >= total ? "success" : "default"}
-          variant="outlined"
-        />
+        {total > 0 && (
+          <Chip
+            size="small"
+            label={`${count}/${total} acknowledged`}
+            color={count > 0 && count >= total ? "success" : "default"}
+            variant="outlined"
+          />
+        )}
       </Stack>
       {ackIds.length > 0 && (
         <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
@@ -64,7 +78,7 @@ export function AckBar({
           ))}
         </Stack>
       )}
-      {!readOnly && !iAcked && !iRejected && expected.some((id) => id === myId) && (
+      {!readOnly && iAmAudience && !iAcked && !iRejected && (
         <Button
           size="small"
           variant="outlined"
@@ -76,12 +90,12 @@ export function AckBar({
           Acknowledge
         </Button>
       )}
-      {!readOnly && iAcked && (
+      {!readOnly && iAmAudience && iAcked && (
         <Typography variant="caption" color="success.main" fontWeight={600}>
           Accepted
         </Typography>
       )}
-      {!readOnly && iRejected && (
+      {!readOnly && iAmAudience && iRejected && (
         <Typography variant="caption" color="text.secondary" fontWeight={600}>
           Rejected
         </Typography>

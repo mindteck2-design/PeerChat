@@ -609,6 +609,19 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                 // Do NOT take last_ip/last_port from from_peer. Self-reported IPs
                 // are often a VPN tunnel (OpenVPN 10.8.x) and poison reverse
                 // delivery. LAN reachability comes from UDP beacon source only.
+                // Keep online=true only when we already know a usable LAN IP so
+                // HTTP-only / reinstall ghosts never show as reachable contacts
+                // before a UDP beacon arrives (Discovery hides last_ip-less rows).
+                let already_reachable = db::get_peer(&conn, &uid)
+                    .ok()
+                    .flatten()
+                    .and_then(|p| {
+                        p.get("last_ip")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .map(|ip| crate::discovery::is_usable_lan_ip(&ip))
+                    .unwrap_or(false);
                 let _ = db::upsert_peer(
                     &conn,
                     &uid,
@@ -618,7 +631,7 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
                     None,
                     None,
                     fp.as_deref(),
-                    true,
+                    already_reachable,
                 );
                 if peer.get("avatar_id").is_some() {
                     let aid = peer.get("avatar_id").and_then(|v| v.as_str()).unwrap_or("");

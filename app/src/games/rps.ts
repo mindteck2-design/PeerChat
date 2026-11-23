@@ -76,6 +76,8 @@ export type RpsMsg =
   | { type: "invite"; matchId: string; fromName: string; format: MatchFormat }
   | { type: "accept"; matchId: string }
   | { type: "decline"; matchId: string }
+  /** Inviter withdrew the invite (deleted card / left Games while waiting). */
+  | { type: "cancel"; matchId: string }
   | { type: "commit"; matchId: string; round: number } // "I have chosen" — no choice revealed
   | { type: "reveal"; matchId: string; round: number; choice: RpsChoice }
   | { type: "rematch"; matchId: string; format: MatchFormat }

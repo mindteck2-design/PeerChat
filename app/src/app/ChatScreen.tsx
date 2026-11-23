@@ -109,6 +109,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import {
   peerApi,
+  peerHasLanIp,
   type Conversation,
   type LanHost,
   type Member,
@@ -184,6 +185,7 @@ const GamesHub = lazy(() =>
 );
 import {
   applyInboundToSession,
+  clearPendingMatch,
   type GameDispatchFn,
   type GameMsg,
   type PendingGameInvite,
@@ -656,7 +658,10 @@ export function ChatScreen({
   }, [stagedFiles]);
 
   const others = useMemo(
-    () => peers.filter((p) => p.user_id !== profile.id && !p.blocked),
+    () =>
+      peers.filter(
+        (p) => p.user_id !== profile.id && !p.blocked && peerHasLanIp(p)
+      ),
     [peers, profile.id]
   );
 
@@ -1091,8 +1096,30 @@ export function ChatScreen({
             const resultMsg = [...parsed]
               .reverse()
               .find((g) => (g.payload as { type?: string })?.type === "result");
-            const ordered = [actionable, resultMsg].filter(Boolean) as GameMsg[];
-            const toApply = ordered.length ? ordered : [parsed[parsed.length - 1]];
+            // cancel/decline/resign must apply even when Games UI is unmounted
+            // (otherwise "Waiting…" sticks after the peer leaves or deletes the invite).
+            const lifecycleMsg = [...parsed]
+              .reverse()
+              .find((g) => {
+                const t = (g.payload as { type?: string })?.type;
+                return (
+                  t === "cancel" ||
+                  t === "decline" ||
+                  t === "resign" ||
+                  t === "rematch"
+                );
+              });
+            const ordered = [actionable, resultMsg, lifecycleMsg].filter(
+              Boolean
+            ) as GameMsg[];
+            const seen = new Set<GameMsg>();
+            const toApply = ordered.length
+              ? ordered.filter((g) => {
+                  if (seen.has(g)) return false;
+                  seen.add(g);
+                  return true;
+                })
+              : [parsed[parsed.length - 1]];
             for (const gameMsg of toApply) {
               applyInboundToSession(fromId, gameMsg, peerList, profile.id);
               gameDispatchRef.current?.(fromId, gameMsg);
@@ -3614,9 +3641,44 @@ export function ChatScreen({
     }
   }
 
+  /**
+   * Invite cards tombstone ciphertext on delete — parse from plaintext cache first.
+   * Clears Games "Waiting…". Withdrawing our own invite always notifies the peer
+   * (even delete-for-me) so they cannot accept a match we already abandoned.
+   */
+  async function syncGamesAfterInviteDeleted(message: Message) {
+    if (message.kind !== "game_move") return;
+    const gameMsg = parseGameMsg(plain[message.id] || "");
+    if (!gameMsg) return;
+    const ptype = (gameMsg.payload as { type?: string })?.type;
+    if (ptype !== "invite") return;
+    const mid = matchIdOf(gameMsg);
+    if (!mid) return;
+
+    clearPendingMatch(mid);
+    gameDispatchRef.current?.(profile.id, {
+      game: gameMsg.game,
+      payload: { type: "cancel", matchId: mid } as GameMsg["payload"],
+    });
+
+    const mine = message.sender_id === profile.id;
+    if (!mine) return;
+    const peerId = active?.kind === "dm" ? active.peer_id || "" : "";
+    if (!peerId || peerId === profile.id) return;
+    try {
+      await sendGameMsg(peerId, {
+        game: gameMsg.game,
+        payload: { type: "cancel", matchId: mid } as GameMsg["payload"],
+      });
+    } catch {
+      /* peer offline — local waiting state already cleared */
+    }
+  }
+
   async function deleteForMe(message: Message) {
     setMsgMenu(null);
     try {
+      await syncGamesAfterInviteDeleted(message);
       await peerApi.deleteMessageForMe(message.id);
       if (active) await refreshNewestMessages(active.id);
       setSavedItems(await peerApi.listSavedItems().catch(() => []));
@@ -3629,6 +3691,7 @@ export function ChatScreen({
     setMsgMenu(null);
     if (!canMutateMessageToday(message.created_at)) return;
     try {
+      await syncGamesAfterInviteDeleted(message);
       await peerApi.deleteMessageForEveryone(message.id);
       if (active) await refreshNewestMessages(active.id);
       setSavedItems(await peerApi.listSavedItems().catch(() => []));
@@ -3825,6 +3888,7 @@ export function ChatScreen({
     try {
       for (const m of targets) {
         try {
+          await syncGamesAfterInviteDeleted(m);
           if (mode === "everyone") {
             await peerApi.deleteMessageForEveryone(m.id);
           } else {

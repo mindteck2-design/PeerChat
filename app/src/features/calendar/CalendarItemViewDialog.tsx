@@ -28,9 +28,13 @@ import CalendarTodayIcon from "@mui/icons-material/CalendarTodayRounded";
 import AccessTimeIcon from "@mui/icons-material/AccessTimeRounded";
 import type { Peer } from "../../peer";
 import {
+  ackAudienceIds,
+  calendarPeopleIds,
   canEditItem,
   canMutateLiveState,
+  countAcceptedAcks,
   formatTime12,
+  isAcceptedAck,
   isOwner,
   isPastDay,
   parseDay,
@@ -125,28 +129,35 @@ export function CalendarItemViewDialog({
     item.participant_ids.length > 0 ||
     (!!item.created_by && item.created_by !== myId);
 
-  // Participants resolution
-  const allParticipantIds = Array.from(
-    new Set([item.created_by, ...(item.participant_ids || [])].filter(Boolean) as string[])
-  );
+  // People list: creator first, then sharees. Only sharees are expected to acknowledge.
+  const creatorId = (item.created_by || "").trim();
+  const audienceIds = ackAudienceIds(creatorId, item.participant_ids);
+  const peopleIds = calendarPeopleIds(creatorId, item.participant_ids);
 
-  const participantList = allParticipantIds.map((id) => {
+  const participantList = peopleIds.map((id) => {
+    const isCreator = !!creatorId && id === creatorId;
     if (id === myId) {
-      return { id, name: myName ? `${myName} (You)` : "You", isMe: true };
+      return {
+        id,
+        name: myName ? `${myName} (You)` : "You",
+        isMe: true,
+        isCreator,
+      };
     }
     const peer = peers.find((p) => p.user_id === id);
-    return { id, name: peer?.display_name || "Peer", isMe: false };
+    return {
+      id,
+      name: peer?.display_name || "Peer",
+      isMe: false,
+      isCreator,
+    };
   });
 
-  // Acknowledgement tracking
+  // Acknowledgement tracking (creator does not need to ack)
   const myAckRaw = item.acks?.[myId];
-  const hasAcked =
-    !!myAckRaw && !myAckRaw.startsWith("rejected|") && myAckRaw !== "rejected";
-  const ackCount = Object.keys(item.acks || {}).filter((uid) => {
-    const v = item.acks?.[uid] || "";
-    return v && !v.startsWith("rejected|") && v !== "rejected";
-  }).length;
-  const totalExpected = allParticipantIds.length;
+  const hasAcked = isAcceptedAck(myAckRaw);
+  const ackCount = countAcceptedAcks(item.acks, audienceIds);
+  const totalExpected = audienceIds.length;
   const allAcked = totalExpected > 0 && ackCount >= totalExpected;
 
   // Checklist calculations
@@ -353,12 +364,16 @@ export function CalendarItemViewDialog({
           </Box>
         )}
 
-        {/* Panel 4 & 6: Meeting & Reminder Participants & Acknowledgements */}
+        {/* Panel 4 & 6: Meeting & Reminder people — creator + sharee acknowledgements */}
         {(item.kind === "meeting" || item.kind === "reminder") && shared && (
           <Box>
             <Stack direction="row" justifyContent="space-between" alignItems="center" mb={1.25}>
               <Typography variant="subtitle2" fontWeight={700}>
-                Participants ({totalExpected})
+                {totalExpected > 0
+                  ? `People (${peopleIds.length})`
+                  : creatorId
+                    ? "Creator"
+                    : "People"}
               </Typography>
               {totalExpected > 0 && (
                 <Chip
@@ -379,11 +394,7 @@ export function CalendarItemViewDialog({
 
             <Stack spacing={1}>
               {participantList.map((p) => {
-                const ackStamp = item.acks?.[p.id];
-                const isAcked =
-                  !!ackStamp &&
-                  !ackStamp.startsWith("rejected|") &&
-                  ackStamp !== "rejected";
+                const isAcked = isAcceptedAck(item.acks?.[p.id]);
                 return (
                   <Paper
                     key={p.id}
@@ -398,7 +409,7 @@ export function CalendarItemViewDialog({
                       justifyContent: "space-between",
                     }}
                   >
-                    <Stack direction="row" spacing={1.25} alignItems="center">
+                    <Stack direction="row" spacing={1.25} alignItems="center" minWidth={0}>
                       <Avatar
                         sx={{
                           width: 28,
@@ -410,12 +421,24 @@ export function CalendarItemViewDialog({
                       >
                         {p.name.charAt(0).toUpperCase()}
                       </Avatar>
-                      <Typography variant="body2" fontWeight={p.isMe ? 700 : 500}>
+                      <Typography variant="body2" fontWeight={p.isMe || p.isCreator ? 700 : 500} noWrap>
                         {p.name}
                       </Typography>
                     </Stack>
 
-                    {isAcked ? (
+                    {p.isCreator ? (
+                      <Chip
+                        size="small"
+                        label="Creator"
+                        sx={{
+                          height: 22,
+                          fontSize: "0.7rem",
+                          fontWeight: 700,
+                          bgcolor: "rgba(168, 85, 247, 0.14)",
+                          color: "secondary.main",
+                        }}
+                      />
+                    ) : isAcked ? (
                       <Stack direction="row" spacing={0.5} alignItems="center">
                         <CheckCircleIcon sx={{ fontSize: 16, color: "#22c55e" }} />
                         <Typography variant="caption" fontWeight={600} color="#22c55e">

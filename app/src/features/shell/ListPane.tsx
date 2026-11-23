@@ -181,6 +181,9 @@ function ListPaneImpl({ vm }: { vm: ChatScreenVm }) {
             <List dense disablePadding>
               {others
                 .filter((p) => {
+                  // Reinstall/upgrade ghosts keep a DB row with no IP for DM titles;
+                  // never show them as discoverable contacts.
+                  if (!p.last_ip?.trim()) return false;
                   const q = chatSearch.trim().toLowerCase();
                   if (!q) return true;
                   return (
