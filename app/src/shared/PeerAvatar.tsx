@@ -16,6 +16,10 @@ export function PeerAvatar(props: {
     <Avatar
       src={src}
       alt={name}
+      imgProps={{
+        style: { objectFit: "cover", objectPosition: "center" },
+        draggable: false,
+      }}
       sx={{
         width: size,
         height: size,
@@ -23,6 +27,7 @@ export function PeerAvatar(props: {
         fontWeight: 700,
         bgcolor: src ? "transparent" : avatarColor(name || "?"),
         color: "#FFFFFF",
+        boxShadow: src ? "0 1px 3px rgba(0,0,0,0.18)" : undefined,
         ...sx,
       }}
     >

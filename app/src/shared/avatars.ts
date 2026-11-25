@@ -1,15 +1,15 @@
-import fox from "../assets/avatars/avatar-fox_1.jpg";
-import leaf from "../assets/avatars/avatar-leaf_1.jpg";
-import mountain from "../assets/avatars/avatar-mountain_1.jpg";
-import bird from "../assets/avatars/avatar-bird_1.jpg";
-import fish from "../assets/avatars/avatar-fish_1.jpg";
-import compass from "../assets/avatars/avatar-compass_1.jpg";
-import owl from "../assets/avatars/avatar-owl_1.jpg";
-import sun from "../assets/avatars/avatar-sun_1.jpg";
-import panda from "../assets/avatars/avatar-panda_1.jpg";
-import turtle from "../assets/avatars/avatar-turtle_1.jpg";
-import rabbit from "../assets/avatars/avatar-rabbit_1.jpg";
-import robot from "../assets/avatars/avatar-robot_1.jpg";
+import fox from "../assets/avatars/avatar-fox-clay.jpg";
+import leaf from "../assets/avatars/avatar-leaf-clay.jpg";
+import mountain from "../assets/avatars/avatar-mountain-clay.jpg";
+import bird from "../assets/avatars/avatar-bird-clay.jpg";
+import fish from "../assets/avatars/avatar-fish-clay.jpg";
+import compass from "../assets/avatars/avatar-compass-clay.jpg";
+import owl from "../assets/avatars/avatar-owl-clay.jpg";
+import sun from "../assets/avatars/avatar-sun-clay.jpg";
+import panda from "../assets/avatars/avatar-panda-clay.jpg";
+import turtle from "../assets/avatars/avatar-turtle-clay.jpg";
+import rabbit from "../assets/avatars/avatar-rabbit-clay.jpg";
+import robot from "../assets/avatars/avatar-robot-clay.jpg";
 
 export type AvatarId =
   | "fox"
