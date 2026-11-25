@@ -1138,6 +1138,23 @@ fn handle_http(req: &str, db: &SharedDb, my_id: &str, app: &AppHandle) -> HttpAc
             }
             http_ok(http_json(200, json!({"ok": true})), None)
         }
+        ("POST", "/v1/game-sync") => {
+            let Ok(payload) = serde_json::from_str::<Value>(body) else {
+                return http_ok(http_json(400, json!({"error":"bad json"})), None);
+            };
+            let from = payload
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let blocked = {
+                let conn = db.lock();
+                !from.is_empty() && db::peer_blocked(&conn, from).unwrap_or(false)
+            };
+            if !blocked {
+                let _ = app.emit("peer-game-sync", payload);
+            }
+            http_ok(http_json(200, json!({"ok": true})), None)
+        }
         ("POST", "/v1/file/stream") => {
             let Ok(payload) = serde_json::from_str::<Value>(body) else {
                 return http_ok(http_json(400, json!({"error":"bad json"})), None);

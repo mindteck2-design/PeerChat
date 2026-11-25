@@ -304,6 +304,7 @@ pub fn run() {
             set_group_members_can_add,
             set_group_member_role,
             send_typing,
+            send_game_sync,
             create_outgoing_file,
             write_file_chunk,
             stage_outgoing_from_path,

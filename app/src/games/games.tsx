@@ -41,6 +41,7 @@ import { newTttState, tttMove, tttStateFromBoard, type TttState, type TttMsg } f
 import { newRpsState, rpsResolveRound, type RpsState, type RpsMsg, type RpsChoice, type MatchFormat } from "./rps";
 import { newDabState, dabMove, type DabState, type DabMsg, type EdgeId } from "./dab";
 import { new2048State, move2048, undo2048, type Direction } from "./g2048";
+import { newScribbleState, type ScribbleMsg } from "./scribble";
 import { SnakeGame } from "../panels";
 import { peerHasLanIp, type Peer } from "../peer";
 import {
@@ -50,44 +51,37 @@ import {
   gameLabel,
   getDabSession,
   getRpsSession,
+  getScribbleSession,
   getTttSession,
   loadGameHistory,
   pushGameHistory,
   sessionBadge,
   setDabSession,
   setRpsSession,
+  setScribbleSession,
   setTttSession,
   subscribeGameSessions,
   type GameHistoryEntry,
   type MpPhase as SessionMpPhase,
 } from "./gameSession";
+import { ScribbleGame, type ScribbleStrokeDispatchFn } from "./ScribbleGame";
+import type {
+  GameDispatchFn,
+  GameMsg,
+  GameReplayFn,
+  GameSendFn,
+  PendingGameInvite,
+} from "./gameTypes";
 
 export { clearPendingMatch, clearMatchSessions };
-
-// ─── Types the host (App.tsx) must provide ───────────────────────────────────
-
-export type GameMsg = {
-  game: "ttt" | "rps" | "dab";
-  payload: TttMsg | RpsMsg | DabMsg;
-};
-
-export type GameSendFn = (peerId: string, msg: GameMsg) => Promise<void>;
-
-/** Called by ChatScreen when an inbox-updated message has kind=game_move */
-export type GameDispatchFn = (fromId: string, msg: GameMsg) => void;
-
-/** Accept from a chat invite card — GamesHub opens the game and joins.
- *  When `openOnly` is true, jump into an already-accepted match without re-sending accept. */
-export type PendingGameInvite = {
-  game: "ttt" | "rps" | "dab";
-  matchId: string;
-  fromId: string;
-  fromName: string;
-  format?: MatchFormat;
-  rows?: number;
-  cols?: number;
-  openOnly?: boolean;
-};
+export type {
+  GameDispatchFn,
+  GameMsg,
+  GameReplayFn,
+  GameSendFn,
+  PendingGameInvite,
+} from "./gameTypes";
+export type { ScribbleStrokeDispatchFn };
 
 // ─── Selection screen ────────────────────────────────────────────────────────
 
@@ -122,11 +116,15 @@ const GAME_CARDS = [
     desc: "Draw edges, complete boxes, outscore your opponent.",
     tags: ["Local 2P", "LAN multiplayer"],
   },
+  {
+    id: "scribble",
+    name: "Scribble",
+    desc: "Draw a word; your peer guesses. Light LAN ink sync.",
+    tags: ["LAN multiplayer"],
+  },
 ] as const;
 
 type GameId = typeof GAME_CARDS[number]["id"];
-
-export type GameReplayFn = (peerId: string, matchId: string) => Promise<GameMsg[]>;
 
 export function GamesHub({
   peers,
@@ -134,6 +132,7 @@ export function GamesHub({
   myName,
   sendGameMsg,
   dispatchRef,
+  strokeSyncRef,
   pendingInvite,
   onPendingConsumed,
   replayLanMoves,
@@ -144,6 +143,8 @@ export function GamesHub({
   sendGameMsg: GameSendFn;
   /** Caller stores a ref so inbox-updated can route inbound messages here */
   dispatchRef: React.MutableRefObject<GameDispatchFn | null>;
+  /** Ephemeral stroke sync from peer-game-sync events */
+  strokeSyncRef?: React.MutableRefObject<ScribbleStrokeDispatchFn | null>;
   pendingInvite?: PendingGameInvite | null;
   onPendingConsumed?: () => void;
   /** Rebuild LAN board from encrypted chat history when reopening a match */
@@ -153,6 +154,7 @@ export function GamesHub({
   const [history, setHistory] = useState<GameHistoryEntry[]>(() => loadGameHistory());
   const [sessionTick, setSessionTick] = useState(0);
   const childDispatch = useRef<GameDispatchFn | null>(null);
+  const childStrokeSync = useRef<ScribbleStrokeDispatchFn | null>(null);
 
   useEffect(() => {
     if (!pendingInvite) return;
@@ -172,6 +174,16 @@ export function GamesHub({
       dispatchRef.current = null;
     };
   }, [dispatchRef]);
+
+  useEffect(() => {
+    if (!strokeSyncRef) return;
+    strokeSyncRef.current = (fromId, payload) => {
+      childStrokeSync.current?.(fromId, payload);
+    };
+    return () => {
+      strokeSyncRef.current = null;
+    };
+  }, [strokeSyncRef]);
 
   const back = () => {
     setActive(null);
@@ -222,6 +234,20 @@ export function GamesHub({
       replayLanMoves={replayLanMoves}
     />
   );
+  if (active === "scribble") return (
+    <ScribbleGame
+      onBack={back}
+      peers={peers}
+      myId={myId}
+      myName={myName}
+      sendGameMsg={sendGameMsg}
+      dispatchRef={childDispatch}
+      strokeSyncRef={childStrokeSync}
+      pendingInvite={pendingInvite?.game === "scribble" ? pendingInvite : null}
+      onPendingConsumed={onPendingConsumed}
+      onHistory={() => setHistory(loadGameHistory())}
+    />
+  );
 
   void sessionTick; // re-render badges when sessions change while on this screen
 
@@ -236,7 +262,7 @@ export function GamesHub({
       <Grid container spacing={2}>
         {GAME_CARDS.map((g) => {
           const badge =
-            g.id === "ttt" || g.id === "rps" || g.id === "dab"
+            g.id === "ttt" || g.id === "rps" || g.id === "dab" || g.id === "scribble"
               ? sessionBadge(g.id)
               : null;
           return (
@@ -631,6 +657,107 @@ export function applyInboundToSession(
         mpError: `${peerName} left the game.`,
       });
     }
+    return;
+  }
+
+  if (msg.game === "scribble") {
+    const p = msg.payload as ScribbleMsg;
+    const s = getScribbleSession();
+    if (p.type === "invite") {
+      if (s && s.mpPhase !== "idle" && s.mpPhase !== "done") return;
+      setScribbleSession({
+        mode: "lan",
+        mpPhase: "invited",
+        opponentId: fromId,
+        opponentName: peerName,
+        matchId: p.matchId,
+        iAmInviter: false,
+        state: newScribbleState(),
+        seq: 0,
+        inboundInvite: { fromId, matchId: p.matchId },
+        mpError: "",
+      });
+      return;
+    }
+    if (!s) return;
+    if ("matchId" in p && p.matchId && s.matchId && p.matchId !== s.matchId) return;
+    if (p.type === "accept" && s.mpPhase === "inviting") {
+      setScribbleSession({ ...s, mpPhase: "playing", mpError: "" });
+    } else if (p.type === "decline" && s.mpPhase === "inviting") {
+      setScribbleSession(null);
+    } else if (p.type === "cancel") {
+      if (s.mpPhase === "inviting" || s.mpPhase === "invited") setScribbleSession(null);
+    } else if (p.type === "round_start") {
+      setScribbleSession({
+        ...s,
+        mpPhase: "playing",
+        state: {
+          ...s.state,
+          round: p.round,
+          drawerId: p.drawerId,
+          word: "",
+          revealedWord: "",
+          lastWrong: "",
+          phase: "drawing",
+          endsAt: Date.now() + (p.timerSec || 60) * 1000,
+        },
+      });
+    } else if (p.type === "correct" || p.type === "timeout") {
+      const iAmDrawer = s.state.drawerId === myId;
+      const myScore = iAmDrawer ? p.myScore : p.theirScore;
+      const theirScore = iAmDrawer ? p.theirScore : p.myScore;
+      setScribbleSession({
+        ...s,
+        state: {
+          ...s.state,
+          myScore,
+          theirScore,
+          revealedWord: p.word,
+          word: "",
+          phase: "round_over",
+          endsAt: null,
+        },
+      });
+    } else if (p.type === "result") {
+      const outcome =
+        p.winnerId == null ? "draw" : p.winnerId === myId ? "win" : "lose";
+      pushGameHistory({
+        game: "scribble",
+        matchId: p.matchId || s.matchId,
+        opponentId: fromId,
+        opponentName: s.opponentName,
+        outcome,
+        detail: `${s.state.myScore}–${s.state.theirScore}`,
+      });
+      setScribbleSession({
+        ...s,
+        mpPhase: "done",
+        state: { ...s.state, phase: "match_over", endsAt: null },
+      });
+    } else if (p.type === "resign") {
+      pushGameHistory({
+        game: "scribble",
+        matchId: p.matchId || s.matchId,
+        opponentId: fromId,
+        opponentName: s.opponentName,
+        outcome: "win",
+        detail: "Opponent left",
+      });
+      setScribbleSession({
+        ...s,
+        mpPhase: "done",
+        mpError: `${peerName} left the game.`,
+        state: { ...s.state, phase: "match_over", endsAt: null },
+      });
+    } else if (p.type === "rematch") {
+      setScribbleSession({
+        ...s,
+        mpPhase: "playing",
+        iAmInviter: !s.iAmInviter,
+        state: newScribbleState(),
+        mpError: "",
+      });
+    }
   }
 }
 
@@ -653,7 +780,7 @@ async function leaveLanMatch(opts: {
   mpPhase: SessionMpPhase;
   matchId: string;
   opponentId?: string | null;
-  game: "ttt" | "rps" | "dab";
+  game: "ttt" | "rps" | "dab" | "scribble";
   sendGameMsg: GameSendFn;
 }): Promise<void> {
   if (opts.mode !== "lan" || !opts.matchId) {

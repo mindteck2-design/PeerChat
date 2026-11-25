@@ -209,6 +209,56 @@ pub async fn send_typing(
     Ok(())
 }
 
+/// Ephemeral LAN game sync (Scribble strokes, etc.) — no SQLite, fire-and-forget like typing.
+#[tauri::command]
+pub async fn send_game_sync(
+    state: State<'_, AppState>,
+    recipient_id: String,
+    payload: Value,
+) -> Result<(), String> {
+    let me = {
+        let conn = state.db.lock();
+        let profile = db::get_profile(&conn)?.ok_or("no profile")?;
+        profile["id"].as_str().unwrap_or("").to_string()
+    };
+    if recipient_id.is_empty() || recipient_id == me {
+        return Ok(());
+    }
+    let mut body = payload;
+    if !body.is_object() {
+        return Err("payload must be an object".into());
+    }
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("user_id".into(), json!(me));
+    }
+    let (ip, port, fp) = {
+        let conn = state.db.lock();
+        let peer = db::get_peer(&conn, &recipient_id)
+            .ok()
+            .flatten()
+            .ok_or_else(|| "peer not found".to_string())?;
+        let ip = peer["last_ip"]
+            .as_str()
+            .filter(|s| discovery::is_usable_lan_ip(s))
+            .map(|s| s.to_string())
+            .ok_or_else(|| "peer has no usable LAN IP".to_string())?;
+        let port = peer["last_port"]
+            .as_u64()
+            .or_else(|| peer["last_port"].as_i64().map(|p| p as u64))
+            .ok_or_else(|| "peer has no port".to_string())? as u16;
+        let fp = peer["tls_fingerprint"].as_str().map(|s| s.to_string());
+        (ip, port, fp)
+    };
+    tauri::async_runtime::spawn(async move {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(1500),
+            peer_http::peer_request(&ip, port, "/v1/game-sync", Some(body), fp),
+        )
+        .await;
+    });
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct FileCreateResult {
     pub file_id: String,

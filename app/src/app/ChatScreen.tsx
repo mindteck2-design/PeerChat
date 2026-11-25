@@ -189,7 +189,9 @@ import {
   type GameDispatchFn,
   type GameMsg,
   type PendingGameInvite,
+  type ScribbleStrokeDispatchFn,
 } from "../games/games";
+import type { ScribbleSyncPayload } from "../games/scribble";
 import {
   GameInviteCard,
   matchIdOf,
@@ -613,6 +615,7 @@ export function ChatScreen({
 
   // Ref for the active game's inbound message dispatcher (set by each game component)
   const gameDispatchRef = useRef<GameDispatchFn | null>(null);
+  const gameStrokeSyncRef = useRef<ScribbleStrokeDispatchFn | null>(null);
   const [pendingGameInvite, setPendingGameInvite] = useState<PendingGameInvite | null>(null);
   const [gameInviteBusy, setGameInviteBusy] = useState(false);
   const [pendingCalendarFocus, setPendingCalendarFocus] =
@@ -1264,6 +1267,22 @@ export function ChatScreen({
       unlisten?.();
       if (typingTtlRef.current) clearTimeout(typingTtlRef.current);
       if (typingDebounceRef.current) clearTimeout(typingDebounceRef.current);
+    };
+  }, [profile.id]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<ScribbleSyncPayload & { user_id?: string }>("peer-game-sync", (ev) => {
+      const p = ev.payload;
+      if (!p?.matchId || !p.op) return;
+      const fromId = p.user_id || "";
+      if (!fromId || fromId === profile.id) return;
+      gameStrokeSyncRef.current?.(fromId, p);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
     };
   }, [profile.id]);
 
@@ -5717,6 +5736,7 @@ export function ChatScreen({
               myName={profile.display_name}
               sendGameMsg={sendGameMsg}
               dispatchRef={gameDispatchRef}
+              strokeSyncRef={gameStrokeSyncRef}
               pendingInvite={pendingGameInvite}
               onPendingConsumed={() => setPendingGameInvite(null)}
               replayLanMoves={async (peerId, matchId) => {

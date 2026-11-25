@@ -226,6 +226,9 @@ export const peerApi = {
     }),
   sendTyping: (conversationId: string, recipientIds: string[]) =>
     inv<void>("send_typing", { conversationId, recipientIds }),
+  /** Ephemeral LAN game sync (Scribble strokes) — no SQLite / no E2E chat path. */
+  sendGameSync: (recipientId: string, payload: Record<string, unknown>) =>
+    inv<void>("send_game_sync", { recipientId, payload }),
   getGroupKey: (conversationId: string) =>
     inv<string | null>("get_group_key", { conversationId }),
   setMyGroupKey: (conversationId: string, wrappedGroupKey: string) =>

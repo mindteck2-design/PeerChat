@@ -17,6 +17,7 @@ export type GameCardStatus =
 export function gameTitle(game: GameMsg["game"]): string {
   if (game === "ttt") return "Tic-Tac-Toe";
   if (game === "rps") return "Rock Paper Scissors";
+  if (game === "scribble") return "Scribble";
   return "Dots & Boxes";
 }
 
@@ -25,7 +26,7 @@ export function parseGameMsg(raw: string): GameMsg | null {
     const o = JSON.parse(raw);
     if (
       o &&
-      (o.game === "ttt" || o.game === "rps" || o.game === "dab") &&
+      (o.game === "ttt" || o.game === "rps" || o.game === "dab" || o.game === "scribble") &&
       o.payload &&
       typeof o.payload.type === "string"
     ) {
@@ -71,7 +72,18 @@ export function resolveGameCardStatus(opts: {
     if (t === "resign") {
       return r.senderId === opts.myId ? "resigned_you" : "resigned_them";
     }
-    if (t === "accept" || t === "move" || t === "commit" || t === "reveal") return "accepted";
+    if (
+      t === "accept" ||
+      t === "move" ||
+      t === "commit" ||
+      t === "reveal" ||
+      t === "round_start" ||
+      t === "guess" ||
+      t === "correct" ||
+      t === "timeout"
+    ) {
+      return "accepted";
+    }
   }
   return opts.mine ? "waiting" : "incoming";
 }

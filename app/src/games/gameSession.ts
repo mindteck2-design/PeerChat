@@ -1,6 +1,7 @@
 import type { TttState } from "./ttt";
 import type { RpsState, MatchFormat, RpsChoice } from "./rps";
 import type { DabState } from "./dab";
+import type { ScribbleState } from "./scribble";
 
 export type MpPhase = "idle" | "inviting" | "invited" | "playing" | "done";
 
@@ -47,10 +48,25 @@ export type DabSession = {
   mpError: string;
 };
 
+export type ScribbleSession = {
+  mode: "lan";
+  mpPhase: MpPhase;
+  opponentId: string;
+  opponentName: string;
+  matchId: string;
+  /** Inviter draws round 1. */
+  iAmInviter: boolean;
+  state: ScribbleState;
+  seq: number;
+  inboundInvite: { fromId: string; matchId: string } | null;
+  mpError: string;
+};
+
 type Store = {
   ttt?: TttSession;
   rps?: RpsSession;
   dab?: DabSession;
+  scribble?: ScribbleSession;
 };
 
 const STORE_KEY = "peerchat.gameSessions.v1";
@@ -120,6 +136,15 @@ export function setDabSession(s: DabSession | null) {
   persistStore(store);
 }
 
+export function getScribbleSession(): ScribbleSession | undefined {
+  return store.scribble;
+}
+export function setScribbleSession(s: ScribbleSession | null) {
+  if (s && s.mpPhase !== "idle") store.scribble = s;
+  else delete store.scribble;
+  persistStore(store);
+}
+
 /**
  * Drop inviting/invited rows for a match (invite deleted or canceled).
  * Leaves in-progress / finished matches alone.
@@ -138,6 +163,10 @@ export function clearPendingMatch(matchId: string): boolean {
   }
   if (store.dab && store.dab.matchId === matchId && pending(store.dab.mpPhase)) {
     delete store.dab;
+    cleared = true;
+  }
+  if (store.scribble && store.scribble.matchId === matchId && pending(store.scribble.mpPhase)) {
+    delete store.scribble;
     cleared = true;
   }
   if (cleared) persistStore(store);
@@ -160,15 +189,25 @@ export function clearMatchSessions(matchId: string): boolean {
     delete store.dab;
     cleared = true;
   }
+  if (store.scribble?.matchId === matchId) {
+    delete store.scribble;
+    cleared = true;
+  }
   if (cleared) persistStore(store);
   return cleared;
 }
 
 export function sessionBadge(
-  game: "ttt" | "rps" | "dab"
+  game: "ttt" | "rps" | "dab" | "scribble"
 ): string | null {
   const s =
-    game === "ttt" ? store.ttt : game === "rps" ? store.rps : store.dab;
+    game === "ttt"
+      ? store.ttt
+      : game === "rps"
+        ? store.rps
+        : game === "dab"
+          ? store.dab
+          : store.scribble;
   if (!s) return null;
   if (s.mpPhase === "inviting") return "Waiting…";
   if (s.mpPhase === "invited") return "Invite";
@@ -184,7 +223,7 @@ const HISTORY_MAX = 40;
 
 export type GameHistoryEntry = {
   id: string;
-  game: "ttt" | "rps" | "dab";
+  game: "ttt" | "rps" | "dab" | "scribble";
   at: string;
   opponentName: string;
   opponentId: string;
@@ -204,7 +243,7 @@ export function loadGameHistory(): GameHistoryEntry[] {
 }
 
 export function pushGameHistory(entry: {
-  game: "ttt" | "rps" | "dab";
+  game: "ttt" | "rps" | "dab" | "scribble";
   opponentName: string;
   opponentId: string;
   outcome: "win" | "lose" | "draw";
@@ -231,8 +270,9 @@ export function clearGameHistory() {
   localStorage.removeItem(HISTORY_KEY);
 }
 
-export function gameLabel(game: "ttt" | "rps" | "dab"): string {
+export function gameLabel(game: "ttt" | "rps" | "dab" | "scribble"): string {
   if (game === "ttt") return "Tic-Tac-Toe";
   if (game === "rps") return "Rock Paper Scissors";
+  if (game === "scribble") return "Scribble";
   return "Dots & Boxes";
 }
