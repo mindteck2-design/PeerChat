@@ -265,7 +265,12 @@ import {
   silenceNotificationAudio,
 } from "../shared/sound";
 
-function shortDeliveryBanner(name: string, err: string): string {
+/** Banner copy for a stuck outbox row. Firewall wording only when they still look online. */
+function shortDeliveryBanner(
+  name: string,
+  err: string,
+  online: boolean
+): string {
   const e = err.toLowerCase();
   if (e.includes("fingerprint") || e.includes("identity") || e.includes("keys changed")) {
     return `${name} needs a trust check before messages can deliver.`;
@@ -275,9 +280,17 @@ function shortDeliveryBanner(name: string, err: string): string {
     e.includes("timed out") ||
     e.includes("refused") ||
     e.includes("unreachable") ||
-    e.includes("firewall")
+    e.includes("firewall") ||
+    e.includes("connect") ||
+    e.includes("no route")
   ) {
+    if (!online) {
+      return `${name} is offline. Messages will send when PeerChat is open on their PC.`;
+    }
     return `Can't reach ${name}. Ask them to allow PeerChat in Windows Firewall.`;
+  }
+  if (!online) {
+    return `${name} is offline. Messages will send when they're back on the LAN.`;
   }
   return `Message to ${name} was not delivered.`;
 }
@@ -6186,8 +6199,15 @@ export function ChatScreen({
           </Alert>
         )}
         {active?.kind === "dm" && activeDmPeer && !activeDmPeer.blocked && dmDeliveryHint && (
-          <Alert severity="error" sx={{ borderRadius: 0, flexShrink: 0 }}>
-            {shortDeliveryBanner(activeDmPeer.display_name, dmDeliveryHint)}
+          <Alert
+            severity={activeDmPeer.online ? "error" : "info"}
+            sx={{ borderRadius: 0, flexShrink: 0 }}
+          >
+            {shortDeliveryBanner(
+              activeDmPeer.display_name,
+              dmDeliveryHint,
+              !!activeDmPeer.online
+            )}
           </Alert>
         )}
 
