@@ -616,6 +616,8 @@ export function ChatScreen({
   // Ref for the active game's inbound message dispatcher (set by each game component)
   const gameDispatchRef = useRef<GameDispatchFn | null>(null);
   const gameStrokeSyncRef = useRef<ScribbleStrokeDispatchFn | null>(null);
+  /** Avoid re-applying the same encrypted game_move on every inbox tick. */
+  const appliedGameMsgIdsRef = useRef<Set<string>>(new Set());
   const [pendingGameInvite, setPendingGameInvite] = useState<PendingGameInvite | null>(null);
   const [gameInviteBusy, setGameInviteBusy] = useState(false);
   const [pendingCalendarFocus, setPendingCalendarFocus] =
@@ -1073,8 +1075,8 @@ export function ChatScreen({
           }
         }
 
-        // Decrypt game_move for session + UI. Apply actionable payloads (move/reveal)
-        // before result so the loser's board shows the winning move.
+        // Decrypt game_move and apply the full chronological stream (not one-of-each).
+        // Scribble round_start/guess/timeout must not be dropped or rounds never start.
         if (kind === "game_move") {
           try {
             const page = await peerApi.listMessages(cid, { limit: MESSAGE_PAGE_SIZE });
@@ -1084,8 +1086,31 @@ export function ChatScreen({
             const peerList = await peerApi.listPeers();
             const peer = peerList.find((x) => x.user_id === fromId);
             if (!peer) return;
-            const parsed: GameMsg[] = [];
-            for (const row of gameRows.slice(-8)) {
+            const INTERESTING = new Set([
+              "move",
+              "reveal",
+              "commit",
+              "accept",
+              "invite",
+              "cancel",
+              "decline",
+              "resign",
+              "rematch",
+              "result",
+              "round_start",
+              "guess",
+              "wrong",
+              "correct",
+              "timeout",
+              "clear",
+              "round_ack",
+              "round_query",
+            ]);
+            type ParsedRow = { id: string; msg: GameMsg; sortAt: string };
+            const parsed: ParsedRow[] = [];
+            // Newest page is ASC; take a wider tail so burst moves / round_start survive.
+            for (const row of gameRows.slice(-24)) {
+              if (appliedGameMsgIdsRef.current.has(row.id)) continue;
               try {
                 const senderPub =
                   row.sender_id === profile.id
@@ -1097,48 +1122,33 @@ export function ChatScreen({
                   identity,
                   senderPub
                 );
-                parsed.push(JSON.parse(plaintext) as GameMsg);
+                const msg = JSON.parse(plaintext) as GameMsg;
+                const t = (msg.payload as { type?: string })?.type;
+                if (!t || !INTERESTING.has(t)) continue;
+                parsed.push({
+                  id: row.id,
+                  msg,
+                  sortAt: row.sort_at || row.created_at,
+                });
               } catch {
                 /* skip undecryptable */
               }
             }
             if (!parsed.length) return;
-            const actionable = [...parsed]
-              .reverse()
-              .find((g) => {
-                const t = (g.payload as { type?: string })?.type;
-                return t === "move" || t === "reveal" || t === "commit" || t === "accept" || t === "invite";
-              });
-            const resultMsg = [...parsed]
-              .reverse()
-              .find((g) => (g.payload as { type?: string })?.type === "result");
-            // cancel/decline/resign must apply even when Games UI is unmounted
-            // (otherwise "Waiting…" sticks after the peer leaves or deletes the invite).
-            const lifecycleMsg = [...parsed]
-              .reverse()
-              .find((g) => {
-                const t = (g.payload as { type?: string })?.type;
-                return (
-                  t === "cancel" ||
-                  t === "decline" ||
-                  t === "resign" ||
-                  t === "rematch"
-                );
-              });
-            const ordered = [actionable, resultMsg, lifecycleMsg].filter(
-              Boolean
-            ) as GameMsg[];
-            const seen = new Set<GameMsg>();
-            const toApply = ordered.length
-              ? ordered.filter((g) => {
-                  if (seen.has(g)) return false;
-                  seen.add(g);
-                  return true;
-                })
-              : [parsed[parsed.length - 1]];
-            for (const gameMsg of toApply) {
-              applyInboundToSession(fromId, gameMsg, peerList, profile.id);
-              gameDispatchRef.current?.(fromId, gameMsg);
+            parsed.sort(
+              (a, b) =>
+                a.sortAt.localeCompare(b.sortAt) || a.id.localeCompare(b.id)
+            );
+            // UI mounted → live dispatcher only. Unmounted → session store only.
+            // Dual apply caused rematch double-swaps and stuck "opponent's turn".
+            const uiMounted = !!gameDispatchRef.current;
+            for (const { id, msg } of parsed) {
+              appliedGameMsgIdsRef.current.add(id);
+              if (uiMounted) {
+                gameDispatchRef.current?.(fromId, msg);
+              } else {
+                applyInboundToSession(fromId, msg, peerList, profile.id);
+              }
             }
           } catch {
             /* ignore malformed game messages */
@@ -5741,7 +5751,7 @@ export function ChatScreen({
               onPendingConsumed={() => setPendingGameInvite(null)}
               replayLanMoves={async (peerId, matchId) => {
                 const conv = await peerApi.openDm(peerId);
-                const out: GameMsg[] = [];
+                const out: { sortAt: string; id: string; msg: GameMsg }[] = [];
                 let beforeSortKey: string | null = null;
                 let beforeId: string | null = null;
                 for (let pageN = 0; pageN < 20; pageN++) {
@@ -5764,7 +5774,13 @@ export function ChatScreen({
                         senderPub
                       );
                       const gm = JSON.parse(plaintext) as GameMsg;
-                      if (matchIdOf(gm) === matchId) out.push(gm);
+                      if (matchIdOf(gm) === matchId) {
+                        out.push({
+                          sortAt: m.sort_at || m.created_at,
+                          id: m.id,
+                          msg: gm,
+                        });
+                      }
                     } catch {
                       /* skip */
                     }
@@ -5774,7 +5790,12 @@ export function ChatScreen({
                   beforeSortKey = oldest.sort_at || oldest.created_at;
                   beforeId = oldest.id;
                 }
-                return out;
+                // Pages are newest-first; sort globally so multi-page matches replay cleanly.
+                out.sort(
+                  (a, b) =>
+                    a.sortAt.localeCompare(b.sortAt) || a.id.localeCompare(b.id)
+                );
+                return out.map((x) => x.msg);
               }}
             />
           </Suspense>

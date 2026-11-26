@@ -218,6 +218,7 @@ export function GamesHub({
       pendingInvite={pendingInvite?.game === "rps" ? pendingInvite : null}
       onPendingConsumed={onPendingConsumed}
       onHistory={() => setHistory(loadGameHistory())}
+      replayLanMoves={replayLanMoves}
     />
   );
   if (active === "dab") return (
@@ -460,12 +461,20 @@ export function applyInboundToSession(
         mpError: `${peerName} left the game.`,
       });
     } else if (p.type === "rematch") {
+      const nextRole =
+        p.senderRole === "X" || p.senderRole === "O"
+          ? p.senderRole === "X"
+            ? "O"
+            : "X"
+          : s.myRole === "X"
+            ? "O"
+            : "X";
       setTttSession({
         ...s,
         state: newTttState(),
         seq: 0,
         mpPhase: "playing",
-        myRole: s.myRole === "X" ? "O" : "X",
+        myRole: nextRole,
         mpError: "",
       });
     }
@@ -596,14 +605,11 @@ export function applyInboundToSession(
     } else if (p.type === "cancel") {
       if (s.mpPhase === "inviting" || s.mpPhase === "invited") setDabSession(null);
     } else if (p.type === "move" && (s.mpPhase === "playing" || s.mpPhase === "done")) {
-      // Apply by edge; if turn guard would reject (missed prior moves), try anyway
-      // after forcing turn to the expected player so the board catches up.
-      let base = s.state;
+      // Skip force-turn on gaps — UI remount will replay history instead.
+      if (typeof p.seq === "number" && p.seq > (s.seq || 0) + 1) return;
       const expected = s.myPlayer === "A" ? "B" : "A";
-      if (base.turn !== expected) {
-        base = { ...base, turn: expected };
-      }
-      const next = dabMove(base, p.edge);
+      if (s.state.turn !== expected) return;
+      const next = dabMove(s.state, p.edge);
       if (!next) return;
       setDabSession({
         ...s,
@@ -688,6 +694,10 @@ export function applyInboundToSession(
     } else if (p.type === "cancel") {
       if (s.mpPhase === "inviting" || s.mpPhase === "invited") setScribbleSession(null);
     } else if (p.type === "round_start") {
+      // Prefer keeping an in-progress drawing session if we already have it.
+      if (s.state.phase === "drawing" && s.state.drawerId && s.state.round === p.round) {
+        return;
+      }
       setScribbleSession({
         ...s,
         mpPhase: "playing",
@@ -702,6 +712,12 @@ export function applyInboundToSession(
           endsAt: Date.now() + (p.timerSec || 60) * 1000,
         },
       });
+    } else if (p.type === "round_ack" || p.type === "round_query") {
+      // UI owns ack/retry/resync; session store is a no-op.
+      return;
+    } else if (p.type === "wrong" || p.type === "guess" || p.type === "clear") {
+      // Ephemeral UI feedback; keep session phase as-is.
+      return;
     } else if (p.type === "correct" || p.type === "timeout") {
       const iAmDrawer = s.state.drawerId === myId;
       const myScore = iAmDrawer ? p.myScore : p.theirScore;
@@ -1077,7 +1093,11 @@ function TicTacToe({
           }
           if (p.type === "rematch") {
             board = newTttState();
-            role = role === "X" ? "O" : "X";
+            if (p.senderRole === "X" || p.senderRole === "O") {
+              role = p.senderRole === "X" ? "O" : "X";
+            } else {
+              role = role === "X" ? "O" : "X";
+            }
             phase = "playing";
             moveCount = 0;
           }
@@ -1257,12 +1277,16 @@ function TicTacToe({
       if (p.type === "result" && p.matchId === matchId) {
         setMpPhase("done");
       }
-      if (p.type === "rematch" && mpPhase === "done") {
+      if (p.type === "rematch" && (mpPhase === "done" || mpPhase === "playing")) {
         setState(newTttState());
         setMpPhase("playing");
         setSeq(0);
-        // Roles swap on rematch
-        setMyRole((r) => (r === "X" ? "O" : "X"));
+        // Absolute role from sender — do not swap again (avoids both stuck on "their turn").
+        if (p.senderRole === "X" || p.senderRole === "O") {
+          setMyRole(p.senderRole === "X" ? "O" : "X");
+        } else {
+          setMyRole((r) => (r === "X" ? "O" : "X"));
+        }
       }
       if (p.type === "resign") {
         setMpPhase("done");
@@ -1413,8 +1437,9 @@ function TicTacToe({
     setSeq(0);
     if (mode === "lan") {
       setMpPhase("playing");
-      setMyRole((r) => (r === "X" ? "O" : "X"));
-      await sendMsg({ type: "rematch", matchId });
+      const nextRole: TttLanRole = myRole === "X" ? "O" : "X";
+      setMyRole(nextRole);
+      await sendMsg({ type: "rematch", matchId, senderRole: nextRole });
     }
   }
 
@@ -1536,7 +1561,7 @@ function TicTacToe({
 const CHOICE_EMOJI: Record<RpsChoice, string> = { rock: "✊", paper: "✋", scissors: "✌️" };
 
 function RockPaperScissors({
-  onBack, peers, myId, myName, sendGameMsg, dispatchRef, pendingInvite, onPendingConsumed, onHistory,
+  onBack, peers, myId, myName, sendGameMsg, dispatchRef, pendingInvite, onPendingConsumed, onHistory, replayLanMoves,
 }: {
   onBack: () => void;
   peers: Peer[];
@@ -1547,6 +1572,7 @@ function RockPaperScissors({
   pendingInvite?: PendingGameInvite | null;
   onPendingConsumed?: () => void;
   onHistory?: () => void;
+  replayLanMoves?: GameReplayFn;
 }) {
   const [mode, setMode] = useState<"local" | "lan">("local");
   const [format, setFormat] = useState<MatchFormat>(3);
@@ -1567,6 +1593,7 @@ function RockPaperScissors({
   const [mpError, setMpError] = useState("");
   const pendingConsumed = useRef(false);
   const restored = useRef(false);
+  const replayed = useRef(false);
 
   const roundNum = state.rounds.length;
 
@@ -1594,6 +1621,56 @@ function RockPaperScissors({
       });
     }
   }, [peers, pendingInvite]);
+
+  // Replay commit/reveal history so reopen after leave does not stick mid-round.
+  useEffect(() => {
+    if (!replayLanMoves || !opponent || !matchId || mode !== "lan") return;
+    if (mpPhase !== "playing" && mpPhase !== "done") return;
+    if (replayed.current) return;
+    replayed.current = true;
+    let cancel = false;
+    void (async () => {
+      try {
+        const msgs = await replayLanMoves(opponent.user_id, matchId);
+        if (cancel || !msgs.length) return;
+        let fmt = format;
+        let board = newRpsState(fmt);
+        let phase: MpPhase = "playing";
+        let peerCommitted = false;
+        let peerReveal: RpsChoice | null = null;
+        for (const msg of msgs) {
+          if (msg.game !== "rps") continue;
+          const p = msg.payload as RpsMsg;
+          if (p.type === "accept") phase = "playing";
+          if (p.type === "rematch") {
+            fmt = p.format;
+            board = newRpsState(fmt);
+            phase = "playing";
+            peerCommitted = false;
+            peerReveal = null;
+          }
+          if (p.type === "commit" && p.round >= board.rounds.length) {
+            peerCommitted = true;
+          }
+          if (p.type === "reveal" && p.round >= board.rounds.length) {
+            peerReveal = p.choice;
+          }
+          if (p.type === "result" || p.type === "resign") phase = "done";
+        }
+        if (cancel) return;
+        setFormat(fmt);
+        setState(board);
+        setMpPhase(phase);
+        setTheyCommitted(peerCommitted);
+        setTheirReveal(peerReveal);
+      } catch {
+        /* keep restored session */
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [replayLanMoves, opponent, matchId, mode, mpPhase, format]);
 
   useEffect(() => {
     if (mode !== "lan") return;
@@ -1724,7 +1801,7 @@ function RockPaperScissors({
         p.type === "commit" &&
         (mpPhase === "playing" || mpPhase === "done") &&
         p.matchId === matchId &&
-        p.round === roundNum
+        p.round >= roundNum
       ) {
         setTheyCommitted(true);
       }
@@ -1732,7 +1809,7 @@ function RockPaperScissors({
         p.type === "reveal" &&
         (mpPhase === "playing" || mpPhase === "done") &&
         p.matchId === matchId &&
-        p.round === roundNum
+        p.round >= roundNum
       ) {
         setTheirReveal(p.choice);
       }
@@ -2132,6 +2209,7 @@ function DotsAndBoxes({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [inboundInvite, setInboundInvite] = useState<{ from: Peer; matchId: string; rows: number; cols: number } | null>(null);
   const [mpError, setMpError] = useState("");
+  const [resyncTick, setResyncTick] = useState(0);
   const pendingConsumed = useRef(false);
   const restored = useRef(false);
   const replayed = useRef(false);
@@ -2204,6 +2282,7 @@ function DotsAndBoxes({
         setState(board);
         setMpPhase(phase);
         setSeq(moveSeq);
+        setMpError("");
       } catch {
         /* keep restored */
       }
@@ -2211,7 +2290,7 @@ function DotsAndBoxes({
     return () => {
       cancel = true;
     };
-  }, [replayLanMoves, opponent, matchId, mode, mpPhase, state.rows, state.cols]);
+  }, [replayLanMoves, opponent, matchId, mode, mpPhase, state.rows, state.cols, resyncTick]);
 
   useEffect(() => {
     if (mode !== "lan") return;
@@ -2335,14 +2414,23 @@ function DotsAndBoxes({
         (mpPhase === "playing" || mpPhase === "done") &&
         p.matchId === matchId
       ) {
+        // Seq gap → force a history replay instead of faking the turn (desyncs both sides).
+        if (typeof p.seq === "number" && p.seq > seq + 1) {
+          replayed.current = false;
+          setResyncTick((n) => n + 1);
+          setMpError("Re-syncing board…");
+          return;
+        }
         const expectedPlayer = myPlayer === "A" ? "B" : "A";
         setState((prev) => {
           if (prev.done) return prev;
-          const base =
-            prev.turn === expectedPlayer
-              ? prev
-              : { ...prev, turn: expectedPlayer as "A" | "B" };
-          const next = dabMove(base, p.edge);
+          if (prev.turn !== expectedPlayer) {
+            // Out of order without a clean seq — wait for replay.
+            replayed.current = false;
+            setResyncTick((n) => n + 1);
+            return prev;
+          }
+          const next = dabMove(prev, p.edge);
           if (!next) return prev;
           if (next.done) {
             setMpPhase("done");
@@ -2372,7 +2460,8 @@ function DotsAndBoxes({
           }
           return next;
         });
-        setSeq(p.seq);
+        if (typeof p.seq === "number") setSeq(p.seq);
+        else setSeq((s) => s + 1);
       }
       if (p.type === "result" && p.matchId === matchId) {
         setMpPhase("done");
@@ -2402,7 +2491,7 @@ function DotsAndBoxes({
       }
     };
     return () => { dispatchRef.current = null; };
-  }, [mpPhase, peers, matchId, myPlayer, myId, inboundInvite, dispatchRef, sendGameMsg, onHistory]);
+  }, [mpPhase, peers, matchId, myPlayer, myId, inboundInvite, dispatchRef, sendGameMsg, onHistory, seq]);
 
   function handleInvite(peer: Peer) {
     setPickerOpen(false);

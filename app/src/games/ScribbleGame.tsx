@@ -182,6 +182,10 @@ export function ScribbleGame({
   const [guessText, setGuessText] = useState("");
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
   const [syncSeq, setSyncSeq] = useState(0);
+  const [guessLog, setGuessLog] = useState<
+    { id: string; fromId: string; text: string; ok: boolean; at: number }[]
+  >([]);
+  const [waitingNextRound, setWaitingNextRound] = useState(false);
 
   const canvasInboundRef = useRef<((p: ScribbleSyncPayload) => void) | null>(null);
   const syncInFlight = useRef(false);
@@ -195,6 +199,19 @@ export function ScribbleGame({
   const roundTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startingRound = useRef(false);
   const timeoutSent = useRef(false);
+  const roundAckedRef = useRef<number | null>(null);
+  const roundRetryTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastRoundStartRef = useRef<Extract<ScribbleMsg, { type: "round_start" }> | null>(
+    null
+  );
+  const guessLogRef = useRef<HTMLDivElement | null>(null);
+
+  const stopRoundRetry = useCallback(() => {
+    if (roundRetryTimer.current) {
+      clearInterval(roundRetryTimer.current);
+      roundRetryTimer.current = null;
+    }
+  }, []);
 
   stateRef.current = state;
   matchIdRef.current = matchId;
@@ -325,26 +342,44 @@ export function ScribbleGame({
           endsAt,
         };
         timeoutSent.current = false;
+        setWaitingNextRound(false);
+        setGuessLog([]);
         setState(next);
-        clearCanvasLocal();
+        // Drawer clears locally; guesser clears on inbound round_start (synced).
+        if (drawerId === myId) clearCanvasLocal();
         setGuessText("");
         setSecondsLeft(SCRIBBLE_ROUND_SEC);
         setMpPhase("playing");
         persist({ mpPhase: "playing", state: next });
         if (drawerId === myId) {
-          await sendMsg({
+          const startMsg: Extract<ScribbleMsg, { type: "round_start" }> = {
             type: "round_start",
             matchId: matchIdRef.current,
             round,
             drawerId,
             timerSec: SCRIBBLE_ROUND_SEC,
-          });
+          };
+          lastRoundStartRef.current = startMsg;
+          roundAckedRef.current = null;
+          await sendMsg(startMsg);
+          stopRoundRetry();
+          roundRetryTimer.current = setInterval(() => {
+            if (roundAckedRef.current === round) {
+              stopRoundRetry();
+              return;
+            }
+            if (Date.now() > endsAt) {
+              stopRoundRetry();
+              return;
+            }
+            if (lastRoundStartRef.current) void sendMsg(lastRoundStartRef.current);
+          }, 2000);
         }
       } finally {
         startingRound.current = false;
       }
     },
-    [myId, clearCanvasLocal, persist, sendMsg]
+    [myId, clearCanvasLocal, persist, sendMsg, stopRoundRetry]
   );
 
   const finishMatch = useCallback(
@@ -403,9 +438,13 @@ export function ScribbleGame({
       };
       setState(next);
       persist({ state: next });
-      clearCanvasLocal();
+      stopRoundRetry();
+      // Only the current drawer clears now; next round_start clears for both.
+      if (s.drawerId === myId) clearCanvasLocal();
+      setWaitingNextRound(true);
 
       if (isMatchOver(myScore, theirScore, s.round)) {
+        setWaitingNextRound(false);
         await finishMatch(myScore, theirScore);
         return;
       }
@@ -421,8 +460,26 @@ export function ScribbleGame({
         }, 1500);
       }
     },
-    [beginRound, clearCanvasLocal, finishMatch, myId, persist]
+    [beginRound, clearCanvasLocal, finishMatch, myId, persist, stopRoundRetry]
   );
+
+  // Guesser stuck without drawerId → ask drawer to re-send round_start.
+  useEffect(() => {
+    if (mpPhase !== "playing") return;
+    if (state.phase === "match_over") return;
+    if (state.phase === "drawing" && state.drawerId) return;
+    const t = window.setTimeout(() => {
+      const s = stateRef.current;
+      if (s.phase === "drawing" && s.drawerId) return;
+      if (!matchIdRef.current) return;
+      void sendMsg({ type: "round_query", matchId: matchIdRef.current });
+    }, 2000);
+    return () => window.clearTimeout(t);
+  }, [mpPhase, state.phase, state.drawerId, state.round, sendMsg]);
+
+  useEffect(() => {
+    return () => stopRoundRetry();
+  }, [stopRoundRetry]);
 
   // Local countdown (drawer owns timeout announce).
   useEffect(() => {
@@ -488,16 +545,22 @@ export function ScribbleGame({
       return;
     }
 
-    // Chat card already sent accept — restore any round_start that landed first.
+    // Chat card already sent accept — never clobber a live drawing session.
     setOpponent(fromPeer);
     setMatchId(pendingInvite.matchId);
     setIAmInviter(false);
     setInboundInvite(null);
-    if (sameMatch && (existing.mpPhase === "playing" || existing.mpPhase === "done")) {
-      setMpPhase(existing.mpPhase);
+    if (
+      sameMatch &&
+      (existing.state.drawerId ||
+        existing.state.phase === "drawing" ||
+        existing.mpPhase === "playing" ||
+        existing.mpPhase === "done")
+    ) {
+      setMpPhase(existing.mpPhase === "idle" ? "playing" : existing.mpPhase);
       setState(existing.state);
       persist({
-        mpPhase: existing.mpPhase,
+        mpPhase: existing.mpPhase === "idle" ? "playing" : existing.mpPhase,
         matchId: pendingInvite.matchId,
         opponent: fromPeer,
         iAmInviter: false,
@@ -509,6 +572,7 @@ export function ScribbleGame({
     const fresh = sameMatch ? existing.state : newScribbleState();
     setState(fresh);
     setMpPhase("playing");
+    setWaitingNextRound(true);
     persist({
       mpPhase: "playing",
       matchId: pendingInvite.matchId,
@@ -587,16 +651,49 @@ export function ScribbleGame({
           endsAt,
         };
         timeoutSent.current = false;
+        setWaitingNextRound(false);
+        setGuessLog([]);
         setState(next);
         setMpPhase("playing");
         clearCanvasLocal();
         setGuessText("");
         setSecondsLeft(p.timerSec || SCRIBBLE_ROUND_SEC);
         persist({ mpPhase: "playing", state: next });
+        // Ack so drawer stops retrying.
+        if (p.drawerId !== myId) {
+          void sendMsg({
+            type: "round_ack",
+            matchId: matchIdRef.current || p.matchId,
+            round: p.round,
+          });
+        }
+      } else if (p.type === "round_ack") {
+        if (p.round === stateRef.current.round) {
+          roundAckedRef.current = p.round;
+          stopRoundRetry();
+        }
+      } else if (p.type === "round_query") {
+        if (
+          stateRef.current.drawerId === myId &&
+          lastRoundStartRef.current &&
+          stateRef.current.phase === "drawing"
+        ) {
+          void sendMsg(lastRoundStartRef.current);
+        }
       } else if (p.type === "guess" && stateRef.current.drawerId === myId) {
         const word = stateRef.current.word;
         if (stateRef.current.phase !== "drawing") return;
         if (guessMatches(word, p.text)) {
+          setGuessLog((prev) => [
+            ...prev,
+            {
+              id: `${Date.now()}-ok`,
+              fromId,
+              text: p.text,
+              ok: true,
+              at: Date.now(),
+            },
+          ]);
           // Guesser scores.
           const theirScore = stateRef.current.theirScore + 1;
           const myScore = stateRef.current.myScore;
@@ -611,11 +708,33 @@ export function ScribbleGame({
           void endRound("correct", word, { myScore, theirScore });
         } else {
           setState((s) => ({ ...s, lastWrong: p.text }));
+          setGuessLog((prev) => [
+            ...prev,
+            {
+              id: `${Date.now()}-bad`,
+              fromId,
+              text: p.text,
+              ok: false,
+              at: Date.now(),
+            },
+          ]);
           void sendMsg({ type: "wrong", matchId: matchIdRef.current, text: p.text });
         }
       } else if (p.type === "wrong") {
+        // Guesser already logged on submit; drawer never receives wrong.
         setState((s) => ({ ...s, lastWrong: p.text }));
       } else if (p.type === "correct") {
+        // Mark our last guess as correct if we were the guesser.
+        setGuessLog((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i--) {
+            if (next[i]!.fromId === myId && !next[i]!.ok) {
+              next[i] = { ...next[i]!, ok: true, text: p.word || next[i]!.text };
+              break;
+            }
+          }
+          return next;
+        });
         // Scores in payload are from the drawer's perspective.
         const iAmDrawer = stateRef.current.drawerId === myId;
         const myScore = iAmDrawer ? p.myScore : p.theirScore;
@@ -730,21 +849,40 @@ export function ScribbleGame({
 
   function acceptInvite() {
     if (!inboundInvite) return;
+    const existing = getScribbleSession();
+    const sameMatch = existing && existing.matchId === inboundInvite.matchId;
     setOpponent(inboundInvite.from);
     setMatchId(inboundInvite.matchId);
     setIAmInviter(false);
     setMpPhase("playing");
     setInboundInvite(null);
-    const fresh = newScribbleState();
-    setState(fresh);
-    persist({
-      mpPhase: "playing",
-      matchId: inboundInvite.matchId,
-      opponent: inboundInvite.from,
-      iAmInviter: false,
-      state: fresh,
-      inboundInvite: null,
-    });
+    // Keep a round_start that may have landed before accept finished.
+    if (
+      sameMatch &&
+      (existing.state.drawerId || existing.state.phase === "drawing")
+    ) {
+      setState(existing.state);
+      persist({
+        mpPhase: "playing",
+        matchId: inboundInvite.matchId,
+        opponent: inboundInvite.from,
+        iAmInviter: false,
+        state: existing.state,
+        inboundInvite: null,
+      });
+    } else {
+      const fresh = newScribbleState();
+      setState(fresh);
+      setWaitingNextRound(true);
+      persist({
+        mpPhase: "playing",
+        matchId: inboundInvite.matchId,
+        opponent: inboundInvite.from,
+        iAmInviter: false,
+        state: fresh,
+        inboundInvite: null,
+      });
+    }
     void sendMsg({ type: "accept", matchId: inboundInvite.matchId });
   }
 
@@ -830,13 +968,32 @@ export function ScribbleGame({
     if (!iAmGuesser || !guessText.trim()) return;
     const text = guessText.trim();
     setGuessText("");
+    setGuessLog((prev) => [
+      ...prev,
+      {
+        id: `${Date.now()}-me`,
+        fromId: myId,
+        text,
+        ok: false,
+        at: Date.now(),
+      },
+    ]);
     await sendMsg({ type: "guess", matchId: matchIdRef.current, text });
   }
+
+  useEffect(() => {
+    const el = guessLogRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [guessLog]);
 
   async function rematch() {
     if (!opponent) return;
     const fresh = newScribbleState();
     setState(fresh);
+    setGuessLog([]);
+    setWaitingNextRound(false);
+    stopRoundRetry();
     setMpPhase("playing");
     setIAmInviter((v) => !v);
     clearCanvasLocal();
@@ -906,120 +1063,232 @@ export function ScribbleGame({
       )}
 
       {(mpPhase === "playing" || mpPhase === "done") && (
-        <Box sx={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, gap: 1.5 }}>
-          <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
-            <Typography variant="body2" color="text.secondary">
-              Round {state.round || "—"} ·{" "}
-              {state.phase === "drawing"
-                ? iAmDrawer
-                  ? "You draw"
-                  : `${opponent?.display_name || "They"} draw`
-                : state.phase === "round_over"
-                  ? "Round over"
-                  : state.phase === "match_over"
-                    ? "Match over"
-                    : "Get ready"}
-            </Typography>
-            {secondsLeft != null && state.phase === "drawing" && (
-              <Chip
-                size="small"
-                label={`${secondsLeft}s`}
-                color={secondsLeft <= 10 ? "error" : "default"}
-              />
-            )}
-            {iAmDrawer && state.word && (
-              <Chip size="small" color="secondary" label={`Word: ${state.word}`} />
-            )}
-            {state.revealedWord && (
-              <Chip size="small" label={`It was: ${state.revealedWord}`} />
-            )}
-            {state.lastWrong && iAmGuesser && (
-              <Typography variant="caption" color="error.main">
-                “{state.lastWrong}” — wrong
+        <Box
+          sx={{
+            flex: 1,
+            display: "flex",
+            flexDirection: { xs: "column", md: "row" },
+            minHeight: 0,
+            gap: 1.5,
+          }}
+        >
+          <Box
+            sx={{
+              flex: { xs: "1 1 auto", md: "1 1 70%" },
+              display: "flex",
+              flexDirection: "column",
+              minWidth: 0,
+              minHeight: 0,
+              gap: 1.5,
+            }}
+          >
+            <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
+              <Typography variant="body2" color="text.secondary">
+                Round {state.round || "—"} ·{" "}
+                {waitingNextRound && state.phase !== "drawing" && state.phase !== "match_over"
+                  ? "Next round…"
+                  : state.phase === "drawing"
+                    ? iAmDrawer
+                      ? "You draw"
+                      : `${opponent?.display_name || "They"} draw`
+                    : state.phase === "round_over"
+                      ? "Round over"
+                      : state.phase === "match_over"
+                        ? "Match over"
+                        : waitingNextRound
+                          ? "Next round…"
+                          : "Get ready"}
               </Typography>
-            )}
-          </Stack>
+              {secondsLeft != null && state.phase === "drawing" && (
+                <Chip
+                  size="small"
+                  label={`${secondsLeft}s`}
+                  color={secondsLeft <= 10 ? "error" : "default"}
+                />
+              )}
+              {iAmDrawer && state.word && (
+                <Chip size="small" color="secondary" label={`Word: ${state.word}`} />
+              )}
+              {state.revealedWord && (
+                <Chip size="small" label={`It was: ${state.revealedWord}`} />
+              )}
+            </Stack>
 
-          <Box sx={{ flex: 1, minHeight: 280 }}>
-            <ScribbleCanvas
-              canDraw={iAmDrawer}
-              color={color}
-              width={penWidth}
-              clearTick={clearTick}
-              undoTick={undoTick}
-              onStrokeBatch={onStrokeBatch}
-              onUndo={onUndoLocal}
-              onClear={() => {}}
-              inboundRef={canvasInboundRef}
-            />
+            {waitingNextRound && !state.drawerId && state.phase !== "match_over" && (
+              <Alert severity="info" sx={{ py: 0.5 }}>
+                Next round… waiting for the drawer to start.
+              </Alert>
+            )}
+
+            <Box sx={{ flex: 1, minHeight: 240 }}>
+              <ScribbleCanvas
+                canDraw={iAmDrawer}
+                color={color}
+                width={penWidth}
+                clearTick={clearTick}
+                undoTick={undoTick}
+                onStrokeBatch={onStrokeBatch}
+                onUndo={onUndoLocal}
+                onClear={() => {}}
+                inboundRef={canvasInboundRef}
+              />
+            </Box>
+
+            {iAmDrawer && (
+              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                {SCRIBBLE_COLORS.map((c) => (
+                  <Box
+                    key={c}
+                    onClick={() => setColor(c)}
+                    sx={{
+                      width: 22,
+                      height: 22,
+                      borderRadius: "50%",
+                      bgcolor: c,
+                      border: color === c ? "2px solid" : "1px solid",
+                      borderColor: color === c ? "primary.main" : "divider",
+                      cursor: "pointer",
+                      boxShadow: c === "#FFFFFF" ? "inset 0 0 0 1px #ccc" : undefined,
+                    }}
+                  />
+                ))}
+                {SCRIBBLE_WIDTHS.map((w) => (
+                  <Chip
+                    key={w}
+                    size="small"
+                    label={`${w}px`}
+                    color={penWidth === w ? "primary" : "default"}
+                    onClick={() => setPenWidth(w)}
+                  />
+                ))}
+                <IconButton
+                  size="small"
+                  aria-label="Undo"
+                  onClick={() => setUndoTick((n) => n + 1)}
+                >
+                  <UndoIcon fontSize="small" />
+                </IconButton>
+                <IconButton size="small" aria-label="Clear" onClick={() => void clearBoard()}>
+                  <DeleteOutlineIcon fontSize="small" />
+                </IconButton>
+              </Stack>
+            )}
+
+            {mpPhase === "done" && (
+              <Stack direction="row" spacing={1}>
+                <Button variant="contained" onClick={() => void rematch()}>
+                  Rematch
+                </Button>
+                <Button onClick={() => void handleBack()}>Leave</Button>
+              </Stack>
+            )}
           </Box>
 
-          {iAmDrawer && (
-            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-              {SCRIBBLE_COLORS.map((c) => (
-                <Box
-                  key={c}
-                  onClick={() => setColor(c)}
-                  sx={{
-                    width: 22,
-                    height: 22,
-                    borderRadius: "50%",
-                    bgcolor: c,
-                    border: color === c ? "2px solid" : "1px solid",
-                    borderColor: color === c ? "primary.main" : "divider",
-                    cursor: "pointer",
-                    boxShadow: c === "#FFFFFF" ? "inset 0 0 0 1px #ccc" : undefined,
-                  }}
-                />
-              ))}
-              {SCRIBBLE_WIDTHS.map((w) => (
-                <Chip
-                  key={w}
-                  size="small"
-                  label={`${w}px`}
-                  color={penWidth === w ? "primary" : "default"}
-                  onClick={() => setPenWidth(w)}
-                />
-              ))}
-              <IconButton
-                size="small"
-                aria-label="Undo"
-                onClick={() => setUndoTick((n) => n + 1)}
-              >
-                <UndoIcon fontSize="small" />
-              </IconButton>
-              <IconButton size="small" aria-label="Clear" onClick={() => void clearBoard()}>
-                <DeleteOutlineIcon fontSize="small" />
-              </IconButton>
-            </Stack>
-          )}
-
-          {iAmGuesser && (
-            <Stack direction="row" spacing={1}>
-              <TextField
-                size="small"
-                fullWidth
-                placeholder="Type your guess…"
-                value={guessText}
-                onChange={(e) => setGuessText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void submitGuess();
-                }}
-              />
-              <Button variant="contained" onClick={() => void submitGuess()}>
-                Guess
-              </Button>
-            </Stack>
-          )}
-
-          {mpPhase === "done" && (
-            <Stack direction="row" spacing={1}>
-              <Button variant="contained" onClick={() => void rematch()}>
-                Rematch
-              </Button>
-              <Button onClick={() => void handleBack()}>Leave</Button>
-            </Stack>
-          )}
+          <Box
+            sx={{
+              flex: { xs: "0 0 auto", md: "0 0 280px" },
+              width: { xs: "100%", md: 280 },
+              display: "flex",
+              flexDirection: "column",
+              minHeight: { xs: 200, md: 0 },
+              border: 1,
+              borderColor: "divider",
+              borderRadius: 1,
+              overflow: "hidden",
+              bgcolor: "background.paper",
+            }}
+          >
+            <Box
+              sx={{
+                px: 1.5,
+                py: 1,
+                borderBottom: 1,
+                borderColor: "divider",
+              }}
+            >
+              <Typography variant="subtitle2" fontWeight={700}>
+                Guesses
+              </Typography>
+            </Box>
+            <Box
+              ref={guessLogRef}
+              sx={{
+                flex: 1,
+                overflowY: "auto",
+                px: 1.5,
+                py: 1,
+                minHeight: 0,
+              }}
+            >
+              {guessLog.length === 0 ? (
+                <Typography variant="caption" color="text.secondary">
+                  {state.phase === "drawing"
+                    ? "No guesses yet."
+                    : waitingNextRound
+                      ? "Waiting for next round…"
+                      : "Guesses appear here."}
+                </Typography>
+              ) : (
+                <Stack spacing={0.75}>
+                  {guessLog.map((g) => {
+                    const who =
+                      g.fromId === myId
+                        ? "You"
+                        : opponent?.display_name || "Peer";
+                    return (
+                      <Box key={g.id}>
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            display: "block",
+                            color: g.ok ? "success.main" : "text.secondary",
+                            fontWeight: g.ok ? 700 : 400,
+                          }}
+                        >
+                          {who}: “{g.text}”
+                          {g.ok ? " ✓" : ""}
+                        </Typography>
+                      </Box>
+                    );
+                  })}
+                </Stack>
+              )}
+            </Box>
+            <Box
+              sx={{
+                px: 1.5,
+                py: 1,
+                borderTop: 1,
+                borderColor: "divider",
+              }}
+            >
+              {iAmGuesser ? (
+                <Stack direction="row" spacing={1}>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    placeholder="Type your guess…"
+                    value={guessText}
+                    onChange={(e) => setGuessText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void submitGuess();
+                    }}
+                  />
+                  <Button variant="contained" onClick={() => void submitGuess()}>
+                    Send
+                  </Button>
+                </Stack>
+              ) : (
+                <Typography variant="caption" color="text.secondary">
+                  {iAmDrawer
+                    ? "You’re drawing — wait for guesses"
+                    : waitingNextRound
+                      ? "Next round…"
+                      : "Guesses will show here"}
+                </Typography>
+              )}
+            </Box>
+          </Box>
         </Box>
       )}
 

@@ -69,6 +69,7 @@ export type TttMsg =
   /** Inviter withdrew the invite (deleted card / left Games while waiting). */
   | { type: "cancel"; matchId: string }
   | { type: "move"; matchId: string; index: number; boardAfter: Board }
-  | { type: "rematch"; matchId: string }
+  /** Absolute roles after rematch — avoids double-swap when both click Rematch. */
+  | { type: "rematch"; matchId: string; senderRole?: "X" | "O" }
   | { type: "resign"; matchId: string }
   | { type: "result"; matchId: string; winnerId: string | null };

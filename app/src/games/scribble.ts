@@ -40,6 +40,10 @@ export type ScribbleMsg =
       drawerId: string;
       timerSec: number;
     }
+  /** Guesser confirms round_start arrived (drawer stops retrying). */
+  | { type: "round_ack"; matchId: string; round: number }
+  /** Guesser asks drawer to re-send the current round_start. */
+  | { type: "round_query"; matchId: string }
   | { type: "guess"; matchId: string; text: string }
   | { type: "wrong"; matchId: string; text: string }
   | {
